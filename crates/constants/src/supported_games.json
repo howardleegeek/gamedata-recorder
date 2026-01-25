@@ -298,7 +298,8 @@
     "url": "https://store.steampowered.com/app/2096610/Crysis_3_Remastered/",
     "binaries": [
       "crysis3",
-      "crysis3remastered"
+      "crysis3remastered",
+      "crysis3remastered.exe"
     ]
   },
   {
