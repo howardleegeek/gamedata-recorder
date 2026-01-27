@@ -1,5 +1,10 @@
 # Usage Guide
 
+> [!CAUTION]
+> **PUBLIC SUBMISSIONS ARE CLOSED.** We are not accepting new data submissions and will not pay for recordings. Our backend rejects submissions from users without a pre-established agreement. The guidelines below are for existing data collection partners only.
+>
+> Any public information indicating that we pay for submissions is out of date; if you can, we'd appreciate you letting the source know that the program has ended.
+
 Follow these guidelines. You must be 18 or older!
 
 ❌ Cutscenes or menus. We need input data, not movies.<br>
@@ -22,7 +27,6 @@ Follow these guidelines. You must be 18 or older!
 > [!IMPORTANT]
 >
 > - Singleplayer game recordings are preferred but multiplayer games are permitted.
-> - We buy games from `Top-priority` for veteran contributors.
 > - We don't capture your microphone or anything outside the active game.
 > - MSI Afterburner or similar stats programs should be disabled and substituted with [Steam Overlay stats](https://help.steampowered.com/en/faqs/view/3462-CD4C-36BD5767)
 > - **Playing PvP games with anticheat is at your own risk.** Our key recording may trip anticheat systems, potentially resulting in bans or other penalties.
@@ -36,7 +40,6 @@ Follow these guidelines. You must be 18 or older!
 > - Tampering with our software system.<br>
 > - Attempting to record pirated gameplay.<br>
 
-Questions? Chat in the [Discord #owl-control channel](https://discord.gg/ZgCWTGYf4E)!<br>
 
 ## The Vibe
 

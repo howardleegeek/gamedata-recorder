@@ -11,22 +11,31 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 </div>
+
+> [!CAUTION]
+> **PUBLIC SUBMISSIONS ARE CLOSED.** We are not accepting new data submissions and will not pay for recordings. Our backend rejects submissions from users without a pre-established agreement. The setup instructions below are for existing data collection partners only.
+>
+> Any public information indicating that we pay for submissions is out of date; if you can, we'd appreciate you letting the source know that the program has ended.
+
 OWL Control is a high-performance Windows app that captures control data from games. These datasets are fundamental to training world models that power sophisticated robots and simulations.
 
 ## About
 
 We carefully log keyboard, mouse and gamepad inputs from the active game to a file synced with a mini video of the game. No other windows or control input is recorded. Any other window or input - including any microphone or camera - is not captured.
 
-OWL Control is fully open-source, so anyone can verify its inner workings by reading the code or feeding this page's link to your favorite AI language model. The software is developed and enriched by a vibrant [community on Discord](https://discord.gg/ZgCWTGYf4E), and anyone is allowed to [contribute to the project](./CONTRIBUTING.md)
+OWL Control is fully open-source, so anyone can verify its inner workings by reading the code or feeding this page's link to your favorite AI language model. Anyone is allowed to [contribute to the project](./CONTRIBUTING.md)
 
 ## System Requirements
 
 - Windows device capable of running games at 60 FPS.
 - Keyboard, mouse, trackball, trackpad, Wired/Wireless XBOX or Wired PS5 gamepads. PS4 controllers may be used with DS4Windows.
 - A reliable internet connection. Uploading may take a long time.
-- Computer games! We provide [eligible games](./GAMES.md) to veteran players!
+- Computer games! See the [eligible games list](./GAMES.md).
 
 ## Setup
+
+> [!NOTE]
+> The following setup steps are only relevant if you have a pre-existing data collection agreement with Overworld. Public submissions are not accepted.
 
 Watch the [Walkthrough Video](https://vimeo.com/1134400699) or follow the steps below:
 
@@ -54,7 +63,7 @@ Watch the [Walkthrough Video](https://vimeo.com/1134400699) or follow the steps 
   - If your game runs slowly while recording, lower settings in `Video Encoder`, or lower the game detail or resolution.
 - Recordings will be tracked in the app. Recordings ready to be uploaded are marked in yellow.
 - Recordings may be too short or not have enough activity to submit. These recordings are marked with red and tagged invalid.
-  - A message why they can't be accepted will appear. This information can be useful to share in [our Discord server](https://discord.gg/ZgCWTGYf4E).
+  - A message why they can't be accepted will appear.
 - You can review your recordings by clicking its number. A window will open showing the folder contents.
   - Non-video files in this folder can be opened in Notepad or other text editors.
   - Location of the entire recordings folder can be changed with the `Move` button to the right of `Upload Manager`
@@ -69,11 +78,11 @@ Software known to interfere with OWL Control:
 - RivaTuner Statistics Server - Often installed with MSI Afterburner. Sometimes causes conflicts.
 - Antivirus Software - OWL Control is NOT malware. If you experience problems, you are safe to lower antivirus on OWL Control while problem solving.
 
-If you run into other difficulties, write down what happened and take screenshots using [Windows' snipper tool](https://support.microsoft.com/en-us/windows/use-snipping-tool-to-capture-screenshots-00246869-1843-655f-f220-97299b865f6b), then [speak to us on our Discord server](https://discord.gg/ZgCWTGYf4E) or [open an issue on GitHub](https://github.com/Wayfarer-Labs/owl-control/issues).
+If you run into other difficulties, write down what happened and take screenshots using [Windows' snipper tool](https://support.microsoft.com/en-us/windows/use-snipping-tool-to-capture-screenshots-00246869-1843-655f-f220-97299b865f6b), then [open an issue on GitHub](https://github.com/Overworldai/owl-control/issues).
 
 > [!NOTE]
 >
-> You may get an `.invalid` recording that is marked as Too Long, is longer than 10 minutes, or larger than 150-200MB. If this happens, Please [speak to us on our Discord server](https://discord.gg/ZgCWTGYf4E) or [open an issue on GitHub](https://github.com/Wayfarer-Labs/owl-control/issues).
+> You may get an `.invalid` recording that is marked as Too Long, is longer than 10 minutes, or larger than 150-200MB. If this happens, please [open an issue on GitHub](https://github.com/Overworldai/owl-control/issues).
 
 ## Contributing to AI Research
 

@@ -164,5 +164,4 @@ After creating a release candidate:
 
 If you have any questions or need help, feel free to:
 
-- Open an issue on [GitHub Issues](https://github.com/Wayfarer-Labs/owl-control/issues)
-- Join the discussion in the Discord server
+- Open an issue on [GitHub Issues](https://github.com/Overworldai/owl-control/issues)
