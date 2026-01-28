@@ -67,8 +67,6 @@ We will not be adding any additional games to this list until the end of 2025. H
 - [Blair Witch](https://store.steampowered.com/app/1092660/Blair_Witch/)
 - [Call of Duty: Advanced Warfare](https://store.steampowered.com/app/209650/Call_of_Duty_Advanced_Warfare)
 - [Call of Duty: Infinite Warfare](https://store.steampowered.com/app/292730/Call_of_Duty_Infinite_Warfare/)
-- [Call of Duty: Modern Warfare (2019)](https://store.steampowered.com/app/2000950/Call_of_Duty_Modern_Warfare/)
-- [Call of Duty: Modern Warfare III (2023)](https://store.steampowered.com/app/3595270/Call_of_Duty_Modern_Warfare_III/)
 - [Call of Duty: Vanguard](https://store.steampowered.com/app/1985820/Call_of_Duty_Vanguard/)
 - [Call of Duty: WWII](https://store.steampowered.com/app/476600/Call_of_Duty_WWII/)
 - [Close to the Sun](https://store.steampowered.com/app/968870/Close_to_the_Sun/)

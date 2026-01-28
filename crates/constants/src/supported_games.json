@@ -45,16 +45,6 @@
     "binaries": ["iw7_ship"]
   },
   {
-    "game": "Call of Duty: Modern Warfare (2019)",
-    "url": "https://store.steampowered.com/app/2000950/Call_of_Duty_Modern_Warfare/",
-    "binaries": ["modernwarfare"]
-  },
-  {
-    "game": "Call of Duty: Modern Warfare III (2023)",
-    "url": "https://store.steampowered.com/app/3595270/Call_of_Duty_Modern_Warfare_III/",
-    "binaries": ["cod23-cod", "sp23-cod"]
-  },
-  {
     "game": "Call of Duty: Vanguard",
     "url": "https://store.steampowered.com/app/1985820/Call_of_Duty_Vanguard/",
     "binaries": ["vanguard"]
