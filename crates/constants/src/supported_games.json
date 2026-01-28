@@ -187,7 +187,11 @@
   {
     "game": "Ready or Not",
     "url": "https://store.steampowered.com/app/1144200/Ready_or_Not/",
-    "binaries": ["readyornot", "readyornotsteam-win64-shipping"]
+    "binaries": [
+      "readyornot",
+      "readyornotsteam-win64-shipping",
+      "readyornotxboxpc-wingdk-shipping"
+    ]
   },
   {
     "game": "Riven",
