@@ -23,7 +23,9 @@ use std::{
 
 use color_eyre::{Result, eyre::Context};
 
-use constants::{GH_ORG, GH_REPO, MAX_FOOTAGE, MAX_IDLE_DURATION, supported_games::SupportedGames};
+use constants::{
+    GH_ORG, GH_REPO, MAX_FOOTAGE, MAX_IDLE_DURATION, unsupported_games::UnsupportedGames,
+};
 use game_process::does_process_exist;
 use input_capture::{Event, InputCapture};
 use rodio::{Decoder, Sink, Source};
@@ -255,14 +257,13 @@ async fn main(
                     AsyncRequest::OpenFolder(path) => {
                         opener::open(&path).ok();
                     }
-                    AsyncRequest::UpdateSupportedGames(new_games) => {
-                        let mut supported_games = app_state.supported_games.write().unwrap();
-                        let old_game_count = supported_games.games.len();
-                        *supported_games = new_games;
+                    AsyncRequest::UpdateUnsupportedGames(new_games) => {
+                        let mut unsupported_games = app_state.unsupported_games.write().unwrap();
+                        let old_game_count = unsupported_games.games.len();
+                        *unsupported_games = new_games;
                         tracing::info!(
-                            "Updated supported games: {old_game_count} -> {} total, {} installed",
-                            supported_games.games.len(),
-                            supported_games.installed().count()
+                            "Updated unsupported games: {old_game_count} -> {} total",
+                            unsupported_games.games.len(),
                         );
                     }
                     AsyncRequest::LoadUploadStats => {
@@ -657,7 +658,14 @@ async fn main(
                     tracing::error!(e=?e, "Failed to flush input events");
                 }
                 // Check foregrounded game
-                *app_state.last_foregrounded_game.write().unwrap() = get_foregrounded_game(&app_state.supported_games.read().unwrap(), &state.recorder);
+                let foregrounded = get_foregrounded_game(&app_state.unsupported_games.read().unwrap(), &state.recorder);
+                if let Some(ref fg) = foregrounded
+                    && fg.is_recordable()
+                    && fg.exe_name.is_some()
+                {
+                    *app_state.last_recordable_game.write().unwrap() = fg.exe_name.clone();
+                }
+                *app_state.last_foregrounded_game.write().unwrap() = foregrounded;
                 // Tick state machine
                 state.tick().await;
                 // Periodically force the UI to rerender so that it will process events, even if not visible
@@ -877,11 +885,11 @@ impl State {
             (RecordingState::Idle | RecordingState::Paused { .. }, RecordingState::Recording) => {
                 // Start recording from Idle or Paused state
                 let honk = self.app_state.config.read().unwrap().preferences.honk;
-                let supported_games = self.app_state.supported_games.read().unwrap().clone();
+                let unsupported_games = self.app_state.unsupported_games.read().unwrap().clone();
                 start_recording_safely(
                     &mut self.recorder,
                     &self.input_capture,
-                    &supported_games,
+                    &unsupported_games,
                     Some((&self.sink, honk, &self.app_state)),
                     &mut self.cue_cache,
                 )
@@ -993,7 +1001,7 @@ impl State {
                 // Restart the currently active recording
                 // Here we intentionally set honk to false, we don't want audio cue to occur
                 // on an intended recording restart and confuse the user
-                let supported_games = self.app_state.supported_games.read().unwrap().clone();
+                let unsupported_games = self.app_state.unsupported_games.read().unwrap().clone();
                 stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
@@ -1004,7 +1012,7 @@ impl State {
                 start_recording_safely(
                     &mut self.recorder,
                     &self.input_capture,
-                    &supported_games,
+                    &unsupported_games,
                     Some((&self.sink, false, &self.app_state)),
                     &mut self.cue_cache,
                 )
@@ -1069,11 +1077,11 @@ impl State {
 async fn start_recording_safely(
     recorder: &mut Recorder,
     input_capture: &InputCapture,
-    supported_games: &SupportedGames,
+    unsupported_games: &UnsupportedGames,
     notification_state: Option<(&Sink, bool, &AppState)>,
     cue_cache: &mut HashMap<String, Vec<u8>>,
 ) -> Result<()> {
-    if let Err(e) = recorder.start(input_capture, supported_games).await {
+    if let Err(e) = recorder.start(input_capture, unsupported_games).await {
         tracing::error!(e=?e, "Failed to start recording");
         error_message_box(&e.to_string());
         recorder.stop(input_capture).await.ok();
@@ -1194,21 +1202,19 @@ fn is_window_focused(hwnd: HWND) -> bool {
 }
 
 fn get_foregrounded_game(
-    supported_games: &SupportedGames,
+    unsupported_games: &UnsupportedGames,
     recorder: &Recorder,
 ) -> Option<ForegroundedGame> {
     let (exe_name, _, hwnd) = crate::record::get_foregrounded_game().ok().flatten()?;
 
-    // Check if game is supported
     let exe_without_ext = std::path::Path::new(&exe_name)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(&exe_name)
         .to_lowercase();
 
-    let supported_game = supported_games.get(&exe_without_ext.clone());
-    let unsupported_reason = if supported_game.is_none() {
-        Some("Not on the games list.".to_string())
+    let unsupported_reason = if let Some(unsupported) = unsupported_games.get(&exe_without_ext) {
+        Some(unsupported.reason.to_string())
     } else if !recorder.is_window_capturable(hwnd) {
         Some(
             "Recorder cannot capture this window. Try running OWL Control in admin mode."
@@ -1350,20 +1356,20 @@ async fn move_recordings_folder(app_state: Arc<AppState>, from: PathBuf, to: Pat
 
 async fn startup_requests(app_state: Arc<AppState>) {
     if cfg!(debug_assertions) {
-        tracing::info!("Skipping fetch of supported games in dev/debug build");
+        tracing::info!("Skipping fetch of unsupported games in dev/debug build");
     } else {
         tokio::spawn({
             let async_request_tx = app_state.async_request_tx.clone();
             async move {
-                match get_supported_games().await {
+                match get_unsupported_games().await {
                     Ok(games) => {
                         async_request_tx
-                            .send(AsyncRequest::UpdateSupportedGames(games))
+                            .send(AsyncRequest::UpdateUnsupportedGames(games))
                             .await
                             .ok();
                     }
                     Err(e) => {
-                        tracing::error!(e=?e, "Failed to get supported games from GitHub");
+                        tracing::error!(e=?e, "Failed to get unsupported games from GitHub");
                     }
                 }
             }
@@ -1377,20 +1383,15 @@ async fn startup_requests(app_state: Arc<AppState>) {
     });
 }
 
-async fn get_supported_games() -> Result<SupportedGames> {
-    let text = reqwest::get(format!("https://raw.githubusercontent.com/{GH_ORG}/{GH_REPO}/refs/heads/main/crates/constants/src/supported_games.json"))
+async fn get_unsupported_games() -> Result<UnsupportedGames> {
+    let text = reqwest::get(format!("https://raw.githubusercontent.com/{GH_ORG}/{GH_REPO}/refs/heads/main/crates/constants/src/unsupported_games.json"))
         .await
-        .context("Failed to request supported games from GitHub")?
+        .context("Failed to request unsupported games from GitHub")?
         .text()
         .await
-        .context("Failed to get text of supported games from GitHub")?;
+        .context("Failed to get text of unsupported games from GitHub")?;
 
-    // Use spawn_blocking since load_from_str now does Steam detection (blocking I/O)
-    tokio::task::spawn_blocking(move || {
-        SupportedGames::load_from_str(&text).context("Failed to parse supported games from GitHub")
-    })
-    .await
-    .unwrap()
+    UnsupportedGames::load_from_str(&text).context("Failed to parse unsupported games from GitHub")
 }
 
 async fn check_for_updates(app_state: Arc<AppState>) -> Result<()> {

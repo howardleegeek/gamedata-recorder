@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use constants::{encoding::VideoEncoderType, supported_games::SupportedGames};
+use constants::{encoding::VideoEncoderType, unsupported_games::UnsupportedGames};
 use egui_wgpu::wgpu;
 use tokio::sync::{broadcast, mpsc};
 
@@ -33,7 +33,10 @@ pub struct AppState {
     pub is_out_of_date: AtomicBool,
     pub play_time_state: RwLock<PlayTimeTracker>,
     pub last_foregrounded_game: RwLock<Option<ForegroundedGame>>,
-    pub supported_games: RwLock<SupportedGames>,
+    /// The exe name (e.g. "game.exe") of the last application that was recognised as recordable.
+    /// Used by the games settings UI to offer per-game configuration.
+    pub last_recordable_game: RwLock<Option<String>>,
+    pub unsupported_games: RwLock<UnsupportedGames>,
     /// Offline mode state
     pub offline: OfflineState,
 }
@@ -83,7 +86,8 @@ impl AppState {
             is_out_of_date: AtomicBool::new(false),
             play_time_state: RwLock::new(PlayTimeTracker::load()),
             last_foregrounded_game: RwLock::new(None),
-            supported_games: RwLock::new(SupportedGames::load_from_embedded()),
+            last_recordable_game: RwLock::new(None),
+            unsupported_games: RwLock::new(UnsupportedGames::load_from_embedded()),
             offline: OfflineState::default(),
         };
         tracing::debug!("AppState::new() complete");
@@ -166,7 +170,7 @@ pub enum AsyncRequest {
     PauseUpload,
     OpenDataDump,
     OpenLog,
-    UpdateSupportedGames(SupportedGames),
+    UpdateUnsupportedGames(UnsupportedGames),
     LoadUploadStats,
     LoadLocalRecordings,
     DeleteAllInvalidRecordings,

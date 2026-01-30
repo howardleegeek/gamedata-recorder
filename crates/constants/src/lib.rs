@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 pub mod encoding;
-pub mod supported_games;
+pub mod unsupported_games;
 
 pub const FPS: u32 = 60;
 pub const RECORDING_WIDTH: u32 = 1280;

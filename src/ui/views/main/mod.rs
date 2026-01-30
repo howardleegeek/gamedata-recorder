@@ -187,12 +187,16 @@ impl App {
         );
 
         // Games Window
-        windows::games::window(
-            ctx,
-            &mut self.main_view_state.games_window,
-            &self.app_state.supported_games.read().unwrap(),
-            &mut self.local_preferences,
-        );
+        {
+            let last_recordable = self.app_state.last_recordable_game.read().unwrap().clone();
+            windows::games::window(
+                ctx,
+                &mut self.main_view_state.games_window,
+                &self.app_state.unsupported_games.read().unwrap(),
+                &mut self.local_preferences,
+                last_recordable.as_deref(),
+            );
+        }
     }
 }
 
