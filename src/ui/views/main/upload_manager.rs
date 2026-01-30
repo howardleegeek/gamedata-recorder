@@ -814,7 +814,7 @@ fn recordings_view(
                 ui.horizontal(|ui| {
                     let total_pages =
                         (stats.total_uploads as f32 / recordings.limit as f32).ceil() as u32;
-                    let current_page = (recordings.offset / recordings.limit) + 1;
+                    let current_page = (recordings.offset / recordings.limit.max(1)) + 1;
 
                     ui.add_enabled_ui(recordings.offset > 0, |ui| {
                         if ui.button("Previous").clicked() {
