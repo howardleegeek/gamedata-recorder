@@ -221,7 +221,7 @@ pub async fn upload_folder(
         // Ensure we save initial progress so that the chunk-completion-recorder has something to work with
         paused
             .save_upload_progress()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         paused
     };
 
