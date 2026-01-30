@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 pub mod encoding;
-pub mod supported_games;
+pub mod unsupported_games;
 
 pub const FPS: u32 = 60;
 pub const RECORDING_WIDTH: u32 = 1280;
@@ -58,7 +58,7 @@ pub const PLAY_TIME_SAVE_INTERVAL: Duration = if PLAY_TIME_TESTING {
 };
 
 /// GitHub organization
-pub const GH_ORG: &str = "Wayfarer-Labs";
+pub const GH_ORG: &str = "Overworldai";
 /// GitHub repository
 pub const GH_REPO: &str = "owl-control";
 

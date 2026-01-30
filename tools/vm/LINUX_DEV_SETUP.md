@@ -18,7 +18,7 @@ The setup process involves:
 ## Quick Start
 
 ```bash
-git clone https://github.com/Wayfarer-Labs/owl-control.git
+git clone https://github.com/Overworldai/owl-control.git
 cd owl-control/tools/vm
 ./owl-dev-setup.sh
 ```
@@ -39,7 +39,7 @@ Select option 1 to install prerequisites, then follow the detailed steps below f
 Clone the repository and run the setup script:
 
 ```bash
-git clone https://github.com/Wayfarer-Labs/owl-control.git
+git clone https://github.com/Overworldai/owl-control.git
 cd owl-control/tools/vm
 ./owl-dev-setup.sh
 ```
@@ -548,6 +548,5 @@ egrep -c '(vmx|svm)' /proc/cpuinfo
 
 If you encounter issues with this setup:
 
-- Open an issue on [GitHub Issues](https://github.com/Wayfarer-Labs/owl-control/issues)
-- Join the discussion in the Discord server
+- Open an issue on [GitHub Issues](https://github.com/Overworldai/owl-control/issues)
 - Tag the issue with @legume.enthusiast69

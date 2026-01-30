@@ -1,8 +1,8 @@
-# Research Study: Wayfarer Labs Interactive Game Data Pilot
+# Research Study: Overworld Interactive Game Data Pilot
 
 Principal Investigators: Louis Castricato, Shahbuland Matiana
 
-Contact: louis@wayfarerlabs.ai, shahbuland@wayfarerlabs.ai
+Contact: louis@overworld.ai, shahbuland@overworld.ai
 
 ## Purpose of Study
 
@@ -47,7 +47,7 @@ Your participation is entirely voluntary. You may:
 
 ## Questions or Concerns
 
-For questions about this research, contact shahbuland@wayfarerlabs.ai
+For questions about this research, contact shahbuland@overworld.ai
 
 ## Content Policy & Legal Terms
 
