@@ -172,9 +172,9 @@ impl Recorder {
             );
         };
 
-        let game_exe_without_extension = game_exe
-            .split('.')
-            .next()
+        let game_exe_without_extension = std::path::Path::new(&game_exe)
+            .file_stem()
+            .and_then(|s| s.to_str())
             .unwrap_or(&game_exe)
             .to_lowercase();
         if let Some(unsupported) = unsupported_games.get(&game_exe_without_extension) {
