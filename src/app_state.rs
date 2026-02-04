@@ -169,6 +169,9 @@ pub struct GitHubRelease {
     pub release_date: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Default page size for upload list queries.
+pub const UPLOAD_LIST_DEFAULT_LIMIT: u32 = 100;
+
 /// A request for some async action to happen. Response will be delivered via [`UiUpdate`].
 pub enum AsyncRequest {
     ValidateApiKey {
@@ -214,6 +217,16 @@ pub enum AsyncRequest {
     OfflineBackoffAttempt,
     /// Cancel the offline mode backoff retry loop
     CancelOfflineBackoff,
+}
+
+impl AsyncRequest {
+    /// Create a [`LoadUploadList`](Self::LoadUploadList) request with the default limit and offset 0.
+    pub fn load_upload_list_default() -> Self {
+        Self::LoadUploadList {
+            limit: UPLOAD_LIST_DEFAULT_LIMIT,
+            offset: 0,
+        }
+    }
 }
 
 /// A message sent to the UI thread, usually in response to some action taken in another thread

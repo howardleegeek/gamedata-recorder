@@ -81,10 +81,7 @@ pub async fn start(
 
     for req in [
         AsyncRequest::LoadUploadStatistics,
-        AsyncRequest::LoadUploadList {
-            limit: 100,
-            offset: 0,
-        },
+        AsyncRequest::load_upload_list_default(),
         AsyncRequest::LoadLocalRecordings,
     ] {
         app_state.async_request_tx.send(req).await.ok();
@@ -225,10 +222,7 @@ async fn run(
         if should_reload {
             for req in [
                 AsyncRequest::LoadUploadStatistics,
-                AsyncRequest::LoadUploadList {
-                    limit: 100,
-                    offset: 0,
-                },
+                AsyncRequest::load_upload_list_default(),
                 AsyncRequest::LoadLocalRecordings,
             ] {
                 async_req_tx.send(req).await.ok();

@@ -216,7 +216,7 @@ async fn main(
                                     .ok();
 
                                 app_state.async_request_tx.send(AsyncRequest::LoadUploadStatistics).await.ok();
-                                app_state.async_request_tx.send(AsyncRequest::LoadUploadList { limit: 100, offset: 0 }).await.ok();
+                                app_state.async_request_tx.send(AsyncRequest::load_upload_list_default()).await.ok();
                             }
                         }
                         // no matter if offline or online, local recordings should be loaded
@@ -547,7 +547,7 @@ async fn main(
                                 app_state.async_request_tx.send(AsyncRequest::ValidateApiKey { api_key }).await.ok();
                                 // Load data now that we're online
                                 app_state.async_request_tx.send(AsyncRequest::LoadUploadStatistics).await.ok();
-                                app_state.async_request_tx.send(AsyncRequest::LoadUploadList { limit: 100, offset: 0 }).await.ok();
+                                app_state.async_request_tx.send(AsyncRequest::load_upload_list_default()).await.ok();
                                 app_state.async_request_tx.send(AsyncRequest::LoadLocalRecordings).await.ok();
                             },
                         }

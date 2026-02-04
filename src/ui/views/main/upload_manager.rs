@@ -163,22 +163,40 @@ impl Recordings {
         self.filter_end_date
     }
 
-    pub fn set_filter_start_date(&mut self, date: Option<chrono::NaiveDate>) {
-        self.set_filter_dates(date, self.filter_end_date);
+    pub fn set_filter_start_date(&mut self, date: Option<chrono::NaiveDate>, app_state: &AppState) {
+        self.set_filter_dates(date, self.filter_end_date, app_state);
     }
 
-    pub fn set_filter_end_date(&mut self, date: Option<chrono::NaiveDate>) {
-        self.set_filter_dates(self.filter_start_date, date);
+    pub fn set_filter_end_date(&mut self, date: Option<chrono::NaiveDate>, app_state: &AppState) {
+        self.set_filter_dates(self.filter_start_date, date, app_state);
     }
 
     pub fn set_filter_dates(
         &mut self,
         start: Option<chrono::NaiveDate>,
         end: Option<chrono::NaiveDate>,
+        app_state: &AppState,
     ) {
         self.filter_start_date = start;
         self.filter_end_date = end;
         self.update_filtered_state();
+
+        // Sync to app_state so the API requests include the date filter
+        {
+            let mut filters = app_state.upload_filters.write().unwrap();
+            filters.start_date = start;
+            filters.end_date = end;
+        }
+
+        // Re-fetch from server with the updated filter
+        app_state
+            .async_request_tx
+            .blocking_send(AsyncRequest::LoadUploadStatistics)
+            .ok();
+        app_state
+            .async_request_tx
+            .blocking_send(AsyncRequest::load_upload_list_default())
+            .ok();
     }
 }
 impl Recordings {
@@ -357,18 +375,18 @@ pub fn view(
         if let Some(new_start) =
             optional_date_picker(ui, filter_start, start_date, "filter_start_date")
         {
-            recordings.set_filter_start_date(Some(new_start));
+            recordings.set_filter_start_date(Some(new_start), app_state);
         }
 
         // To date picker
         ui.label("to");
         if let Some(new_end) = optional_date_picker(ui, filter_end, end_date, "filter_end_date") {
-            recordings.set_filter_end_date(Some(new_end));
+            recordings.set_filter_end_date(Some(new_end), app_state);
         }
 
         // Clear filter button
         if (filter_start.is_some() || filter_end.is_some()) && ui.button("Reset").clicked() {
-            recordings.set_filter_dates(None, None);
+            recordings.set_filter_dates(None, None, app_state);
         }
     });
     ui.separator();
