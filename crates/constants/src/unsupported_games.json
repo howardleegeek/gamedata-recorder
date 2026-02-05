@@ -1657,11 +1657,6 @@
     "reason": "EnoughData"
   },
   {
-    "name": "Rust",
-    "binaries": ["rustclient"],
-    "reason": "EnoughData"
-  },
-  {
     "name": "S.T.A.L.K.E.R. 2: Heart of Chornobyl",
     "binaries": ["stalker2-win64-shipping"],
     "reason": "EnoughData"
