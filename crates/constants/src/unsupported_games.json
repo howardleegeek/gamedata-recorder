@@ -1875,5 +1875,17 @@
     "name": "Blacktail",
     "binaries": ["blacktail", "blacktail-win64-shipping"],
     "reason": "EnoughData"
-  }
+  },
+  {
+    "name": "CrimeCleaner",
+    "binaries": ["crimecleaner"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Spray Paint Simulator",
+    "binaries": ["spray paint simulator"],
+    "reason": "EnoughData"
+  },
+  { "name": "Raft", "binaries": ["raft"], "reason": "EnoughData" },
+  { "name": "Pandemic", "binaries": ["pandemic"], "reason": "EnoughData" }
 ]
