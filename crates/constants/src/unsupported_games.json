@@ -1883,9 +1883,36 @@
   },
   {
     "name": "Spray Paint Simulator",
-    "binaries": ["spray paint simulator"],
+    "binaries": ["spray paint simulator", "spraypaintsimulator"],
     "reason": "EnoughData"
   },
   { "name": "Raft", "binaries": ["raft"], "reason": "EnoughData" },
-  { "name": "Pandemic", "binaries": ["pandemic"], "reason": "EnoughData" }
+  { "name": "Pandemic", "binaries": ["pandemic"], "reason": "EnoughData" },
+
+  {
+    "name": "Grounded",
+    "binaries": ["Maine-WinGDK-Shipping", "Maine-Win64-Shipping"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "A Game About Digging A Hole",
+    "binaries": ["DiggingGame-WinGDK-Shipping", "DiggingGame-Win64-Shipping"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Mullet Mad Jack",
+    "binaries": ["Mullet Mad Jack"],
+    "reason": "EnoughData"
+  },
+  { "name": "Devil Daggers", "binaries": ["dd"], "reason": "EnoughData" },
+  {
+    "name": "Gamer Stop Simulator : Prologue",
+    "binaries": ["ConsoleGame-Win64-Shipping"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Motorcycle Mechanic Simulator 2021: Prologue",
+    "binaries": ["MMS21P"],
+    "reason": "EnoughData"
+  }
 ]
