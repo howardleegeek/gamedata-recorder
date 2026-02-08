@@ -1452,16 +1452,6 @@
     "reason": "EnoughData"
   },
   {
-    "name": "House Builder",
-    "binaries": ["housebuilder"],
-    "reason": "EnoughData"
-  },
-  {
-    "name": "House Builder 2",
-    "binaries": ["housebuilder2"],
-    "reason": "EnoughData"
-  },
-  {
     "name": "I Am Your Beast",
     "binaries": ["i am your beast"],
     "reason": "EnoughData"
@@ -1649,11 +1639,6 @@
   {
     "name": "Risk of Rain 2",
     "binaries": ["risk of rain 2"],
-    "reason": "EnoughData"
-  },
-  {
-    "name": "Roboquest",
-    "binaries": ["roboquest-win64-shipping"],
     "reason": "EnoughData"
   },
   {
@@ -1914,5 +1899,60 @@
     "name": "Motorcycle Mechanic Simulator 2021: Prologue",
     "binaries": ["MMS21P"],
     "reason": "EnoughData"
-  }
+  },
+  {
+    "name": "Project76_GamePass",
+    "binaries": ["Project76_GamePass.exe"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Techtonica",
+    "binaries": ["Techtonica.exe"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Call of Juarez Gunslinger",
+    "binaries": ["CoJGunslinger.exe"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "My Friendly Neighborhood",
+    "binaries": ["My Friendly Neighborhood.exe"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Chivalry 2",
+    "binaries": [
+      "Chivalry2-Win64-Shipping.exe",
+      "Chivalry2-WinGDK-Shipping.exe"
+    ],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "QZSim-WinGDK-Shipping",
+    "binaries": ["QZSim-WinGDK-Shipping.exe"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Starfield",
+    "binaries": ["Starfield.exe"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Sker Ritual",
+    "binaries": ["SkerRitual.exe"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Grounded 2",
+    "binaries": ["Grounded2-WinGDK-Shipping.exe"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Content Warning",
+    "binaries": ["Content Warning.exe"],
+    "reason": "EnoughData"
+  },
+  { "name": "Minecraft", "binaries": ["javaw.exe"], "reason": "EnoughData" },
+  { "name": "Dota 2", "binaries": ["dota2.exe"], "reason": "EnoughData" }
 ]
