@@ -11,7 +11,7 @@
   },
   {
     "name": "Minecraft",
-    "binaries": ["minecraft"],
+    "binaries": ["minecraft", "javaw"],
     "reason": "EnoughData"
   },
   {
@@ -1873,86 +1873,81 @@
   },
   { "name": "Raft", "binaries": ["raft"], "reason": "EnoughData" },
   { "name": "Pandemic", "binaries": ["pandemic"], "reason": "EnoughData" },
-
   {
     "name": "Grounded",
-    "binaries": ["Maine-WinGDK-Shipping", "Maine-Win64-Shipping"],
+    "binaries": ["maine-wingdk-shipping", "maine-win64-shipping"],
     "reason": "EnoughData"
   },
   {
     "name": "A Game About Digging A Hole",
-    "binaries": ["DiggingGame-WinGDK-Shipping", "DiggingGame-Win64-Shipping"],
+    "binaries": ["digginggame-wingdk-shipping", "digginggame-win64-shipping"],
     "reason": "EnoughData"
   },
   {
     "name": "Mullet Mad Jack",
-    "binaries": ["Mullet Mad Jack"],
+    "binaries": ["mullet mad jack"],
     "reason": "EnoughData"
   },
   { "name": "Devil Daggers", "binaries": ["dd"], "reason": "EnoughData" },
   {
     "name": "Gamer Stop Simulator : Prologue",
-    "binaries": ["ConsoleGame-Win64-Shipping"],
+    "binaries": ["consolegame-win64-shipping"],
     "reason": "EnoughData"
   },
   {
     "name": "Motorcycle Mechanic Simulator 2021: Prologue",
-    "binaries": ["MMS21P"],
+    "binaries": ["mms21p"],
     "reason": "EnoughData"
   },
   {
     "name": "Project76_GamePass",
-    "binaries": ["Project76_GamePass.exe"],
+    "binaries": ["project76_gamepass"],
     "reason": "EnoughData"
   },
   {
     "name": "Techtonica",
-    "binaries": ["Techtonica.exe"],
+    "binaries": ["techtonica"],
     "reason": "EnoughData"
   },
   {
     "name": "Call of Juarez Gunslinger",
-    "binaries": ["CoJGunslinger.exe"],
+    "binaries": ["cojgunslinger"],
     "reason": "EnoughData"
   },
   {
     "name": "My Friendly Neighborhood",
-    "binaries": ["My Friendly Neighborhood.exe"],
+    "binaries": ["my friendly neighborhood"],
     "reason": "EnoughData"
   },
   {
     "name": "Chivalry 2",
-    "binaries": [
-      "Chivalry2-Win64-Shipping.exe",
-      "Chivalry2-WinGDK-Shipping.exe"
-    ],
+    "binaries": ["chivalry2-win64-shipping", "chivalry2-wingdk-shipping"],
     "reason": "EnoughData"
   },
   {
     "name": "QZSim-WinGDK-Shipping",
-    "binaries": ["QZSim-WinGDK-Shipping.exe"],
+    "binaries": ["qzsim-wingdk-shipping"],
     "reason": "EnoughData"
   },
   {
     "name": "Starfield",
-    "binaries": ["Starfield.exe"],
+    "binaries": ["starfield"],
     "reason": "EnoughData"
   },
   {
     "name": "Sker Ritual",
-    "binaries": ["SkerRitual.exe"],
+    "binaries": ["skerritual"],
     "reason": "EnoughData"
   },
   {
     "name": "Grounded 2",
-    "binaries": ["Grounded2-WinGDK-Shipping.exe"],
+    "binaries": ["grounded2-wingdk-shipping"],
     "reason": "EnoughData"
   },
   {
     "name": "Content Warning",
-    "binaries": ["Content Warning.exe"],
+    "binaries": ["content warning"],
     "reason": "EnoughData"
   },
-  { "name": "Minecraft", "binaries": ["javaw.exe"], "reason": "EnoughData" },
-  { "name": "Dota 2", "binaries": ["dota2.exe"], "reason": "EnoughData" }
+  { "name": "Dota 2", "binaries": ["dota2"], "reason": "EnoughData" }
 ]
