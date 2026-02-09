@@ -87,6 +87,20 @@ Please update `crates/constants/src/supported_games.json` and run `cargo run --p
 - SteamDB: You can look at the depots for a game and find the `exe` files. This requires some discernment, and is hard to automate. It is the most reliable approach, however.
 - Rely on Discord's hard work, and use their list instead: <https://discord.com/api/v10/applications/detectable>
 
+## Updating the Unsupported Games List
+
+To add games to the unsupported games list using CSV exports from OWL Tube:
+
+```powershell
+python build-resources\scripts\update_unsupported_games.py path\to\games.csv
+```
+
+The CSV file should have the game name in column 2 and binaries (semicolon-separated) in column 3. The script will:
+
+- Skip games whose binaries already exist in `unsupported_games.json`
+- Add new games with `"reason": "EnoughData"`
+- Print a summary of added games
+
 ## Data Structure Changes
 
 ### Modifying Output Formats

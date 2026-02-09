@@ -1871,8 +1871,16 @@
     "binaries": ["spray paint simulator", "spraypaintsimulator"],
     "reason": "EnoughData"
   },
-  { "name": "Raft", "binaries": ["raft"], "reason": "EnoughData" },
-  { "name": "Pandemic", "binaries": ["pandemic"], "reason": "EnoughData" },
+  {
+    "name": "Raft",
+    "binaries": ["raft"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Pandemic",
+    "binaries": ["pandemic"],
+    "reason": "EnoughData"
+  },
   {
     "name": "Grounded",
     "binaries": ["maine-wingdk-shipping", "maine-win64-shipping"],
@@ -1888,7 +1896,11 @@
     "binaries": ["mullet mad jack"],
     "reason": "EnoughData"
   },
-  { "name": "Devil Daggers", "binaries": ["dd"], "reason": "EnoughData" },
+  {
+    "name": "Devil Daggers",
+    "binaries": ["dd"],
+    "reason": "EnoughData"
+  },
   {
     "name": "Gamer Stop Simulator : Prologue",
     "binaries": ["consolegame-win64-shipping"],
@@ -1949,5 +1961,69 @@
     "binaries": ["content warning"],
     "reason": "EnoughData"
   },
-  { "name": "Dota 2", "binaries": ["dota2"], "reason": "EnoughData" }
+  {
+    "name": "Dota 2",
+    "binaries": ["dota2"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "AbioticFactor-WinGDK-Shipping",
+    "binaries": ["abioticfactor-wingdk-shipping"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Blue Prince",
+    "binaries": ["blue prince"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "RoboCop-WinGDK-Shipping",
+    "binaries": ["robocop-wingdk-shipping"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Redfall",
+    "binaries": ["redfall"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "theHunter\u2122: Call of the Wild",
+    "binaries": ["thehuntercotw_f"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Sniper Ghost Warrior Contracts",
+    "binaries": ["sgwcontracts"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Layers of FearSub",
+    "binaries": ["layers of fearsub"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "Leaf it Alone",
+    "binaries": ["leaf it alone"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "FBC: Firebreak",
+    "binaries": ["fbcfirebreak"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "As Dusk Falls",
+    "binaries": ["dusk", "dusk"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "7 Days to Die",
+    "binaries": ["7daystodie"],
+    "reason": "EnoughData"
+  },
+  {
+    "name": "QZSim-Win64-Shipping",
+    "binaries": ["qzsim-win64-shipping"],
+    "reason": "EnoughData"
+  }
 ]
