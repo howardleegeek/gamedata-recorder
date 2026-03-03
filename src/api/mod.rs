@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use serde::Deserialize;
 
 mod multipart_upload;
@@ -6,7 +8,11 @@ pub use multipart_upload::*;
 mod user_upload;
 pub use user_upload::*;
 
-const API_BASE_URL: &str = "https://api.openworldlabs.ai";
+static API_BASE_URL: LazyLock<String> = LazyLock::new(|| {
+    let url = std::env::var("OWL_CONTROL_API_URL")
+        .unwrap_or_else(|_| "https://owl-control.over.world".to_string());
+    url.trim_end_matches('/').to_string()
+});
 
 #[derive(Debug)]
 pub enum ApiError {

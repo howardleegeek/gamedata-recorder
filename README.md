@@ -97,6 +97,14 @@ Scrubbed and filtered data will be made publicly available for research purposes
 
 ## For Developers
 
+### Configuration
+
+| Environment Variable | Description | Default |
+| :--- | :--- | :--- |
+| `OWL_CONTROL_API_URL` | API base URL | `https://owl-control.over.world` |
+
+To point at the dev API for testing, set `OWL_CONTROL_API_URL=https://owl-control.dev.over.world` before launching.
+
 ### OWL Control is open source!
 
 If you're interested in the technical details or want to contribute, please visit our [contributor guidelines](./CONTRIBUTING.md).
