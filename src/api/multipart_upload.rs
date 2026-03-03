@@ -111,7 +111,8 @@ impl ApiClient {
         let response = self
             .client
             .post(format!(
-                "{API_BASE_URL}/tracker/upload/game_control/multipart/init"
+                "{}/tracker/upload/game_control/multipart/init",
+                API_BASE_URL.as_str()
             ))
             .header("Content-Type", "application/json")
             .header("X-API-Key", api_key)
@@ -167,7 +168,8 @@ impl ApiClient {
         let response = self
             .client
             .post(format!(
-                "{API_BASE_URL}/tracker/upload/game_control/multipart/chunk"
+                "{}/tracker/upload/game_control/multipart/chunk",
+                API_BASE_URL.as_str()
             ))
             .header("Content-Type", "application/json")
             .header("X-API-Key", api_key)
@@ -201,7 +203,8 @@ impl ApiClient {
         let response = self
             .client
             .post(format!(
-                "{API_BASE_URL}/tracker/upload/game_control/multipart/complete"
+                "{}/tracker/upload/game_control/multipart/complete",
+                API_BASE_URL.as_str()
             ))
             .header("Content-Type", "application/json")
             .header("X-API-Key", api_key)
@@ -228,7 +231,8 @@ impl ApiClient {
         let response = self
             .client
             .delete(format!(
-                "{API_BASE_URL}/tracker/upload/game_control/multipart/abort/{upload_id}"
+                "{}/tracker/upload/game_control/multipart/abort/{upload_id}",
+                API_BASE_URL.as_str()
             ))
             .header("X-API-Key", api_key)
             .send()

@@ -109,7 +109,7 @@ impl ApiClient {
 
         // Make the API request
         let response = client
-            .get(format!("{API_BASE_URL}/api/v1/user/info"))
+            .get(format!("{}/api/v1/user/info", API_BASE_URL.as_str()))
             .header("Content-Type", "application/json")
             .header("X-API-Key", api_key)
             .send()

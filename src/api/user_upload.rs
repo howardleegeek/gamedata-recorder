@@ -69,7 +69,10 @@ impl ApiClient {
             statistics: UserUploadStatistics,
         }
 
-        let mut url = format!("{API_BASE_URL}/tracker/v2/uploads/user/{user_id}/stats");
+        let mut url = format!(
+            "{}/tracker/v2/uploads/user/{user_id}/stats",
+            API_BASE_URL.as_str()
+        );
         let mut query_params = Vec::new();
         if let Some(start) = start_date {
             query_params.push(format!("start_date={}", start.format("%Y-%m-%d")));
@@ -118,7 +121,8 @@ impl ApiClient {
         }
 
         let mut url = format!(
-            "{API_BASE_URL}/tracker/v2/uploads/user/{user_id}/list?limit={limit}&offset={offset}"
+            "{}/tracker/v2/uploads/user/{user_id}/list?limit={limit}&offset={offset}",
+            API_BASE_URL.as_str()
         );
         if let Some(start) = start_date {
             url.push_str(&format!("&start_date={}", start.format("%Y-%m-%d")));
