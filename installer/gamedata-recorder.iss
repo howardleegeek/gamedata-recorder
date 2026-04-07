@@ -2,7 +2,7 @@
 ; Builds a one-click Windows installer
 
 #define MyAppName "GameData Recorder"
-#define MyAppVersion "0.2.0"
+#define MyAppVersion "1.6.1"
 #define MyAppPublisher "GameData Labs"
 #define MyAppURL "https://gamedatalabs.com"
 #define MyAppExeName "gamedata-recorder.exe"

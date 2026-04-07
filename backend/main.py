@@ -21,11 +21,17 @@ from typing import Optional
 
 app = FastAPI(title="GameData Labs API", version="0.1.0")
 
+# CORS configuration - restrict to specific origins in production
+ALLOWED_ORIGINS = os.getenv(
+    "ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8080"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+    allow_credentials=True,
 )
 
 # --- Config ---
@@ -68,12 +74,26 @@ def list_records(collection: str) -> list[dict]:
 
 # --- Auth (MVP: simple token-based, replace with OAuth for production) ---
 
-API_SECRET = os.getenv("API_SECRET", "gamedata-dev-secret-change-me")
+# SECURITY: API_SECRET must be set in environment variable for production
+# Generate a secure secret with: openssl rand -hex 32
+API_SECRET = os.getenv("API_SECRET")
+if not API_SECRET:
+    import secrets
+    import warnings
+
+    warnings.warn(
+        "API_SECRET not set! Using a temporary random secret. "
+        "Set API_SECRET environment variable for production!",
+        RuntimeWarning,
+    )
+    API_SECRET = secrets.token_hex(32)
 
 
 def generate_token(user_id: str) -> str:
     payload = f"{user_id}:{int(time.time())}"
-    sig = hmac.new(API_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
+    sig = hmac.new(API_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[
+        :16
+    ]
     return f"{payload}:{sig}"
 
 
@@ -95,7 +115,9 @@ def verify_token(token: str) -> Optional[str]:
     return user_id
 
 
-async def get_current_user(authorization: str = Header(None), x_api_key: str = Header(None)):
+async def get_current_user(
+    authorization: str = Header(None), x_api_key: str = Header(None)
+):
     """Extract user from Bearer token or X-API-Key header."""
     token = None
     if authorization and authorization.startswith("Bearer "):
@@ -293,7 +315,9 @@ async def upload_chunk(
         )
     else:
         # Local storage fallback
-        url = f"http://localhost:8080/api/v1/upload/{upload_id}/chunk/{chunk_number}/data"
+        url = (
+            f"http://localhost:8080/api/v1/upload/{upload_id}/chunk/{chunk_number}/data"
+        )
 
     return {
         "upload_url": url,
@@ -304,7 +328,9 @@ async def upload_chunk(
 
 @app.post("/tracker/upload/game_control/multipart/complete")
 @app.post("/api/v1/upload/complete")
-async def upload_complete(req: UploadCompleteRequest, user_id: str = Depends(get_current_user)):
+async def upload_complete(
+    req: UploadCompleteRequest, user_id: str = Depends(get_current_user)
+):
     upload = load_record("uploads", req.upload_id)
     if not upload:
         raise HTTPException(status_code=404, detail="Upload not found")
@@ -352,7 +378,11 @@ async def upload_abort(upload_id: str, user_id: str = Depends(get_current_user))
 @app.get("/api/v1/earnings/summary")
 async def earnings_summary(user_id: str = Depends(get_current_user)):
     user = load_record("users", user_id) or {}
-    uploads = [u for u in list_records("uploads") if u.get("user_id") == user_id and u.get("status") == "completed"]
+    uploads = [
+        u
+        for u in list_records("uploads")
+        if u.get("user_id") == user_id and u.get("status") == "completed"
+    ]
 
     today = datetime.utcnow().date()
     today_earnings = sum(
@@ -400,7 +430,10 @@ async def earnings_history(
         }
         for u in uploads[start:end]
     ]
-    return {"items": items, "total_pages": max(1, (len(uploads) + per_page - 1) // per_page)}
+    return {
+        "items": items,
+        "total_pages": max(1, (len(uploads) + per_page - 1) // per_page),
+    }
 
 
 # --- Upload stats (OWL Control compat) ---
@@ -408,7 +441,11 @@ async def earnings_history(
 
 @app.get("/tracker/v2/uploads/user/{uid}/stats")
 async def upload_stats(uid: str, user_id: str = Depends(get_current_user)):
-    uploads = [u for u in list_records("uploads") if u.get("user_id") == user_id and u.get("status") == "completed"]
+    uploads = [
+        u
+        for u in list_records("uploads")
+        if u.get("user_id") == user_id and u.get("status") == "completed"
+    ]
     total_bytes = sum(u.get("total_size_bytes", 0) for u in uploads)
     total_duration = sum(u.get("video_duration_seconds", 0) for u in uploads)
     return {

@@ -53,10 +53,10 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: owl-control-windows-x64
+          name: gamedata-recorder-windows-x64
           path: |
-            dist/OWL Control.exe
-            dist/OWL-Control-Setup-*.exe
+            dist/GameData Recorder.exe
+            dist/GameData-Recorder-Setup-*.exe
 
   create-release:
     needs: build-windows
@@ -82,7 +82,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/**/OWL-Control-Setup-*.exe
+            artifacts/**/GameData-Recorder-Setup-*.exe
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true

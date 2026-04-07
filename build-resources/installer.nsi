@@ -1,13 +1,13 @@
-; OWL Control Installer Script
+; GameData Recorder Installer Script
 ; NSIS Modern User Interface
 
-!define PRODUCT_NAME "OWL Control"
+!define PRODUCT_NAME "GameData Recorder"
 !define PRODUCT_VERSION "${VERSION}"
 !define PRODUCT_VERSION_RAW "${VERSION_RAW}"
-!define PRODUCT_PUBLISHER "Wayfarer Labs"
-!define PRODUCT_WEB_SITE "https://wayfarerlabs.ai/"
-!define APP_UUID "b06681f2-a6d8-577c-9da7-83ab06026e9c" ; carried over from old installer
-!define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\OWL Control.exe"
+!define PRODUCT_PUBLISHER "GameData Labs"
+!define PRODUCT_WEB_SITE "https://gamedatalabs.com/"
+!define APP_UUID "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+!define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\GameData Recorder.exe"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_UUID}"
 !define PRODUCT_UNINST_ROOT_KEY "HKCU"
 
@@ -37,7 +37,7 @@
 !insertmacro MUI_PAGE_INSTFILES
 
 ; Finish page
-!define MUI_FINISHPAGE_RUN "$INSTDIR\OWL Control.exe"
+!define MUI_FINISHPAGE_RUN "$INSTDIR\GameData Recorder.exe"
 !insertmacro MUI_PAGE_FINISH
 
 ; Uninstaller pages
@@ -48,8 +48,8 @@
 
 ; Installer attributes
 Name "${PRODUCT_NAME} ${PRODUCT_VERSION}"
-OutFile "..\dist\OWL-Control-Setup-${PRODUCT_VERSION}.exe"
-InstallDir "$LOCALAPPDATA\Programs\OWL Control"
+OutFile "..\dist\GameData-Recorder-Setup-${PRODUCT_VERSION}.exe"
+InstallDir "$LOCALAPPDATA\Programs\GameData Recorder"
 InstallDirRegKey HKCU "${PRODUCT_DIR_REGKEY}" ""
 ShowInstDetails show
 ShowUnInstDetails show
@@ -108,13 +108,13 @@ Section "MainSection" SEC01
   ${endIf}
 
   ; Copy all files and folders from dist directory
-  File /r /x "OWL-Control-Setup-*.exe" "..\dist\*.*"
-  File "owl-logo.ico"
+  File /r /x "GameData-Recorder-Setup-*.exe" "..\dist\*.*"
+  File "gamedata-logo.ico"
 
   ; Create shortcuts
   CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
-  CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\OWL Control.exe" "" "$INSTDIR\owl-logo.ico" 0
-  CreateShortcut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\OWL Control.exe" "" "$INSTDIR\owl-logo.ico" 0
+  CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\GameData Recorder.exe" "" "$INSTDIR\gamedata-logo.ico" 0
+  CreateShortcut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\GameData Recorder.exe" "" "$INSTDIR\gamedata-logo.ico" 0
   CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk" "$INSTDIR\uninst.exe"
 SectionEnd
 
@@ -127,7 +127,7 @@ Section -Post
   WriteUninstaller "$INSTDIR\uninst.exe"
 
   ; Registry keys
-  WriteRegStr HKCU "${PRODUCT_DIR_REGKEY}" "" "$INSTDIR\OWL Control.exe"
+  WriteRegStr HKCU "${PRODUCT_DIR_REGKEY}" "" "$INSTDIR\GameData Recorder.exe"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayName" "$(^Name)"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "UninstallString" "$INSTDIR\uninst.exe"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\OWL Control.exe"
@@ -150,10 +150,10 @@ Function un.onUninstSuccess
   ${EndIf}
 FunctionEnd
 
-; Function to check if OWL Control is running by checking for the mutex
-Function un.CheckIfOWLControlRunning
-  ; Try to open the mutex that OWL Control creates
-  System::Call 'kernel32::OpenMutexW(i 0x100000, i 0, w "OWL-Control-SingleInstance") i .R0'
+; Function to check if GameData Recorder is running by checking for the mutex
+Function un.CheckIfGameDataRecorderRunning
+  ; Try to open the mutex that GameData Recorder creates
+  System::Call 'kernel32::OpenMutexW(i 0x100000, i 0, w "GameData-Recorder-SingleInstance") i .R0'
   IntCmp $R0 0 not_running
     ; Mutex exists, application is running
     StrCpy $0 1
@@ -165,13 +165,13 @@ Function un.CheckIfOWLControlRunning
 FunctionEnd
 
 Function un.onInit
-  ; Check if OWL Control is running
-  Call un.CheckIfOWLControlRunning
+  ; Check if GameData Recorder is running
+  Call un.CheckIfGameDataRecorderRunning
   IntCmp $0 1 running
   Goto not_running
 
   running:
-    MessageBox MB_ICONSTOP|MB_OK "OWL Control is currently running. Please close the application before uninstalling." IDOK
+    MessageBox MB_ICONSTOP|MB_OK "GameData Recorder is currently running. Please close the application before uninstalling." IDOK
     Abort
 
   not_running:
