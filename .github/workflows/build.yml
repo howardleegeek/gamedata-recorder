@@ -20,22 +20,41 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Cache cargo
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: windows-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            windows-cargo-
+            windows-cargo-registry-
 
-      - name: Check compilation
-        run: cargo check --all-targets
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: windows-target-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
+          restore-keys: |
+            windows-target-${{ hashFiles('**/Cargo.lock') }}-
+            windows-target-
+
+      - name: Install cargo-obs-build
+        run: cargo install cargo-obs-build
+
+      - name: Install OBS binaries
+        run: cargo obs-build build --out-dir target\x86_64-pc-windows-msvc\debug
+
+      - name: Build debug (check compilation)
+        run: cargo build
         continue-on-error: true
 
+      - name: Install OBS binaries (release)
+        if: success()
+        run: cargo obs-build build --out-dir target\x86_64-pc-windows-msvc\release
+
       - name: Build release
+        if: success()
         run: cargo build --release
         continue-on-error: true
 
@@ -44,5 +63,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gamedata-recorder-windows
-          path: target/release/gamedata-recorder.exe
+          path: |
+            target/release/gamedata-recorder.exe
+            target/x86_64-pc-windows-msvc/release/*.dll
           if-no-files-found: warn
