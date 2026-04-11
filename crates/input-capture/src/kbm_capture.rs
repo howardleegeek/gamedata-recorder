@@ -14,15 +14,15 @@ use windows::{
         System::LibraryLoader::GetModuleHandleA,
         UI::{
             Input::{
-                self, GetRawInputData, HRAWINPUT,
+                self, GetRawInputBuffer, GetRawInputData, HRAWINPUT,
                 KeyboardAndMouse::{VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2},
                 MOUSE_MOVE_ABSOLUTE, MOUSE_VIRTUAL_DESKTOP, RAWINPUT, RAWINPUTDEVICE,
                 RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RegisterRawInputDevices,
             },
             WindowsAndMessaging::{
                 self, CreateWindowExA, DefWindowProcA, DestroyWindow, DispatchMessageA,
-                GetMessageA, GetSystemMetrics, HWND_MESSAGE, MSG, PostQuitMessage, RI_KEY_BREAK,
-                RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
+                GetMessageA, GetMessageTime, GetSystemMetrics, HWND_MESSAGE, MSG, PostQuitMessage,
+                RI_KEY_BREAK, RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
                 RI_MOUSE_BUTTON_5_UP, RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP,
                 RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN,
                 RI_MOUSE_RIGHT_BUTTON_UP, RI_MOUSE_WHEEL, RegisterClassA, SM_CXSCREEN,
@@ -127,13 +127,52 @@ impl KbmCapture {
         unsafe {
             let mut msg = MSG::default();
             let mut last_absolute: Option<(i32, i32)> = None;
+
+            // Pre-allocate buffer for batch input reading (16KB buffer)
+            const BUFFER_SIZE: usize = 16384;
+            let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE];
+
             while GetMessageA(&mut msg, None, 0, 0).as_bool() {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageA(&msg);
+
                 if msg.message == WindowsAndMessaging::WM_INPUT {
-                    for event in self.parse_wm_input(msg.lParam, &mut last_absolute) {
-                        if !event_callback(event) {
-                            return Ok(());
+                    // Get message time for latency tracking (when message was queued)
+                    let msg_time = GetMessageTime();
+
+                    // Use GetRawInputBuffer for batch reading - more efficient than
+                    // GetRawInputData which processes one message at a time
+                    let mut cb_size = 0u32;
+                    let count = GetRawInputBuffer(
+                        Some(buffer.as_mut_ptr() as *mut _),
+                        &mut cb_size,
+                        size_of::<RAWINPUTHEADER>()
+                            .try_into()
+                            .expect("size of RAWINPUTHEADER should fit in u32"),
+                    );
+
+                    if count > 0 {
+                        // Process all raw input events in the buffer
+                        let mut offset = 0usize;
+                        for _ in 0..count {
+                            let rawinput = &*(buffer.as_ptr().add(offset) as *const RAWINPUT);
+                            let events =
+                                self.parse_raw_input(rawinput, msg_time, &mut last_absolute);
+                            for event in events {
+                                if !event_callback(event) {
+                                    return Ok(());
+                                }
+                            }
+                            // Advance to next RAWINPUT structure (aligned)
+                            offset += std::mem::size_of::<RAWINPUT>();
+                        }
+                    } else if count == 0 {
+                        // Buffer too small or no data - fall back to GetRawInputData
+                        // for single message processing
+                        for event in self.parse_wm_input(msg.lParam, &mut last_absolute) {
+                            if !event_callback(event) {
+                                return Ok(());
+                            }
                         }
                     }
                 }
@@ -169,6 +208,146 @@ impl KbmCapture {
 
     fn active_keys(&self) -> MutexGuard<'_, ActiveKeys> {
         self.active_keys.lock().unwrap()
+    }
+
+    /// Parse raw input from GetRawInputBuffer batch reading.
+    /// Includes message time for latency tracking.
+    fn parse_raw_input(
+        &mut self,
+        rawinput: &RAWINPUT,
+        _msg_time: i32,
+        last_absolute: &mut Option<(i32, i32)>,
+    ) -> Vec<Event> {
+        // Note: _msg_time can be used for latency analysis by comparing
+        // with current QPC time. For now, we pass it through for future use.
+        match Input::RID_DEVICE_INFO_TYPE(rawinput.header.dwType) {
+            Input::RIM_TYPEMOUSE => {
+                let mut events = Vec::new();
+                let mouse = rawinput.data.mouse;
+                let us_flags = mouse.usFlags.0;
+
+                // Handle mouse movement
+                if mouse.lLastX != 0 || mouse.lLastY != 0 {
+                    let (delta_x, delta_y) = if (us_flags & MOUSE_MOVE_ABSOLUTE.0) != 0 {
+                        let is_virtual_desktop = (us_flags & MOUSE_VIRTUAL_DESKTOP.0) != 0;
+                        let (screen_x, screen_y) = convert_absolute_to_screen_coords(
+                            mouse.lLastX,
+                            mouse.lLastY,
+                            is_virtual_desktop,
+                        );
+                        let delta = last_absolute
+                            .map(|(last_x, last_y)| (screen_x - last_x, screen_y - last_y))
+                            .unwrap_or_default();
+                        *last_absolute = Some((screen_x, screen_y));
+                        delta
+                    } else {
+                        (mouse.lLastX, mouse.lLastY)
+                    };
+
+                    if delta_x != 0 || delta_y != 0 {
+                        events.push(Event::MouseMove([delta_x, delta_y]));
+                    }
+                }
+
+                let us_button_flags = u32::from(mouse.Anonymous.Anonymous.usButtonFlags);
+
+                if us_button_flags & RI_MOUSE_LEFT_BUTTON_DOWN != 0 {
+                    events.push(Event::MousePress {
+                        key: VK_LBUTTON.0,
+                        press_state: PressState::Pressed,
+                    });
+                    self.active_keys().mouse.insert(VK_LBUTTON.0);
+                }
+                if us_button_flags & RI_MOUSE_LEFT_BUTTON_UP != 0 {
+                    events.push(Event::MousePress {
+                        key: VK_LBUTTON.0,
+                        press_state: PressState::Released,
+                    });
+                    self.active_keys().mouse.remove(&VK_LBUTTON.0);
+                }
+                if us_button_flags & RI_MOUSE_RIGHT_BUTTON_DOWN != 0 {
+                    events.push(Event::MousePress {
+                        key: VK_RBUTTON.0,
+                        press_state: PressState::Pressed,
+                    });
+                    self.active_keys().mouse.insert(VK_RBUTTON.0);
+                }
+                if us_button_flags & RI_MOUSE_RIGHT_BUTTON_UP != 0 {
+                    events.push(Event::MousePress {
+                        key: VK_RBUTTON.0,
+                        press_state: PressState::Released,
+                    });
+                    self.active_keys().mouse.remove(&VK_RBUTTON.0);
+                }
+                if us_button_flags & RI_MOUSE_MIDDLE_BUTTON_DOWN != 0 {
+                    events.push(Event::MousePress {
+                        key: VK_MBUTTON.0,
+                        press_state: PressState::Pressed,
+                    });
+                    self.active_keys().mouse.insert(VK_MBUTTON.0);
+                }
+                if us_button_flags & RI_MOUSE_MIDDLE_BUTTON_UP != 0 {
+                    events.push(Event::MousePress {
+                        key: VK_MBUTTON.0,
+                        press_state: PressState::Released,
+                    });
+                    self.active_keys().mouse.remove(&VK_MBUTTON.0);
+                }
+                if us_button_flags & RI_MOUSE_BUTTON_4_DOWN != 0 {
+                    events.push(Event::MousePress {
+                        key: VK_XBUTTON1.0,
+                        press_state: PressState::Pressed,
+                    });
+                    self.active_keys().mouse.insert(VK_XBUTTON1.0);
+                }
+                if us_button_flags & RI_MOUSE_BUTTON_4_UP != 0 {
+                    events.push(Event::MousePress {
+                        key: VK_XBUTTON1.0,
+                        press_state: PressState::Released,
+                    });
+                    self.active_keys().mouse.remove(&VK_XBUTTON1.0);
+                }
+                if us_button_flags & RI_MOUSE_BUTTON_5_DOWN != 0 {
+                    events.push(Event::MousePress {
+                        key: VK_XBUTTON2.0,
+                        press_state: PressState::Pressed,
+                    });
+                    self.active_keys().mouse.insert(VK_XBUTTON2.0);
+                }
+                if us_button_flags & RI_MOUSE_BUTTON_5_UP != 0 {
+                    events.push(Event::MousePress {
+                        key: VK_XBUTTON2.0,
+                        press_state: PressState::Released,
+                    });
+                    self.active_keys().mouse.remove(&VK_XBUTTON2.0);
+                }
+
+                if us_button_flags & RI_MOUSE_WHEEL != 0 {
+                    events.push(Event::MouseScroll {
+                        scroll_amount: mouse.Anonymous.Anonymous.usButtonData as i16,
+                    });
+                }
+
+                events
+            }
+            Input::RIM_TYPEKEYBOARD => {
+                let keyboard = rawinput.data.keyboard;
+                let key = keyboard.VKey;
+                let flags = u32::from(keyboard.Flags);
+                let press_state = if flags & RI_KEY_BREAK != 0 {
+                    PressState::Released
+                } else {
+                    PressState::Pressed
+                };
+                if press_state == PressState::Pressed {
+                    self.active_keys().keyboard.insert(key);
+                } else {
+                    self.active_keys().keyboard.remove(&key);
+                }
+                vec![Event::KeyPress { key, press_state }]
+            }
+            _ => vec![],
+        }
     }
 
     fn parse_wm_input(

@@ -87,6 +87,29 @@ impl HighPrecisionTimer {
         }
     }
 
+    /// Elapsed microseconds since timer creation, using QPC for precision.
+    /// Provides higher resolution than elapsed_ms() for latency-sensitive measurements.
+    pub fn elapsed_us(&self) -> u64 {
+        #[cfg(target_os = "windows")]
+        {
+            let mut current = 0i64;
+            unsafe {
+                if let Err(e) = QueryPerformanceCounter(&mut current) {
+                    tracing::error!("QueryPerformanceCounter failed: {:?}", e);
+                    // Fall back to std::time::Instant if QPC fails
+                    return self.start_instant.elapsed().as_micros() as u64;
+                }
+            }
+            let elapsed = current - self.start_counter;
+            ((elapsed as u128 * 1_000_000) / self.frequency as u128) as u64
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.start_instant.elapsed().as_micros() as u64
+        }
+    }
+
     /// Current wall-clock time as HH:MM:SS.mmm string.
     pub fn wall_time_str(&self) -> String {
         let now = std::time::SystemTime::now()
