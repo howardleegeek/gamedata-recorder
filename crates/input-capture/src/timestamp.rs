@@ -110,6 +110,30 @@ impl HighPrecisionTimer {
         }
     }
 
+    /// Elapsed nanoseconds since timer creation, using QPC for precision.
+    /// This is the highest resolution timestamp available — matches the precision
+    /// used by Mouse-Keyboard-Time-Series (time.perf_counter_ns() equivalent).
+    /// Critical for frame alignment: 30fps = 33.33ms/frame, need sub-ms precision.
+    pub fn elapsed_ns(&self) -> u64 {
+        #[cfg(target_os = "windows")]
+        {
+            let mut current = 0i64;
+            unsafe {
+                if let Err(e) = QueryPerformanceCounter(&mut current) {
+                    tracing::error!("QueryPerformanceCounter failed: {:?}", e);
+                    return self.start_instant.elapsed().as_nanos() as u64;
+                }
+            }
+            let elapsed = current - self.start_counter;
+            ((elapsed as u128 * 1_000_000_000) / self.frequency as u128) as u64
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.start_instant.elapsed().as_nanos() as u64
+        }
+    }
+
     /// Current wall-clock time as HH:MM:SS.mmm string.
     pub fn wall_time_str(&self) -> String {
         let now = std::time::SystemTime::now()
