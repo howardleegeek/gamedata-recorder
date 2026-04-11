@@ -12,7 +12,9 @@ use kbm_capture::KbmCapture;
 mod gamepad_capture;
 pub use gamepad_capture::{ActiveGamepad, GamepadId, GamepadMetadata};
 
+pub mod action_scaffold;
 pub mod timestamp;
+pub mod trajectory;
 pub mod vkey_names;
 
 #[derive(Debug, Clone, Copy)]
