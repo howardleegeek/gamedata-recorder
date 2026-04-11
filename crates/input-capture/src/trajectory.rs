@@ -62,10 +62,7 @@ pub enum TrajectoryTerminator {
 ///
 /// Input: chronologically sorted events with timestamps.
 /// Output: list of Trajectory structs.
-pub fn segment_trajectories(
-    events: &[RawEvent],
-    pause_threshold_ms: f64,
-) -> Vec<Trajectory> {
+pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec<Trajectory> {
     let mut trajectories = Vec::new();
     let mut current_path: Vec<[i32; 2]> = Vec::new();
     let mut current_start_ns: Option<u64> = None;
@@ -81,8 +78,7 @@ pub fn segment_trajectories(
             RawEventKind::MouseMove { dx, dy } => {
                 // Check for pause gap
                 if let Some(start) = current_start_ns {
-                    let gap_ms =
-                        (event.timestamp_ns - last_move_ns) as f64 / 1_000_000.0;
+                    let gap_ms = (event.timestamp_ns - last_move_ns) as f64 / 1_000_000.0;
                     if gap_ms > pause_threshold_ms && !current_path.is_empty() {
                         // Finalize trajectory due to pause
                         trajectories.push(build_trajectory(
@@ -116,7 +112,10 @@ pub fn segment_trajectories(
                 last_move_ns = event.timestamp_ns;
             }
 
-            RawEventKind::MouseButton { button, pressed: true } => {
+            RawEventKind::MouseButton {
+                button,
+                pressed: true,
+            } => {
                 // Click terminates the current trajectory
                 if let Some(start) = current_start_ns {
                     trajectories.push(build_trajectory(

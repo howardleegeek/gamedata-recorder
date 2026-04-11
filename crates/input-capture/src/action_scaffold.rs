@@ -91,8 +91,7 @@ pub fn build_actions(
                 screen_y: cursor_y,
             }),
             super::trajectory::RawEventKind::KeyDown { vkey, .. } => {
-                let key_name =
-                    super::vkey_names::vkey_to_name(*vkey).to_string();
+                let key_name = super::vkey_names::vkey_to_name(*vkey).to_string();
                 Some(ActionType::KeyPress {
                     key: *vkey,
                     key_name,
