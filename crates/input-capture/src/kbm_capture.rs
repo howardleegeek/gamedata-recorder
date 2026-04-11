@@ -411,7 +411,8 @@ impl KbmCapture {
                         }
                     }
 
-                    let us_button_flags = unsafe { u32::from(mouse.Anonymous.Anonymous.usButtonFlags) };
+                    let us_button_flags =
+                        unsafe { u32::from(mouse.Anonymous.Anonymous.usButtonFlags) };
 
                     if us_button_flags & RI_MOUSE_LEFT_BUTTON_DOWN != 0 {
                         events.push(Event::MousePress {
@@ -485,8 +486,11 @@ impl KbmCapture {
                     }
 
                     if us_button_flags & RI_MOUSE_WHEEL != 0 {
+                        let scroll = unsafe {
+                            mouse.Anonymous.Anonymous.usButtonData as i16
+                        };
                         events.push(Event::MouseScroll {
-                            scroll_amount: unsafe { mouse.Anonymous.Anonymous.usButtonData as i16 },
+                            scroll_amount: scroll,
                         });
                     }
 
