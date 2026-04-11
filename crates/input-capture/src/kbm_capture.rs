@@ -486,9 +486,7 @@ impl KbmCapture {
                     }
 
                     if us_button_flags & RI_MOUSE_WHEEL != 0 {
-                        let scroll = unsafe {
-                            mouse.Anonymous.Anonymous.usButtonData as i16
-                        };
+                        let scroll = unsafe { mouse.Anonymous.Anonymous.usButtonData as i16 };
                         events.push(Event::MouseScroll {
                             scroll_amount: scroll,
                         });
