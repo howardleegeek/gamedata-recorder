@@ -1,0 +1,124 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "tools/*"]
+exclude = ["tools/vm"]
+default-members = ["."]
+
+[workspace.package]
+version = "1.6.1"
+
+[workspace.dependencies]
+input-capture = { path = "crates/input-capture" }
+game-process = { path = "crates/game-process" }
+constants = { path = "crates/constants" }
+clap = { version = "4.5.39", features = ["derive"] }
+dunce = "1.0.5"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tokio = { version = "1.45.1", features = ["full"] }
+tokio-util = { version = "0.7.15", features = ["rt"] }
+futures = "0.3"
+color-eyre = "0.6.5"
+windows = { version = "0.62.2", features = [
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }
+winit = "0.30.12"
+uuid = { version = "1.17.0", features = ["v4"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+git-version = "0.3"
+sysinfo = "0.32.1"
+steamlocate = "2.0.1"
+
+# test-app dependencies
+anyhow = "1.0"
+bytemuck = { version = "1.24", features = ["derive"] }
+env_logger = "0.10"
+log = "0.4"
+pollster = "0.3"
+wgpu = "27.0.0"
+
+obws = "0.14.0"
+async-trait = "0.1"
+libobs-wrapper = { git = "https://github.com/libobs-rs/libobs-rs.git", features = [
+    "logging_crash_handler",
+    "enable_runtime",
+], default-features = false }
+libobs-simple = { git = "https://github.com/libobs-rs/libobs-rs.git" }
+libobs-window-helper = { git = "https://github.com/libobs-rs/libobs-rs.git" }
+
+[package]
+name = "gamedata-recorder"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+constants.workspace = true
+input-capture.workspace = true
+git-version.workspace = true
+game-process.workspace = true
+clap.workspace = true
+dunce.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+color-eyre.workspace = true
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+libobs-wrapper.workspace = true
+libobs-simple.workspace = true
+libobs-window-helper.workspace = true
+async-trait.workspace = true
+obws.workspace = true
+windows.workspace = true
+winit.workspace = true
+futures.workspace = true
+
+tray-icon = "0.14.3"
+
+# The egui block. All of these need to be updated together.
+egui = "0.33"
+egui_extras = { version = "0.33", features = ["all_loaders", "datepicker"] }
+egui-wgpu = "0.33"
+egui-winit = "0.33"
+egui_commonmark = { version = "0.22", features = ["macros"] }
+# Overworld-owned forks for bumping egui version to 0.33. Will remove once updated.
+egui_overlay = { git = "https://github.com/Overworldai/egui_overlay.git", branch = "master", features = [
+    "egui_default",
+    "glfw_default",
+] }
+egui_window_glfw_passthrough = { git = "https://github.com/Overworldai/egui_overlay.git", branch = "master" }
+egui_render_three_d = { git = "https://github.com/Overworldai/egui_overlay.git", branch = "master" }
+catppuccin-egui = { git = "https://github.com/Overworldai/catppuccin-egui.git", branch = "disable-build-script", default-features = false, features = [
+    "egui33",
+] }
+egui_virtual_list = "0.9.0"
+
+image = { version = "0.25", features = ["jpeg", "png"] }
+dirs = "6.0.0"
+
+rodio = { git = "https://github.com/philpax/rodio.git", branch = "latest-cpal-fixes" }
+
+chrono = { version = "0.4.42", features = ["serde"] }
+reqwest = { version = "0.12.23", features = ["json", "stream"] }
+
+tar = "0.4.44"
+opener = { version = "0.8", features = ["reveal"] }
+sha256 = "1.6.0"
+backoff = { version = "0.4", features = ["tokio"] }
+rfd = "0.14"
+steamlocate.workspace = true
+
+[build-dependencies]
+embed-manifest = "1.3.1"
+
+[patch.'https://github.com/RustAudio/cpal']
+cpal = { git = "https://github.com/philpax/cpal.git", branch = "audio-device-fix-updated" }

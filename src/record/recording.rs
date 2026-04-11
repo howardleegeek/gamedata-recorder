@@ -1,0 +1,255 @@
+use std::{
+    path::PathBuf,
+    time::{Instant, SystemTime},
+};
+
+use color_eyre::{Result, eyre::ContextCompat};
+use egui_wgpu::wgpu;
+use game_process::{Pid, windows::Win32::Foundation::HWND};
+use input_capture::InputCapture;
+
+use crate::{
+    config::{EncoderSettings, GameConfig},
+    record::{
+        input_recorder::{InputEventStream, InputEventWriter},
+        recorder::VideoRecorder,
+    },
+    system::hardware_specs,
+};
+
+use super::fps_logger::FpsLogger;
+use super::local_recording::LocalRecording;
+
+/// Parameters for starting a recording
+pub(crate) struct RecordingParams {
+    pub recording_location: PathBuf,
+    pub game_exe: String,
+    pub pid: Pid,
+    pub hwnd: HWND,
+    pub video_settings: EncoderSettings,
+    pub game_config: GameConfig,
+}
+
+pub(crate) struct Recording {
+    input_writer: InputEventWriter,
+    input_stream: InputEventStream,
+    fps_logger: FpsLogger,
+
+    recording_location: PathBuf,
+    game_exe: String,
+    game_resolution: (u32, u32),
+    start_time: SystemTime,
+    start_instant: Instant,
+    average_fps: Option<f64>,
+
+    pid: Pid,
+    hwnd: HWND,
+}
+
+impl Recording {
+    pub(crate) async fn start(
+        video_recorder: &mut dyn VideoRecorder,
+        params: RecordingParams,
+        input_capture: &InputCapture,
+    ) -> Result<Self> {
+        let RecordingParams {
+            recording_location,
+            game_exe,
+            pid,
+            hwnd,
+            video_settings,
+            game_config,
+        } = params;
+
+        let start_time = SystemTime::now();
+        let start_instant = Instant::now();
+
+        let game_resolution = get_recording_base_resolution(hwnd)?;
+        tracing::info!("Game resolution: {game_resolution:?}");
+
+        let video_path = recording_location.join(constants::filename::recording::VIDEO);
+        let csv_path = recording_location.join(constants::filename::recording::INPUTS);
+
+        let (input_writer, input_stream) =
+            InputEventWriter::start(&csv_path, input_capture).await?;
+        video_recorder
+            .start_recording(
+                &video_path,
+                pid.0,
+                hwnd,
+                &game_exe,
+                video_settings,
+                game_config,
+                game_resolution,
+                input_stream.clone(),
+            )
+            .await?;
+
+        Ok(Self {
+            input_writer,
+            input_stream,
+            fps_logger: FpsLogger::new(),
+            recording_location,
+            game_exe,
+            game_resolution,
+            start_time,
+            start_instant,
+            average_fps: None,
+
+            pid,
+            hwnd,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn game_exe(&self) -> &str {
+        &self.game_exe
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn start_time(&self) -> SystemTime {
+        self.start_time
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn start_instant(&self) -> Instant {
+        self.start_instant
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn elapsed(&self) -> std::time::Duration {
+        self.start_instant.elapsed()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn pid(&self) -> Pid {
+        self.pid
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+
+    pub(crate) fn game_resolution(&self) -> (u32, u32) {
+        self.game_resolution
+    }
+
+    pub(crate) fn get_window_name(&self) -> Option<String> {
+        use game_process::windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowTextLengthW, GetWindowTextW,
+        };
+
+        let title_len = unsafe { GetWindowTextLengthW(self.hwnd) };
+        if title_len > 0 {
+            let mut buf = vec![0u16; (title_len + 1) as usize];
+            let copied = unsafe { GetWindowTextW(self.hwnd, &mut buf) };
+            if copied > 0 {
+                if let Some(end) = buf.iter().position(|&c| c == 0) {
+                    return Some(String::from_utf16_lossy(&buf[..end]));
+                } else {
+                    return Some(String::from_utf16_lossy(&buf));
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn input_stream(&self) -> &InputEventStream {
+        &self.input_stream
+    }
+
+    /// Flush all pending input events to disk
+    pub(crate) async fn flush_input_events(&mut self) -> Result<()> {
+        self.input_writer.flush().await
+    }
+
+    pub(crate) fn update_fps(&mut self, fps: f64) {
+        self.average_fps = self.average_fps.map(|f| (f + fps) / 2.0).or(Some(fps));
+        // Feed frame timing data to the per-second FPS logger
+        self.fps_logger.on_frame();
+    }
+
+    pub(crate) async fn stop(
+        self,
+        recorder: &mut dyn VideoRecorder,
+        adapter_infos: &[wgpu::AdapterInfo],
+        input_capture: &InputCapture,
+    ) -> Result<()> {
+        let window_name = self.get_window_name();
+        let mut result = recorder.stop_recording().await;
+        self.input_writer.stop(input_capture).await?;
+
+        // Save per-second FPS log (buyer spec requirement)
+        if let Err(e) = self.fps_logger.save(&self.recording_location).await {
+            tracing::warn!("Failed to save FPS log: {e}");
+        }
+
+        #[allow(clippy::collapsible_if)]
+        if result.is_ok() {
+            // Conditions that need to be met, even if the recording is otherwise valid
+            if let Some(average_fps) = self.average_fps
+                && average_fps < constants::MIN_AVERAGE_FPS
+            {
+                result = Err(color_eyre::eyre::eyre!(
+                    "Average FPS {average_fps:.1} is below required minimum of {:.1}",
+                    constants::MIN_AVERAGE_FPS
+                ));
+            }
+        }
+
+        if let Err(e) = result {
+            tracing::error!("Error while stopping recording, invalidating recording: {e}");
+            tokio::fs::write(
+                self.recording_location
+                    .join(constants::filename::recording::INVALID),
+                e.to_string(),
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let gamepads = input_capture.gamepads();
+        LocalRecording::write_metadata_and_validate(
+            self.recording_location,
+            self.game_exe,
+            self.game_resolution,
+            self.start_instant,
+            self.start_time,
+            self.average_fps,
+            window_name,
+            adapter_infos,
+            gamepads,
+            recorder.id(),
+            result.as_ref().ok().cloned(),
+        )
+        .await?;
+
+        Ok(())
+    }
+}
+
+pub fn get_recording_base_resolution(hwnd: HWND) -> Result<(u32, u32)> {
+    use windows::Win32::{Foundation::RECT, UI::WindowsAndMessaging::GetClientRect};
+
+    /// Returns the size (width, height) of the inner area of a window given its HWND.
+    /// Returns None if the window does not exist or the call fails.
+    fn get_window_inner_size(hwnd: HWND) -> Option<(u32, u32)> {
+        unsafe {
+            let mut rect = RECT::default();
+            GetClientRect(hwnd, &mut rect).ok()?;
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+            Some((width as u32, height as u32))
+        }
+    }
+
+    match get_window_inner_size(hwnd) {
+        Some(size) => Ok(size),
+        None => {
+            tracing::info!("Failed to get window inner size, using primary monitor resolution");
+            hardware_specs::get_primary_monitor_resolution()
+                .context("Failed to get primary monitor resolution")
+        }
+    }
+}

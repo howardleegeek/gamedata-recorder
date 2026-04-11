@@ -1,0 +1,170 @@
+use std::sync::LazyLock;
+
+use serde::Deserialize;
+mod multipart_upload;
+pub use multipart_upload::*;
+
+mod user_upload;
+pub use user_upload::*;
+
+static API_BASE_URL: LazyLock<String> = LazyLock::new(|| {
+    let url = std::env::var("GAMEDATA_API_URL")
+        .or_else(|_| std::env::var("OWL_CONTROL_API_URL")) // backward compat
+        .unwrap_or_else(|_| "https://api.gamedatalabs.com".to_string());
+    url.trim_end_matches('/').to_string()
+});
+
+#[derive(Debug)]
+pub enum ApiError {
+    Reqwest(reqwest::Error),
+    ApiKeyValidationFailure(String),
+    ApiFailure {
+        context: String,
+        error: String,
+        status: Option<reqwest::StatusCode>,
+    },
+    ServerInvalidation(String),
+}
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApiError::Reqwest(err) => write!(f, "Failed to make API request: {err}"),
+            ApiError::ApiKeyValidationFailure(err) => write!(f, "API key validation failed: {err}"),
+            ApiError::ApiFailure {
+                context,
+                error,
+                status,
+            } => {
+                write!(f, "{context}: {error}")?;
+                if let Some(status) = status {
+                    write!(f, " (HTTP {status})")?;
+                }
+                Ok(())
+            }
+            ApiError::ServerInvalidation(err) => write!(f, "Server invalidation: {err}"),
+        }
+    }
+}
+impl std::error::Error for ApiError {}
+impl ApiError {
+    /// Returns true if this error is due to a network connectivity issue or server unavailability.
+    /// This includes connection/timeout errors and HTTP 502/503/504 status codes.
+    pub fn is_network_error(&self) -> bool {
+        match self {
+            ApiError::Reqwest(e) => e.is_connect() || e.is_timeout(),
+            ApiError::ApiFailure { status, .. } => {
+                // 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout
+                // indicate server unavailability rather than client errors
+                matches!(
+                    status,
+                    Some(s) if s.as_u16() == 502 || s.as_u16() == 503 || s.as_u16() == 504
+                )
+            }
+            _ => false,
+        }
+    }
+}
+impl From<reqwest::Error> for ApiError {
+    fn from(err: reqwest::Error) -> Self {
+        ApiError::Reqwest(err)
+    }
+}
+
+pub struct ApiClient {
+    client: reqwest::Client,
+}
+impl ApiClient {
+    pub fn new() -> Self {
+        tracing::debug!("ApiClient::new() called");
+        Self {
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// Attempts to validate the API key. Returns an error if the API key is invalid or the server is unavailable.
+    /// Returns the user ID if the API key is valid.
+    pub async fn validate_api_key(&self, api_key: &str) -> Result<String, ApiError> {
+        // Response struct for the user info endpoint
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct UserIdResponse {
+            user_id: String,
+        }
+
+        let client = &self.client;
+
+        // Validate input
+        if api_key.is_empty() || api_key.trim().is_empty() {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "API key cannot be empty".into(),
+            ));
+        }
+
+        // Simple validation - check if it starts with 'sk_'
+        if !api_key.starts_with("sk_") {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "Invalid API key format".into(),
+            ));
+        }
+
+        // Make the API request
+        let response = client
+            .get(format!("{}/api/v1/user/info", API_BASE_URL.as_str()))
+            .header("Content-Type", "application/json")
+            .header("X-API-Key", api_key)
+            .send()
+            .await?;
+
+        let response =
+            check_for_response_success(response, "Invalid API key, or server unavailable").await?;
+
+        // Parse the JSON response
+        let user_info = response.json::<UserIdResponse>().await?;
+
+        Ok(user_info.user_id)
+    }
+}
+
+async fn check_for_response_success(
+    response: reqwest::Response,
+    context: &str,
+) -> Result<reqwest::Response, ApiError> {
+    #[derive(Deserialize, Debug)]
+    #[serde(rename_all = "snake_case", tag = "type")]
+    enum StructuredError {
+        ServerInvalidation {
+            detail: String,
+        },
+        #[serde(untagged)]
+        Other {
+            #[serde(default)]
+            detail: Option<String>,
+        },
+    }
+
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await?;
+        tracing::error!("API error response (HTTP {status}): {text}");
+
+        // if 502 this will return None, then APIError must fallback to using just the text
+        let value = serde_json::from_str::<StructuredError>(&text).ok();
+
+        return Err(match value {
+            Some(StructuredError::ServerInvalidation { detail }) => {
+                ApiError::ServerInvalidation(detail)
+            }
+            Some(StructuredError::Other { detail }) => ApiError::ApiFailure {
+                context: context.into(),
+                error: detail.unwrap_or_else(|| text.clone()),
+                status: Some(status),
+            },
+            None => ApiError::ApiFailure {
+                context: context.into(),
+                error: text,
+                status: Some(status),
+            },
+        });
+    }
+    Ok(response)
+}

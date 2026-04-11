@@ -1,0 +1,301 @@
+[
+  {
+    "game": "Abyssus",
+    "url": "https://store.steampowered.com/app/1721110/Abyssus/",
+    "binaries": ["abyssus", "rgame"]
+  },
+  {
+    "game": "Amenti",
+    "url": "https://store.steampowered.com/app/3292260/Amenti/",
+    "binaries": ["amenti"]
+  },
+  {
+    "game": "ARMA 3",
+    "url": "https://store.steampowered.com/app/107410/Arma_3/",
+    "binaries": ["arma3", "arma3_x64"]
+  },
+  {
+    "game": "Battlefield Hardline",
+    "url": "https://store.steampowered.com/app/1238880/Battlefield_Hardline/",
+    "binaries": ["bfh"]
+  },
+  {
+    "game": "Blacktail",
+    "url": "https://store.steampowered.com/app/1532690/BLACKTAIL/",
+    "binaries": ["blacktail", "blacktail-win64-shipping"]
+  },
+  {
+    "game": "Blair Witch",
+    "url": "https://store.steampowered.com/app/1092660/Blair_Witch/",
+    "binaries": ["blairwitch"]
+  },
+  {
+    "game": "Call of Duty: Advanced Warfare",
+    "url": "https://store.steampowered.com/app/209650/Call_of_Duty_Advanced_Warfare",
+    "binaries": ["s1_sp64_ship", "s1_mp64_ship"]
+  },
+  {
+    "game": "Call of Duty: Infinite Warfare",
+    "url": "https://store.steampowered.com/app/292730/Call_of_Duty_Infinite_Warfare/",
+    "binaries": ["iw7_ship"]
+  },
+  {
+    "game": "Call of Duty: Vanguard",
+    "url": "https://store.steampowered.com/app/1985820/Call_of_Duty_Vanguard/",
+    "binaries": ["vanguard"]
+  },
+  {
+    "game": "Call of Duty: WWII",
+    "url": "https://store.steampowered.com/app/476600/Call_of_Duty_WWII/",
+    "binaries": ["s2_sp64_ship", "s2_mp64_ship"]
+  },
+  {
+    "game": "Close to the Sun",
+    "url": "https://store.steampowered.com/app/968870/Close_to_the_Sun/",
+    "binaries": ["ctts-win64-shipping"]
+  },
+  {
+    "game": "Conundrum",
+    "url": "https://store.steampowered.com/app/1744140/Conundrum/",
+    "binaries": ["trygame-win32-shipping", "conundrum"]
+  },
+  {
+    "game": "Dark Hours",
+    "url": "https://store.steampowered.com/app/2208570/Dark_Hours/",
+    "binaries": ["dark hours", "darkhours-win64-shipping"]
+  },
+  {
+    "game": "Deadzone: Rogue",
+    "url": "https://store.steampowered.com/app/3228590/Deadzone_Rogue",
+    "binaries": ["deadzonesteam"]
+  },
+  {
+    "game": "Earthfall",
+    "url": "https://store.steampowered.com/app/415590/Earthfall/",
+    "binaries": ["earthfall"]
+  },
+  {
+    "game": "Escape from Tarkov",
+    "url": "https://store.steampowered.com/app/3932890/Escape_from_Tarkov/",
+    "binaries": ["escapefromtarkov", "escapefromtarkov_be"]
+  },
+  {
+    "game": "Everyone's Gone to the Rapture",
+    "url": "https://store.steampowered.com/app/417880/Everybodys_Gone_to_the_Rapture/",
+    "binaries": ["rapture_release"]
+  },
+  {
+    "game": "Fobia - St. Dinfna Hotel",
+    "url": "https://store.steampowered.com/app/1298140/Fobia__St_Dinfna_Hotel/",
+    "binaries": ["fobia-win64-shipping"]
+  },
+  {
+    "game": "Ghost Watchers",
+    "url": "https://store.steampowered.com/app/1850740/Ghost_Watchers/",
+    "binaries": ["ghost watchers"]
+  },
+  {
+    "game": "Halo: Infinite",
+    "url": "https://store.steampowered.com/app/1240440/Halo_Infinite/",
+    "binaries": ["haloinfinite"]
+  },
+  {
+    "game": "Hard Reset Redux",
+    "url": "https://store.steampowered.com/app/407810/Hard_Reset_Redux/",
+    "binaries": ["hr.win32", "hr.x64", "hr"]
+  },
+  {
+    "game": "Hardspace: Shipbreaker",
+    "url": "https://store.steampowered.com/app/1161580/Hardspace_Shipbreaker",
+    "binaries": ["shipbreaker"]
+  },
+  {
+    "game": "Hell Let Loose",
+    "url": "https://store.steampowered.com/app/686810/Hell_Let_Loose/",
+    "binaries": ["hll", "hll-win64-shipping", "hllepicgamesstore"]
+  },
+  {
+    "game": "Home Sweet Home 2",
+    "url": "https://store.steampowered.com/app/1098940/Home_Sweet_Home_EP2/",
+    "binaries": ["homesweethome2", "homesweethome2-win64-shipping"]
+  },
+  {
+    "game": "Home Sweet Home",
+    "url": "https://store.steampowered.com/app/617160/Home_Sweet_Home/",
+    "binaries": ["homesweethome", "homesweethome-win32-shipping"]
+  },
+  {
+    "game": "Immortals of Aveum",
+    "url": "https://store.steampowered.com/app/2009100/Immortals_of_Aveum/",
+    "binaries": ["immortalsofaveum", "immortalsofaveum-win64-shipping"]
+  },
+  {
+    "game": "In Sound Mind",
+    "url": "https://store.steampowered.com/app/1119980/In_Sound_Mind/",
+    "binaries": ["in sound mind"]
+  },
+  {
+    "game": "Layers of Fear 2",
+    "url": "https://store.steampowered.com/app/1029890/Layers_of_Fear_2_2019",
+    "binaries": ["lof2", "lof2-win64-shipping"]
+  },
+  {
+    "game": "Layers of Fear",
+    "url": "https://store.steampowered.com/app/391720/Layers_of_Fear/",
+    "binaries": ["layers of fear", "layers of fearsub"]
+  },
+  {
+    "game": "Madison",
+    "url": "https://store.steampowered.com/app/1670870/MADiSON/",
+    "binaries": ["madison"]
+  },
+  {
+    "game": "METAL EDEN",
+    "url": "https://store.steampowered.com/app/990380/METAL_EDEN/",
+    "binaries": ["metaleden", "metaleden-win64-shipping"]
+  },
+  {
+    "game": "Observer: System Redux",
+    "url": "https://store.steampowered.com/app/1386900/Observer_System_Redux/",
+    "binaries": ["observersystemredux"]
+  },
+  {
+    "game": "The Outer Worlds 2",
+    "url": "https://store.steampowered.com/app/1449110/The_Outer_Worlds_2/",
+    "binaries": ["theouterworlds2", "theouterworlds2-win64-shipping"]
+  },
+  {
+    "game": "Painkiller 2025",
+    "url": "https://store.steampowered.com/app/2300120/Painkiller/",
+    "binaries": ["painkiller", "painkiller-win64-shipping"]
+  },
+  {
+    "game": "Painkiller Hell & Damnation",
+    "url": "https://store.steampowered.com/app/214870/Painkiller_Hell__Damnation/",
+    "binaries": ["pkhdgame-win32-shipping"]
+  },
+  {
+    "game": "Panicore",
+    "url": "https://store.steampowered.com/app/2695940/PANICORE/",
+    "binaries": ["panicore", "panicore-win64-shipping"]
+  },
+  {
+    "game": "PAYDAY 3",
+    "url": "https://store.steampowered.com/app/1272080/PAYDAY_3/",
+    "binaries": ["payday3client", "payday3client-win64-shipping"]
+  },
+  {
+    "game": "Ready or Not",
+    "url": "https://store.steampowered.com/app/1144200/Ready_or_Not/",
+    "binaries": [
+      "readyornot",
+      "readyornotsteam-win64-shipping",
+      "readyornotxboxpc-wingdk-shipping"
+    ]
+  },
+  {
+    "game": "Riven",
+    "url": "https://store.steampowered.com/app/1712350/Riven/",
+    "binaries": ["riven", "riven-win64-shipping"]
+  },
+  {
+    "game": "Salt 2",
+    "url": "https://store.steampowered.com/app/1574900/Salt_2_Shores_of_Gold/",
+    "binaries": ["salt2"]
+  },
+  {
+    "game": "SCP: 5K",
+    "url": "https://store.steampowered.com/app/872670/SCP_5K/",
+    "binaries": ["pandemic"]
+  },
+  {
+    "game": "Shadow Warrior 3",
+    "url": "https://store.steampowered.com/app/1036890/Shadow_Warrior_3_Definitive_Edition",
+    "binaries": ["sw3"]
+  },
+  {
+    "game": "Soma",
+    "url": "https://store.steampowered.com/app/282140/SOMA/",
+    "binaries": ["soma", "soma_nosteam"]
+  },
+  {
+    "game": "Squad",
+    "url": "https://store.steampowered.com/app/393380/Squad/",
+    "binaries": ["squadgame"]
+  },
+  {
+    "game": "Tacoma",
+    "url": "https://store.steampowered.com/app/343860/Tacoma/",
+    "binaries": ["tacoma"]
+  },
+  {
+    "game": "The Beast Inside",
+    "url": "https://store.steampowered.com/app/792300/The_Beast_Inside/",
+    "binaries": ["thebeastinside", "thebeastinside-win64-shipping"]
+  },
+  {
+    "game": "The Darkness II",
+    "url": "https://store.steampowered.com/app/67370/The_Darkness_II/",
+    "binaries": ["darknessii"]
+  },
+  {
+    "game": "The Lightkeeper",
+    "url": "https://store.steampowered.com/app/3612850/The_Lightkeeper/",
+    "binaries": ["thelightkeeper", "thelightkeeper-win64-shipping"]
+  },
+  {
+    "game": "The Stanley Parable",
+    "url": "https://store.steampowered.com/app/221910/The_Stanley_Parable/",
+    "binaries": ["stanley"]
+  },
+  {
+    "game": "The Talos Principle 2",
+    "url": "https://store.steampowered.com/app/835960/The_Talos_Principle_2/",
+    "binaries": ["talos2", "talos2-win64-shipping"]
+  },
+  {
+    "game": "The Witness",
+    "url": "https://store.steampowered.com/app/210970/The_Witness/",
+    "binaries": ["witness64_d3d11", "witness_d3d11"]
+  },
+  {
+    "game": "Trepang2",
+    "url": "https://store.steampowered.com/app/1164940/Trepang2/",
+    "binaries": ["cppfps-win64-shipping"]
+  },
+  {
+    "game": "Visage",
+    "url": "https://store.steampowered.com/app/594330/Visage/",
+    "binaries": ["visage", "visage-win64-shipping"]
+  },
+  {
+    "game": "VOIDBREAKER",
+    "url": "https://store.steampowered.com/app/2615540/VOIDBREAKER/",
+    "binaries": ["voidbreaker", "voidbreaker-win64-shipping"]
+  },
+  {
+    "game": "VOIN",
+    "url": "https://store.steampowered.com/app/2464530/VOIN/",
+    "binaries": ["voin", "voin-win64-shipping"]
+  },
+  {
+    "game": "What Remains of Edith Finch",
+    "url": "https://store.steampowered.com/app/501300/What_Remains_of_Edith_Finch/",
+    "binaries": ["finchgame"]
+  },
+  {
+    "game": "Witchfire",
+    "url": "https://store.steampowered.com/app/3156770/Witchfire/",
+    "binaries": ["witchfire"]
+  },
+  {
+    "game": "Wolfenstein: Youngblood",
+    "url": "https://store.steampowered.com/app/1056960/Wolfenstein_Youngblood/",
+    "binaries": ["youngblood_x64vk"]
+  },
+  {
+    "game": "Ziggurat 2",
+    "url": "https://store.steampowered.com/app/1159560/Ziggurat_2/",
+    "binaries": ["ziggurat2"]
+  }
+]

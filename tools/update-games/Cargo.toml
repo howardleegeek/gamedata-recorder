@@ -1,0 +1,7 @@
+[package]
+name = "update-games"
+edition = "2024"
+version.workspace = true
+
+[dependencies]
+constants.workspace = true

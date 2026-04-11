@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GameData Recorder — Play Games. Get Paid.</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1a1a2e; background: #fafafa; }
+
+        /* Hero */
+        .hero { text-align: center; padding: 80px 20px 60px; background: linear-gradient(135deg, #0f0c29, #302b63, #24243e); color: white; }
+        .hero h1 { font-size: 3.5rem; font-weight: 800; margin-bottom: 16px; }
+        .hero h1 span { color: #00d4aa; }
+        .hero p { font-size: 1.3rem; opacity: 0.9; max-width: 600px; margin: 0 auto 32px; line-height: 1.6; }
+        .btn { display: inline-block; padding: 16px 40px; background: #00d4aa; color: #0f0c29; font-size: 1.1rem; font-weight: 700; border-radius: 8px; text-decoration: none; transition: transform 0.2s; }
+        .btn:hover { transform: translateY(-2px); }
+        .btn-sub { display: block; font-size: 0.85rem; opacity: 0.7; margin-top: 12px; color: white; }
+        .trust { display: flex; justify-content: center; gap: 24px; margin-top: 40px; flex-wrap: wrap; }
+        .trust span { background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 20px; font-size: 0.85rem; }
+
+        /* Steps */
+        .steps { padding: 80px 20px; max-width: 900px; margin: 0 auto; }
+        .steps h2 { text-align: center; font-size: 2rem; margin-bottom: 48px; }
+        .step-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 32px; }
+        .step { text-align: center; padding: 32px 20px; }
+        .step-num { width: 48px; height: 48px; background: #00d4aa; color: #0f0c29; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 1.3rem; font-weight: 800; margin-bottom: 16px; }
+        .step h3 { font-size: 1.2rem; margin-bottom: 8px; }
+        .step p { color: #666; line-height: 1.6; }
+
+        /* Earnings */
+        .earnings { background: #0f0c29; color: white; padding: 80px 20px; text-align: center; }
+        .earnings h2 { font-size: 2rem; margin-bottom: 8px; }
+        .earnings .sub { opacity: 0.7; margin-bottom: 40px; }
+        .earn-table { max-width: 500px; margin: 0 auto; }
+        .earn-row { display: flex; justify-content: space-between; padding: 16px 24px; border-bottom: 1px solid rgba(255,255,255,0.1); }
+        .earn-row:last-child { border: none; }
+        .earn-amount { color: #00d4aa; font-weight: 700; font-size: 1.2rem; }
+
+        /* Privacy */
+        .privacy { padding: 80px 20px; max-width: 800px; margin: 0 auto; }
+        .privacy h2 { text-align: center; font-size: 2rem; margin-bottom: 40px; }
+        .priv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+        .priv-card { padding: 24px; border-radius: 12px; }
+        .priv-yes { background: #e8f5e9; }
+        .priv-no { background: #fce4ec; }
+        .priv-card h3 { margin-bottom: 12px; }
+        .priv-card ul { list-style: none; padding: 0; }
+        .priv-card li { padding: 4px 0; }
+        .priv-yes li::before { content: "✓ "; color: #2e7d32; font-weight: bold; }
+        .priv-no li::before { content: "✗ "; color: #c62828; font-weight: bold; }
+
+        /* CTA */
+        .cta { text-align: center; padding: 80px 20px; background: linear-gradient(135deg, #302b63, #24243e); color: white; }
+        .cta h2 { font-size: 2.2rem; margin-bottom: 16px; }
+        .cta p { opacity: 0.8; margin-bottom: 32px; font-size: 1.1rem; }
+
+        /* Footer */
+        footer { text-align: center; padding: 32px 20px; color: #999; font-size: 0.85rem; }
+        footer a { color: #666; }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .hero h1 { font-size: 2.2rem; }
+            .step-grid { grid-template-columns: 1fr; }
+            .priv-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+<section class="hero">
+    <h1>Play Games. <span>Get Paid.</span></h1>
+    <p>Earn money while you play your favorite PC games. Just download, install, and play — we handle the rest.</p>
+    <a href="https://github.com/howardleegeek/gamedata-recorder/releases/latest" class="btn">Download Free</a>
+    <span class="btn-sub">Windows 10/11 | Under 50 MB | Open Source</span>
+    <div class="trust">
+        <span>Open Source (MIT)</span>
+        <span>0% FPS Impact</span>
+        <span>Anti-Cheat Safe</span>
+        <span>Data Encrypted</span>
+    </div>
+</section>
+
+<section class="steps">
+    <h2>How It Works</h2>
+    <div class="step-grid">
+        <div class="step">
+            <div class="step-num">1</div>
+            <h3>Download & Install</h3>
+            <p>One-click installer. No account needed to start. Runs silently in your system tray.</p>
+        </div>
+        <div class="step">
+            <div class="step-num">2</div>
+            <h3>Play Normally</h3>
+            <p>GameData Recorder detects when you play a game and starts recording automatically. You won't notice it.</p>
+        </div>
+        <div class="step">
+            <div class="step-num">3</div>
+            <h3>Earn Money</h3>
+            <p>Your gameplay data uploads on WiFi. AI companies pay for this data. You get paid monthly.</p>
+        </div>
+    </div>
+</section>
+
+<section class="earnings">
+    <h2>How Much Can You Earn?</h2>
+    <p class="sub">Earnings vary by game, data quality, and market demand.</p>
+    <div class="earn-table">
+        <div class="earn-row"><span>20 hours / month</span><span class="earn-amount">~$10</span></div>
+        <div class="earn-row"><span>40 hours / month</span><span class="earn-amount">~$20</span></div>
+        <div class="earn-row"><span>80 hours / month</span><span class="earn-amount">~$40+</span></div>
+    </div>
+</section>
+
+<section class="privacy">
+    <h2>Your Privacy, Protected</h2>
+    <div class="priv-grid">
+        <div class="priv-card priv-yes">
+            <h3>What We Record</h3>
+            <ul>
+                <li>Game video (1080p, 30fps)</li>
+                <li>Keyboard & mouse actions</li>
+                <li>Controller input</li>
+                <li>Game title & genre</li>
+            </ul>
+        </div>
+        <div class="priv-card priv-no">
+            <h3>What We DON'T Record</h3>
+            <ul>
+                <li>Desktop or browser</li>
+                <li>Passwords or banking</li>
+                <li>Audio or voice chat</li>
+                <li>Anything outside games</li>
+            </ul>
+        </div>
+    </div>
+</section>
+
+<section class="cta">
+    <h2>Ready to Earn While You Play?</h2>
+    <p>Join thousands of gamers who earn passive income from their gameplay.</p>
+    <a href="https://github.com/howardleegeek/gamedata-recorder/releases/latest" class="btn">Download Free</a>
+</section>
+
+<footer>
+    <p>GameData Labs — Building data infrastructure for AI world models.</p>
+    <p><a href="https://github.com/howardleegeek/gamedata-recorder">Open Source on GitHub</a> | MIT License</p>
+</footer>
+
+</body>
+</html>

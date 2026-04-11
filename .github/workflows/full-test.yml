@@ -1,0 +1,478 @@
+name: Full System Test
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    # 每天凌晨3点自动运行测试
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # ==========================================
+  # Job 1: 后端 API 测试
+  # ==========================================
+  test-backend:
+    runs-on: ubuntu-latest
+    
+    services:
+      # 启动后端服务进行测试
+      backend:
+        image: python:3.11-slim
+        ports:
+          - 8080:8080
+        options: >-
+          --health-cmd "curl -f http://localhost:8080/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio httpx
+
+      - name: Start backend server
+        working-directory: ./backend
+        env:
+          API_SECRET: test-secret-for-ci-only
+          ALLOWED_ORIGINS: http://localhost:3000,http://localhost:8080
+          DATA_DIR: ./test_data
+          PORT: 8080
+        run: |
+          mkdir -p test_data
+          uvicorn main:app --host 0.0.0.0 --port 8080 &
+          sleep 5
+          curl -s http://localhost:8080/health
+
+      - name: Run API tests
+        working-directory: ./backend
+        env:
+          API_BASE_URL: http://localhost:8080
+          TEST_API_SECRET: test-secret-for-ci-only
+        run: |
+          python -m pytest test_api.py -v --tb=short
+
+      - name: Test real endpoints
+        run: |
+          echo "=== Testing Health Endpoint ==="
+          curl -s http://localhost:8080/health | jq .
+          
+          echo "=== Testing API Docs ==="
+          curl -s http://localhost:8080/docs > /dev/null && echo "✅ Docs accessible"
+          
+          echo "=== Testing Login Flow ==="
+          TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/login \
+            -H "Content-Type: application/json" \
+            -d '{"email": "test@example.com", "provider": "email"}' | jq -r '.token')
+          echo "Token received: ${TOKEN:0:20}..."
+          
+          echo "=== Testing User Info ==="
+          curl -s http://localhost:8080/api/v1/user/info \
+            -H "Authorization: Bearer $TOKEN" | jq .
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-results
+          path: ./backend/test_data/
+          retention-days: 7
+
+  # ==========================================
+  # Job 2: Rust 客户端编译测试
+  # ==========================================
+  test-rust-build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Run tests
+        run: cargo test --lib
+
+      - name: Check compilation (without OBS)
+        run: cargo check --release
+
+  # ==========================================
+  # Job 3: Windows 完整构建测试
+  # ==========================================
+  test-windows-full-build:
+    runs-on: windows-latest
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-obs-build
+        run: cargo install cargo-obs-build
+
+      - name: Install OBS binaries
+        run: cargo obs-build build --out-dir target\x86_64-pc-windows-msvc\release
+        continue-on-error: true
+
+      - name: Build release
+        run: cargo build --release
+        continue-on-error: true
+
+      - name: Check build artifacts
+        run: |
+          if (Test-Path "target\release\gamedata-recorder.exe") {
+            Write-Host "✅ Build successful - gamedata-recorder.exe exists"
+            Get-Item "target\release\gamedata-recorder.exe" | Select-Object Name, Length, LastWriteTime
+          } else {
+            Write-Host "❌ Build failed - executable not found"
+            exit 1
+          }
+
+      - name: Upload build artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-${{ github.run_number }}
+          path: |
+            target/release/gamedata-recorder.exe
+            target/release/*.dll
+          retention-days: 7
+
+  # ==========================================
+  # Job 4: 端到端集成测试
+  # ==========================================
+  test-e2e:
+    runs-on: ubuntu-latest
+    needs: [test-backend]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: |
+          pip install -r requirements.txt
+          pip install requests
+
+      - name: Start backend
+        working-directory: ./backend
+        env:
+          API_SECRET: e2e-test-secret-key
+          ALLOWED_ORIGINS: http://localhost:3000
+          DATA_DIR: ./e2e_data
+          PORT: 8080
+        run: |
+          mkdir -p e2e_data
+          uvicorn main:app --host 0.0.0.0 --port 8080 &
+          sleep 3
+
+      - name: Run E2E test script
+        working-directory: ./backend
+        run: |
+          python << 'EOF'
+          import requests
+          import json
+          import sys
+          import time
+
+          BASE_URL = "http://localhost:8080"
+          
+          def test_health():
+              """测试健康检查"""
+              resp = requests.get(f"{BASE_URL}/health")
+              assert resp.status_code == 200
+              data = resp.json()
+              assert data["status"] == "ok"
+              print("✅ Health check passed")
+              return True
+
+          def test_login():
+              """测试登录流程"""
+              resp = requests.post(
+                  f"{BASE_URL}/api/v1/login",
+                  json={"email": "e2e_test@example.com", "provider": "email"}
+              )
+              assert resp.status_code == 200
+              data = resp.json()
+              assert "token" in data
+              print(f"✅ Login passed - token: {data['token'][:20]}...")
+              return data["token"]
+
+          def test_user_info(token):
+              """测试获取用户信息"""
+              resp = requests.get(
+                  f"{BASE_URL}/api/v1/user/info",
+                  headers={"Authorization": f"Bearer {token}"}
+              )
+              assert resp.status_code == 200
+              data = resp.json()
+              assert "user_id" in data
+              print(f"✅ User info passed - user_id: {data['user_id']}")
+              return True
+
+          def test_upload_init(token):
+              """测试上传初始化"""
+              resp = requests.post(
+                  f"{BASE_URL}/api/v1/upload/init",
+                  headers={"Authorization": f"Bearer {token}"},
+                  json={
+                      "filename": "test_video.mp4",
+                      "total_size_bytes": 1024 * 1024 * 100,  # 100MB
+                      "game_exe": "test_game.exe",
+                      "video_duration_seconds": 60.0,
+                      "video_width": 1920,
+                      "video_height": 1080,
+                      "video_codec": "h265",
+                      "video_fps": 60.0
+                  }
+              )
+              assert resp.status_code == 200
+              data = resp.json()
+              assert "upload_id" in data
+              print(f"✅ Upload init passed - upload_id: {data['upload_id']}")
+              return data["upload_id"]
+
+          def test_earnings(token):
+              """测试收益查询"""
+              resp = requests.get(
+                  f"{BASE_URL}/api/v1/earnings",
+                  headers={"Authorization": f"Bearer {token}"}
+              )
+              assert resp.status_code == 200
+              data = resp.json()
+              assert "balance_usd" in data
+              print(f"✅ Earnings passed - balance: ${data['balance_usd']}")
+              return True
+
+          # 运行所有测试
+          print("\n=== Starting E2E Tests ===\n")
+          
+          try:
+              test_health()
+              token = test_login()
+              test_user_info(token)
+              upload_id = test_upload_init(token)
+              test_earnings(token)
+              
+              print("\n=== All E2E Tests Passed! ===")
+              sys.exit(0)
+          except Exception as e:
+              print(f"\n❌ E2E Test Failed: {e}")
+              sys.exit(1)
+          EOF
+
+      - name: Test CORS headers
+        run: |
+          echo "=== Testing CORS Configuration ==="
+          curl -s -X OPTIONS \
+            -H "Origin: http://localhost:3000" \
+            -H "Access-Control-Request-Method: POST" \
+            http://localhost:8080/api/v1/login \
+            -v 2>&1 | grep -i "access-control" || echo "CORS headers check completed"
+
+  # ==========================================
+  # Job 5: 性能测试
+  # ==========================================
+  test-performance:
+    runs-on: ubuntu-latest
+    needs: [test-backend]
+    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[perf]')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: |
+          pip install -r requirements.txt
+          pip install locust
+
+      - name: Start backend
+        working-directory: ./backend
+        env:
+          API_SECRET: perf-test-secret
+          ALLOWED_ORIGINS: "*"
+          DATA_DIR: ./perf_data
+          PORT: 8080
+        run: |
+          mkdir -p perf_data
+          uvicorn main:app --host 0.0.0.0 --port 8080 --workers 1 &
+          sleep 3
+
+      - name: Run load test
+        run: |
+          python << 'EOF'
+          import requests
+          import time
+          import concurrent.futures
+          import statistics
+
+          BASE_URL = "http://localhost:8080"
+          CONCURRENT_REQUESTS = 50
+          TOTAL_REQUESTS = 200
+
+          def make_request(i):
+              start = time.time()
+              try:
+                  resp = requests.get(f"{BASE_URL}/health", timeout=5)
+                  elapsed = time.time() - start
+                  return elapsed if resp.status_code == 200 else None
+              except:
+                  return None
+
+          print(f"\n=== Load Test: {TOTAL_REQUESTS} requests, {CONCURRENT_REQUESTS} concurrent ===\n")
+          
+          start_time = time.time()
+          with concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENT_REQUESTS) as executor:
+              results = list(executor.map(make_request, range(TOTAL_REQUESTS)))
+          
+          total_time = time.time() - start_time
+          successful = [r for r in results if r is not None]
+          failed = TOTAL_REQUESTS - len(successful)
+
+          print(f"Total requests: {TOTAL_REQUESTS}")
+          print(f"Successful: {len(successful)}")
+          print(f"Failed: {failed}")
+          print(f"Total time: {total_time:.2f}s")
+          print(f"Requests/sec: {TOTAL_REQUESTS/total_time:.2f}")
+          
+          if successful:
+              print(f"Avg response time: {statistics.mean(successful)*1000:.2f}ms")
+              print(f"P95 response time: {sorted(successful)[int(len(successful)*0.95)]*1000:.2f}ms")
+          
+          # 断言：成功率 > 95%，平均响应 < 500ms
+          assert failed / TOTAL_REQUESTS < 0.05, f"Too many failures: {failed}"
+          if successful:
+              assert statistics.mean(successful) < 0.5, f"Too slow: {statistics.mean(successful)}s"
+          
+          print("\n✅ Performance test passed!")
+          EOF
+
+  # ==========================================
+  # Job 6: 安全扫描
+  # ==========================================
+  security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Bandit (Python security scanner)
+        uses: PyCQA/bandit@main
+        with:
+          args: "-r ./backend -f json -o bandit-report.json || true"
+
+      - name: Check for hardcoded secrets
+        run: |
+          echo "=== Scanning for hardcoded secrets ==="
+          
+          # 检查常见的密钥模式
+          if grep -r "password.*=.*\"" ./backend --include="*.py" | grep -v "example\|test\|dummy" | head -5; then
+            echo "⚠️ Found potential hardcoded passwords"
+          fi
+          
+          if grep -r "secret.*=.*\"" ./backend --include="*.py" | grep -v "example\|test\|dummy\|getenv\|os.environ" | head -5; then
+            echo "⚠️ Found potential hardcoded secrets"
+          fi
+          
+          if grep -r "api_key.*=.*\"" ./backend --include="*.py" | grep -v "example\|test\|dummy" | head -5; then
+            echo "⚠️ Found potential hardcoded API keys"
+          fi
+          
+          echo "✅ Secret scan completed"
+
+      - name: Upload security report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-scan-results
+          path: bandit-report.json
+          retention-days: 30
+
+  # ==========================================
+  # 最终状态报告
+  # ==========================================
+  test-summary:
+    runs-on: ubuntu-latest
+    needs: [test-backend, test-rust-build, test-e2e, security-scan]
+    if: always()
+    
+    steps:
+      - name: Test Summary
+        run: |
+          echo "=========================================="
+          echo "    GameData Recorder Test Summary"
+          echo "=========================================="
+          echo ""
+          echo "Backend API Tests:    ${{ needs.test-backend.result }}"
+          echo "Rust Build Tests:     ${{ needs.test-rust-build.result }}"
+          echo "E2E Integration:      ${{ needs.test-e2e.result }}"
+          echo "Security Scan:        ${{ needs.security-scan.result }}"
+          echo ""
+          echo "=========================================="
+          
+          # 如果有任何失败，退出码为1
+          if [[ "${{ needs.test-backend.result }}" == "failure" ]] || \
+             [[ "${{ needs.test-rust-build.result }}" == "failure" ]] || \
+             [[ "${{ needs.test-e2e.result }}" == "failure" ]]; then
+            echo "❌ Some tests failed!"
+            exit 1
+          else
+            echo "✅ All critical tests passed!"
+          fi
