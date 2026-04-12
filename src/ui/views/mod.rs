@@ -318,21 +318,23 @@ impl App {
     }
 
     pub fn render(&mut self, ctx: &egui::Context) {
-        let (has_api_key, has_consented) = (
-            !self.local_credentials.api_key.is_empty(),
-            self.local_credentials.has_consented,
-        );
+        // TEMPORARILY DISABLED: API key login screen
+        // Focus on local recording only for now
+        // TODO: Re-enable when backend integration is needed
+        self.main_view(ctx);
 
-        // SKIP_API_KEY: Allow running without API key for local testing
-        // Set GAMEDATA_SKIP_API_KEY=1 environment variable to enable
-        let skip_api_key = std::env::var("GAMEDATA_SKIP_API_KEY").is_ok();
-
-        match (has_api_key, has_consented, skip_api_key) {
-            (true, true, _) => self.main_view(ctx),
-            (true, false, _) => self.consent_view(ctx),
-            (false, _, true) => self.main_view(ctx), // Skip login if env var set
-            (false, _, false) => self.login_view(ctx),
-        }
+        // Original logic (commented out):
+        // let (has_api_key, has_consented) = (
+        //     !self.local_credentials.api_key.is_empty(),
+        //     self.local_credentials.has_consented,
+        // );
+        // let skip_api_key = std::env::var("GAMEDATA_SKIP_API_KEY").is_ok();
+        // match (has_api_key, has_consented, skip_api_key) {
+        //     (true, true, _) => self.main_view(ctx),
+        //     (true, false, _) => self.consent_view(ctx),
+        //     (false, _, true) => self.main_view(ctx),
+        //     (false, _, false) => self.login_view(ctx),
+        // }
     }
 }
 impl App {

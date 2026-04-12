@@ -365,10 +365,12 @@ async fn main(
                                 }).await.unwrap_or_default();
 
                                 tracing::info!("Found {} local recordings", local_recordings.len());
-                                app_state
+                                if let Err(e) = app_state
                                     .ui_update_tx
                                     .send(UiUpdate::UpdateLocalRecordings(local_recordings))
-                                    .ok();
+                                {
+                                    tracing::error!("Failed to send UpdateLocalRecordings to UI: {}", e);
+                                }
                             }
                         });
                     }
@@ -476,7 +478,9 @@ async fn main(
                     AsyncRequest::DeleteRecording(path) => {
                         let Some((api_key, _)) = valid_api_key_and_user_id.as_ref() else {
                             tracing::error!("Cannot delete recording without valid API key: {}", path.display());
-                            app_state.async_request_tx.send(AsyncRequest::LoadLocalRecordings).await.ok();
+                            if let Err(e) = app_state.async_request_tx.send(AsyncRequest::LoadLocalRecordings).await {
+                                tracing::error!("Failed to send LoadLocalRecordings after delete error: {}", e);
+                            }
                             continue;
                         };
 
@@ -490,7 +494,14 @@ async fn main(
                             tracing::error!("Cannot delete non-recording folder: {}", path.display());
                         }
 
-                        app_state.async_request_tx.send(AsyncRequest::LoadLocalRecordings).await.ok();
+                        // Send LoadLocalRecordings to refresh UI
+                        if let Err(e) = app_state.async_request_tx.send(AsyncRequest::LoadLocalRecordings).await {
+                            tracing::error!("Failed to send LoadLocalRecordings after delete: {}", e);
+                        }
+                        // Also send ForceUpdate to ensure UI repaints
+                        if let Err(e) = app_state.ui_update_tx.send(UiUpdate::ForceUpdate) {
+                            tracing::error!("Failed to send ForceUpdate after delete: {}", e);
+                        }
                     }
                     AsyncRequest::MoveRecordingsFolder { from, to } => {
                         tokio::spawn(move_recordings_folder(app_state.clone(), from, to));

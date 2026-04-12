@@ -13,6 +13,11 @@ function Write-Error-Custom {
     Write-Host "[ERROR] $Message" -ForegroundColor Red
 }
 
+function Write-Warning-Custom {
+    param([string]$Message)
+    Write-Host "[WARNING] $Message" -ForegroundColor Yellow
+}
+
 Write-Host "======================================" -ForegroundColor Cyan
 Write-Host "Building for x86_64 on ARM64 Windows" -ForegroundColor Cyan
 Write-Host "======================================" -ForegroundColor Cyan
