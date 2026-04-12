@@ -15,13 +15,10 @@ env:
 
 jobs:
   # ==========================================
-  # Job 1: Rust 代码检查
+  # Job 1: Rust 代码检查 (Windows only - 项目需要 Windows API)
   # ==========================================
   test-rust-build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    runs-on: windows-latest
 
     steps:
       - name: Checkout code
