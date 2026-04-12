@@ -39,7 +39,10 @@ pub async fn start(
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
     let (api_token, unreliable_connection, delete_uploaded) = {
-        let config = app_state.config.read().unwrap();
+        let config = app_state.config.read().unwrap_or_else(|e| {
+            tracing::error!("Config mutex poisoned: {e}");
+            std::sync::RwLockReadGuard::from(std::sync::PoisonError::into_inner(e))
+        });
         (
             config.credentials.api_key.clone(),
             config.preferences.unreliable_connection,

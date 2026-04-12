@@ -391,8 +391,8 @@ pub async fn run(
             // Check if upload session is about to expire
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             if now >= expires_at {
                 tracing::error!(
                     "Upload session expired: upload_id={}, client_time={}, expires_at={}, diff={}s. If this is a fresh upload, the system clock may be incorrect.",
