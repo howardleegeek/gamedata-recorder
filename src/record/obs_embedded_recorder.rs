@@ -856,7 +856,9 @@ impl ObsLogger for TracingObsLogger {
                 if msg.contains("number of skipped frames due to encoding lag:")
                     && let Some(frames_data) = parse_skipped_frames(&msg)
                 {
-                    *self.skipped_frames.lock().unwrap() = Some(frames_data);
+                    if let Ok(mut guard) = self.skipped_frames.lock() {
+                        *guard = Some(frames_data);
+                    }
                 }
                 tracing::info!(target: "obs", "{msg}");
             }
