@@ -417,7 +417,10 @@ pub async fn run(
             );
 
             // Store bytes_uploaded before attempting the chunk
-            let bytes_before_chunk = progress_sender.lock().unwrap().bytes_uploaded();
+            let bytes_before_chunk = progress_sender
+                .lock()
+                .map(|s| s.bytes_uploaded())
+                .unwrap_or_default();
             let mut retries = 0u32;
 
             // Should be about 5-6 retries
@@ -434,10 +437,9 @@ pub async fn run(
                 backoff,
                 || async {
                     // Reset progress before each attempt
-                    progress_sender
-                        .lock()
-                        .unwrap()
-                        .set_bytes_uploaded(bytes_before_chunk);
+                    if let Ok(mut sender) = progress_sender.lock() {
+                        sender.set_bytes_uploaded(bytes_before_chunk);
+                    }
 
                     // Create a stream that wraps chunk_data and tracks upload progress
                     let progress_stream =
@@ -445,10 +447,9 @@ pub async fn run(
                             .inspect_ok({
                                 let progress_sender = progress_sender.clone();
                                 move |bytes| {
-                                    progress_sender
-                                        .lock()
-                                        .unwrap()
-                                        .increment_bytes_uploaded(bytes.len() as u64);
+                                    if let Ok(mut sender) = progress_sender.lock() {
+                                        sender.increment_bytes_uploaded(bytes.len() as u64);
+                                    }
                                 }
                             });
 
@@ -493,7 +494,9 @@ pub async fn run(
                 error: e,
             })?;
 
-            progress_sender.lock().unwrap().send();
+            if let Ok(mut sender) = progress_sender.lock() {
+                sender.send();
+            }
 
             // Update progress state with new chunk and save to file (APPEND ONLY)
             if let Some(paused) = guard.paused_mut() {
