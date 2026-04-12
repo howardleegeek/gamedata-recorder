@@ -65,7 +65,14 @@ impl FpsLogger {
 
     /// Finalize the current second's data into an FpsLogEntry.
     fn finalize_current_second(&mut self) {
-        let fps = self.current_second_frame_times.len() as u32;
+        // frame_times stores intervals between frames, so N intervals = N+1 frames.
+        // Exception: if no intervals were recorded, fps is 0 (no frames at all)
+        // or 1 (single frame, no interval to measure).
+        let fps = if self.current_second_frame_times.is_empty() {
+            0u32
+        } else {
+            (self.current_second_frame_times.len() + 1) as u32
+        };
         let (avg, max) = if self.current_second_frame_times.is_empty() {
             (0.0, 0.0)
         } else {

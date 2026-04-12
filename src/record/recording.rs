@@ -178,7 +178,15 @@ impl Recording {
     ) -> Result<()> {
         let window_name = self.get_window_name();
         let mut result = recorder.stop_recording().await;
-        self.input_writer.stop(input_capture).await?;
+
+        // Don't propagate input_writer errors — treat like recorder errors
+        // (write INVALID marker instead of returning Err which skips metadata)
+        if let Err(e) = self.input_writer.stop(input_capture).await {
+            tracing::error!("Failed to stop input writer: {e}");
+            if result.is_ok() {
+                result = Err(e);
+            }
+        }
 
         // Save per-second FPS log (buyer spec requirement)
         if let Err(e) = self.fps_logger.save(&self.recording_location).await {
