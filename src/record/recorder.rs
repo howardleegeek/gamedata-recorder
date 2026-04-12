@@ -392,8 +392,12 @@ pub fn get_foregrounded_game() -> Result<Option<(String, game_process::Pid, HWND
         return Ok(None);
     }
 
+    // Strip .exe extension for whitelist comparison
+    // (blacklist uses "chrome.exe" format, whitelist uses "gta5" format)
+    let exe_stem = exe_lower.strip_suffix(".exe").unwrap_or(&exe_lower);
+
     // Only record games in the whitelist
-    if !GAME_WHITELIST.iter().any(|g| exe_lower == *g) {
+    if !GAME_WHITELIST.iter().any(|g| exe_stem == *g) {
         tracing::debug!("{} is not in game whitelist, skipping", exe_name);
         return Ok(None);
     }
