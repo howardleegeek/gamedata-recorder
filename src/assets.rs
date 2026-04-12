@@ -90,11 +90,9 @@ pub fn get_available_cues() -> Vec<String> {
 }
 
 /// Loads icon data from bytes and returns the rgba data and dimensions
-pub fn load_icon_data_from_bytes(bytes: &[u8]) -> (Vec<u8>, (u32, u32)) {
-    let image = image::load_from_memory(bytes)
-        .expect("Failed to load embedded icon")
-        .into_rgba8();
+pub fn load_icon_data_from_bytes(bytes: &[u8]) -> Option<(Vec<u8>, (u32, u32))> {
+    let image = image::load_from_memory(bytes).ok()?.into_rgba8();
     let dimensions = image.dimensions();
     let rgba = image.into_raw();
-    (rgba, dimensions)
+    Some((rgba, dimensions))
 }

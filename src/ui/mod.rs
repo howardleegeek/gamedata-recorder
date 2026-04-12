@@ -126,15 +126,16 @@ impl WinitApp {
         tracing::debug!("Main app view created");
 
         tracing::debug!("Loading window icons");
-        fn load_icon_from_bytes(bytes: &[u8]) -> winit::window::Icon {
-            let (icon_rgb, (icon_width, icon_height)) = assets::load_icon_data_from_bytes(bytes);
+        fn load_icon_from_bytes(bytes: &[u8]) -> Result<winit::window::Icon> {
+            let (icon_rgb, (icon_width, icon_height)) = assets::load_icon_data_from_bytes(bytes)
+                .ok_or_else(|| eyre::eyre!("Failed to load icon data from bytes"))?;
             winit::window::Icon::from_rgba(icon_rgb, icon_width, icon_height)
-                .expect("Failed to create window icon")
+                .map_err(|e| eyre::eyre!("Failed to create window icon: {e}"))
         }
 
         let default_icon_bytes = assets::get_logo_default_bytes()
             .ok_or_else(|| eyre::eyre!("Failed to load default logo asset"))?;
-        let default_icon = load_icon_from_bytes(default_icon_bytes);
+        let default_icon = load_icon_from_bytes(default_icon_bytes)?;
         let recording_icon_bytes = assets::get_logo_recording_bytes()
             .ok_or_else(|| eyre::eyre!("Failed to load recording logo asset"))?;
         let recording_icon = load_icon_from_bytes(recording_icon_bytes);
@@ -157,10 +158,13 @@ impl WinitApp {
         let window = Arc::new(window);
         let _ = window.request_inner_size(inner_size);
 
-        let surface = self
-            .instance
-            .create_surface(window.clone())
-            .expect("Failed to create surface!");
+        let surface = match self.instance.create_surface(window.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Failed to create surface: {e}");
+                return;
+            }
+        };
 
         let state = internal::WgpuState::new(
             &self.instance,
@@ -223,7 +227,9 @@ impl ApplicationHandler for WinitApp {
             .with_resizable(true)
             .with_window_icon(Some(self.default_icon.clone()));
 
-        let window = event_loop.create_window(window_attributes).unwrap();
+        let window = event_loop
+            .create_window(window_attributes)
+            .map_err(|e| eyre::eyre!("Failed to create window: {e}"))?;
 
         // Now that we have the scale factor, we can multiply the inner size by it
         // to ensure that the user will see the content at their DPI scaling.
@@ -260,9 +266,10 @@ impl ApplicationHandler for WinitApp {
         self.main_app.copy_in_app_config();
 
         // Let egui renderer process the event first
-        let response = state
-            .renderer()
-            .handle_input(self.window.as_ref().unwrap(), &event);
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let response = state.renderer().handle_input(window, &event);
 
         // We throttle this so we aren't unnecessarily repainting for what is otherwise a relatively
         // simple UI. 16ms ~= 60fps.

@@ -1319,10 +1319,14 @@ fn wait_for_ctrl_c() -> oneshot::Receiver<()> {
     let (ctrl_c_tx, ctrl_c_rx) = oneshot::channel();
 
     tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to listen for Ctrl+C signal");
-        let _ = ctrl_c_tx.send(());
+        match tokio::signal::ctrl_c().await {
+            Ok(_) => {
+                let _ = ctrl_c_tx.send(());
+            }
+            Err(e) => {
+                tracing::error!("Failed to listen for Ctrl+C signal: {e}");
+            }
+        }
     });
     ctrl_c_rx
 }

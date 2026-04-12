@@ -35,7 +35,8 @@ impl TrayIconState {
         // create tray icon
         tracing::debug!("Loading tray icon data");
         fn create_tray_icon_data_from_bytes(bytes: &[u8]) -> eyre::Result<tray_icon::Icon> {
-            let (rgba, (width, height)) = assets::load_icon_data_from_bytes(bytes);
+            let (rgba, (width, height)) = assets::load_icon_data_from_bytes(bytes)
+                .ok_or_else(|| eyre::eyre!("Failed to load icon data from bytes"))?;
             Ok(tray_icon::Icon::from_rgba(rgba, width, height)?)
         }
         let default_icon_bytes = assets::get_logo_default_bytes()
