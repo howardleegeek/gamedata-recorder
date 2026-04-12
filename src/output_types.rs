@@ -172,11 +172,17 @@ impl InputEventType {
             InputEventType::Start { inputs } => serde_json::to_value(SerializedStart {
                 inputs: Inputs::from(inputs.clone()),
             })
-            .unwrap(),
+            .unwrap_or_else(|e| {
+                tracing::error!("Failed to serialize Start event: {e}");
+                json!({"error": "serialization failed"})
+            }),
             InputEventType::End { inputs } => serde_json::to_value(SerializedEnd {
                 inputs: Inputs::from(inputs.clone()),
             })
-            .unwrap(),
+            .unwrap_or_else(|e| {
+                tracing::error!("Failed to serialize End event: {e}");
+                json!({"error": "serialization failed"})
+            }),
             InputEventType::VideoStart => json!([]),
             InputEventType::VideoEnd => json!([]),
             InputEventType::HookStart => json!([]),
@@ -468,13 +474,14 @@ impl InputEvent {
     }
 
     pub fn new_at_now(event: InputEventType) -> Self {
-        Self::new(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs_f64(),
-            event,
-        )
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or_else(|_| {
+                tracing::warn!("System time before UNIX epoch, using 0");
+                0.0
+            });
+        Self::new(timestamp, event)
     }
 }
 impl std::fmt::Display for InputEvent {
