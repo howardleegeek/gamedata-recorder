@@ -12,10 +12,7 @@ use color_eyre::eyre;
 #[cfg(target_os = "windows")]
 pub fn ensure_single_instance() -> eyre::Result<()> {
     use windows::{
-        Win32::{
-            Foundation::ERROR_ALREADY_EXISTS,
-            System::Threading::CreateMutexW,
-        },
+        Win32::{Foundation::ERROR_ALREADY_EXISTS, System::Threading::CreateMutexW},
         core::PCWSTR,
     };
 
@@ -27,11 +24,7 @@ pub fn ensure_single_instance() -> eyre::Result<()> {
 
     unsafe {
         // bInitialOwner = false — we don't want to own it yet, just check if it exists
-        let mutex_result = CreateMutexW(
-            None,
-            false,
-            PCWSTR(mutex_name_wide.as_ptr()),
-        );
+        let mutex_result = CreateMutexW(None, false, PCWSTR(mutex_name_wide.as_ptr()));
 
         match mutex_result {
             Ok(_handle) => {
@@ -44,9 +37,7 @@ pub fn ensure_single_instance() -> eyre::Result<()> {
                         "Another instance of GameData Recorder is already running.\n\n",
                         "Only one instance can run at a time."
                     ));
-                    eyre::bail!(
-                        "Another instance of GameData Recorder is already running."
-                    );
+                    eyre::bail!("Another instance of GameData Recorder is already running.");
                 }
 
                 // We're the first instance. The handle is intentionally leaked (not dropped)
@@ -55,9 +46,7 @@ pub fn ensure_single_instance() -> eyre::Result<()> {
                 std::mem::forget(_handle);
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to create mutex for single instance check: {e}"
-                );
+                tracing::warn!("Failed to create mutex for single instance check: {e}");
                 // Fail open — allow the instance to run
             }
         }

@@ -157,6 +157,117 @@ pub const GAME_WHITELIST: &[&str] = &[
     "youngblood_x64vk",
     // Ziggurat 2
     "ziggurat2",
+    // === TOP REQUESTED GAMES (from testers) ===
+    // GTA V / GTA V Enhanced
+    "gta5",
+    "gtav",
+    "playgtav",
+    "gta5_enhanced",
+    // Red Dead Redemption 2
+    "rdr2",
+    // Cyberpunk 2077
+    "cyberpunk2077",
+    // Counter-Strike 2
+    "cs2",
+    // Valorant
+    "valorant-win64-shipping",
+    "valorant",
+    // League of Legends
+    "league of legends",
+    // Fortnite
+    "fortniteClient-Win64-Shipping",
+    "fortniteclient-win64-shipping",
+    // Minecraft
+    "javaw",
+    "minecraft",
+    // Apex Legends
+    "r5apex",
+    // Overwatch 2
+    "overwatch",
+    // Dota 2
+    "dota2",
+    // Elden Ring
+    "eldenring",
+    // Hogwarts Legacy
+    "hogwartslegacy",
+    "hogwartslegacy-win64-shipping",
+    // The Witcher 3
+    "witcher3",
+    // Skyrim
+    "skyrimse",
+    "skyrim",
+    "skyrimselauncher",
+    // Fallout 4
+    "fallout4",
+    "fallout4launcher",
+    // Starfield
+    "starfield",
+    // Baldur's Gate 3
+    "bg3",
+    "bg3_dx11",
+    // Resident Evil 4 Remake
+    "re4",
+    // Alan Wake 2
+    "alanwake2",
+    // God of War
+    "godofwar",
+    // Horizon Zero Dawn
+    "horizonzerodawn",
+    // Spider-Man Remastered
+    "spider-man",
+    // Death Stranding
+    "ds",
+    // Detroit: Become Human
+    "detroitbecomehuman",
+    // Assassin's Creed Valhalla
+    "acvalhalla",
+    // Far Cry 6
+    "farcry6",
+    // Watch Dogs: Legion
+    "watchdogslegion",
+    // Dying Light 2
+    "dyinglight2",
+    "dyinglightgame2",
+    // It Takes Two
+    "ittakestwo",
+    "ittakestwo-win64-shipping",
+    // Sea of Thieves
+    "seaofthieves",
+    "sotgame",
+    // No Man's Sky
+    "nms",
+    // Satisfactory
+    "factorygame",
+    "factorygame-win64-shipping",
+    // Palworld
+    "palworld",
+    "palworld-win64-shipping",
+    // Rust (game)
+    "rustclient",
+    // ARK: Survival Evolved
+    "shootergame",
+    // Subnautica
+    "subnautica",
+    // Deep Rock Galactic
+    "fsd",
+    "fsd-win64-shipping",
+    // Helldivers 2
+    "helldivers2",
+    // Wuthering Waves
+    "wutheringwaves",
+    "client-win64-shipping",
+    // Black Myth: Wukong
+    "b1-win64-shipping",
+    // Grand Theft Auto: San Andreas
+    "gta_sa",
+    "gta-sa",
+    // Euro Truck Simulator 2
+    "eurotrucks2",
+    // American Truck Simulator
+    "amtrucks",
+    // Cities: Skylines II
+    "citiesskylines2",
+    "cities2",
 ];
 
 pub const FPS: u32 = 60;
