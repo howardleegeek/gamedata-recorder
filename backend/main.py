@@ -242,9 +242,9 @@ async def global_exception_handler(request: Request, exc: Exception):
 def generate_token(user_id: str) -> str:
     """Generate HMAC-signed token."""
     payload = f"{user_id}:{int(time.time())}"
-    sig = hmac.new(API_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[
-        :16
-    ]
+    sig = hmac.new(
+        API_SECRET.encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
     return f"{payload}:{sig}"
 
 
@@ -258,7 +258,7 @@ def verify_token(token: str) -> Optional[str]:
     expected_payload = f"{user_id}:{timestamp}"
     expected_sig = hmac.new(
         API_SECRET.encode(), expected_payload.encode(), hashlib.sha256
-    ).hexdigest()[:16]
+    ).hexdigest()
 
     if not hmac.compare_digest(sig, expected_sig):
         return None
@@ -310,25 +310,8 @@ async def get_current_user(
         if user and user.status == UserStatus.ACTIVE:
             return user
 
-    # Legacy fallback: treat sk_ prefixed key as valid
-    if token.startswith("sk_"):
-        legacy_id = f"legacy_{token[3:11]}"
-        result = await db.execute(select(User).where(User.id == legacy_id))
-        user = result.scalar_one_or_none()
-
-        if user:
-            return user
-
-        # Create user if not exists (migration path)
-        user = User(
-            id=legacy_id,
-            email=f"{legacy_id}@gamedatalabs.com",
-            status=UserStatus.ACTIVE,
-            provider="legacy",
-        )
-        db.add(user)
-        await db.commit()
-        return user
+    # Legacy sk_ keys removed — was a security bypass (auto-created users without auth).
+    # All users must register and authenticate via /api/v1/auth/login or /register.
 
     raise HTTPException(status_code=401, detail="Invalid or expired token")
 
@@ -403,10 +386,9 @@ async def health(db: AsyncSession = Depends(get_db)):
         return {
             "status": "ok",
             "version": "0.2.0",
-            "environment": ENVIRONMENT,
             "database": "connected",
-            "users": user_count,
             "timestamp": datetime.utcnow().isoformat(),
+            # user_count removed — was leaking business info to unauthenticated callers
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
@@ -530,8 +512,18 @@ async def upload_init(
     upload_id = str(uuid.uuid4())
     game_control_id = str(uuid.uuid4())
 
+    # Validate upload size — max 50 GB per recording, max 10000 chunks
+    MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024  # 50 GB
+    MAX_CHUNKS = 10000
+    if req.total_size_bytes > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Upload too large: {req.total_size_bytes} bytes (max {MAX_UPLOAD_BYTES})",
+        )
     chunk_size = req.chunk_size_bytes or 33554432
-    total_chunks = max(1, (req.total_size_bytes + chunk_size - 1) // chunk_size)
+    total_chunks = min(
+        max(1, (req.total_size_bytes + chunk_size - 1) // chunk_size), MAX_CHUNKS
+    )
 
     # Create upload record
     upload = Upload(
@@ -632,8 +624,10 @@ async def upload_complete(
     upload.status = UploadStatus.COMPLETED
     upload.completed_at = datetime.utcnow()
 
-    # Calculate earnings
-    duration_hours = (upload.video_duration_seconds or 0) / 3600
+    # Calculate earnings — cap duration to prevent client-side fraud
+    # Max 8 hours per single recording (anything longer is suspicious)
+    raw_duration = max(0, upload.video_duration_seconds or 0)
+    duration_hours = min(raw_duration / 3600, 8.0)
 
     # Get earnings multiplier from game or default
     earnings_per_hour = 0.50  # Default
