@@ -20,7 +20,6 @@ jobs:
   # ==========================================
   test-backend:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && hashFiles('backend/**') != ''
     
     services:
       # 启动后端服务进行测试
@@ -206,7 +205,6 @@ jobs:
   test-e2e:
     runs-on: ubuntu-latest
     needs: [test-backend]
-    if: github.event_name == 'push' && hashFiles('backend/**') != ''
     
     steps:
       - name: Checkout code
@@ -359,7 +357,7 @@ jobs:
   test-performance:
     runs-on: ubuntu-latest
     needs: [test-backend]
-    if: (github.event_name == 'schedule' || contains(github.event.head_commit.message, '[perf]')) && hashFiles('backend/**') != ''
+    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[perf]')
     
     steps:
       - name: Checkout code
