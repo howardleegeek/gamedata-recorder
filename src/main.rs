@@ -45,7 +45,9 @@ fn main() -> Result<()> {
         "egui_overlay",
         "egui_render_glow",
     ] {
-        env_filter = env_filter.add_directive(format!("{crate_name}=warn").parse().unwrap());
+        if let Ok(directive) = format!("{crate_name}=warn").parse() {
+            env_filter = env_filter.add_directive(directive);
+        }
     }
 
     tracing_subscriber::registry()
