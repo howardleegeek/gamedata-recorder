@@ -138,6 +138,7 @@ async fn main(
         last_active: Instant::now(),
         actively_recording_window: None,
         last_auto_record_attempt: None,
+        user_stopped_game_exe: None,
     };
 
     // Offline backoff state
@@ -758,6 +759,9 @@ struct State {
     actively_recording_window: Option<HWND>,
     /// Cooldown for auto-record: prevents rapid start/stop churn on unhookable games
     last_auto_record_attempt: Option<Instant>,
+    /// Suppresses auto-record for this game after user manually stopped it.
+    /// Cleared when the foreground game changes.
+    user_stopped_game_exe: Option<String>,
 }
 impl State {
     async fn on_input(&mut self, e: Event) {
@@ -785,6 +789,12 @@ impl State {
                 self.handle_transition(RecordingState::Recording).await
             }
             (RecordingState::Recording | RecordingState::Paused { .. }, key) if key == stop_key => {
+                // Remember which game the user manually stopped so auto-record
+                // won't immediately restart it (cleared when foreground game changes)
+                let fg = self.app_state.last_foregrounded_game.read().unwrap().clone();
+                if let Some(ref game) = fg {
+                    self.user_stopped_game_exe = game.exe_name.clone();
+                }
                 self.handle_transition(RecordingState::Idle).await
             }
             (RecordingState::Paused { .. }, _) => {

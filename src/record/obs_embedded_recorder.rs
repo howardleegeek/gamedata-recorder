@@ -610,12 +610,14 @@ impl RecorderState {
 
         let mut settings = self.last_encoder_settings.take().unwrap_or_default();
 
-        if !self.was_hooked.load(Ordering::Relaxed) {
-            bail!("Application was never hooked, recording will be blank");
-        }
-
+        // Send shutdown signal BEFORE checking hook status, to ensure the signal thread
+        // exits cleanly even when the recording was never hooked (avoids thread leak).
         if let Some(shutdown_tx) = last_shutdown_tx {
             shutdown_tx.send(()).ok();
+        }
+
+        if !self.was_hooked.load(Ordering::Relaxed) {
+            bail!("Application was never hooked, recording will be blank");
         }
 
         // Extremely ugly hack: We want to get the skipped frames percentage from the logs,

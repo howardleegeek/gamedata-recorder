@@ -41,6 +41,7 @@ pub(crate) struct Recording {
     start_time: SystemTime,
     start_instant: Instant,
     average_fps: Option<f64>,
+    fps_sample_count: u64,
 
     pid: Pid,
     hwnd: HWND,
@@ -95,6 +96,7 @@ impl Recording {
             start_time,
             start_instant,
             average_fps: None,
+            fps_sample_count: 0,
 
             pid,
             hwnd,
@@ -165,7 +167,12 @@ impl Recording {
     }
 
     pub(crate) fn update_fps(&mut self, fps: f64) {
-        self.average_fps = self.average_fps.map(|f| (f + fps) / 2.0).or(Some(fps));
+        // True cumulative average (not exponential decay which biases toward recent samples)
+        self.fps_sample_count += 1;
+        self.average_fps = Some(match self.average_fps {
+            Some(avg) => avg + (fps - avg) / self.fps_sample_count as f64,
+            None => fps,
+        });
         // Feed frame timing data to the per-second FPS logger
         self.fps_logger.on_frame();
     }
