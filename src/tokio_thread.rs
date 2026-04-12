@@ -791,7 +791,12 @@ impl State {
             (RecordingState::Recording | RecordingState::Paused { .. }, key) if key == stop_key => {
                 // Remember which game the user manually stopped so auto-record
                 // won't immediately restart it (cleared when foreground game changes)
-                let fg = self.app_state.last_foregrounded_game.read().unwrap().clone();
+                let fg = self
+                    .app_state
+                    .last_foregrounded_game
+                    .read()
+                    .unwrap()
+                    .clone();
                 if let Some(ref game) = fg {
                     self.user_stopped_game_exe = game.exe_name.clone();
                 }
