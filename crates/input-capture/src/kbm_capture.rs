@@ -14,7 +14,7 @@ use windows::{
         System::LibraryLoader::GetModuleHandleA,
         UI::{
             Input::{
-                self, GetRawInputBuffer, GetRawInputData, HRAWINPUT,
+                self, GetRawInputData, HRAWINPUT,
                 KeyboardAndMouse::{VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2},
                 MOUSE_MOVE_ABSOLUTE, MOUSE_VIRTUAL_DESKTOP, RAWINPUT, RAWINPUTDEVICE,
                 RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RegisterRawInputDevices,
@@ -128,51 +128,18 @@ impl KbmCapture {
             let mut msg = MSG::default();
             let mut last_absolute: Option<(i32, i32)> = None;
 
-            // Pre-allocate buffer for batch input reading (16KB buffer)
-            const BUFFER_SIZE: usize = 16384;
-            let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE];
-
             while GetMessageA(&mut msg, None, 0, 0).as_bool() {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageA(&msg);
 
                 if msg.message == WindowsAndMessaging::WM_INPUT {
-                    // Get message time for latency tracking (when message was queued)
-                    let msg_time = GetMessageTime();
-
-                    // Use GetRawInputBuffer for batch reading - more efficient than
-                    // GetRawInputData which processes one message at a time
-                    let mut cb_size = 0u32;
-                    let count = GetRawInputBuffer(
-                        Some(buffer.as_mut_ptr() as *mut _),
-                        &mut cb_size,
-                        size_of::<RAWINPUTHEADER>()
-                            .try_into()
-                            .expect("size of RAWINPUTHEADER should fit in u32"),
-                    );
-
-                    if count > 0 {
-                        // Process all raw input events in the buffer
-                        let mut offset = 0usize;
-                        for _ in 0..count {
-                            let rawinput = &*(buffer.as_ptr().add(offset) as *const RAWINPUT);
-                            let events =
-                                self.parse_raw_input(rawinput, msg_time, &mut last_absolute);
-                            for event in events {
-                                if !event_callback(event) {
-                                    return Ok(());
-                                }
-                            }
-                            // Advance to next RAWINPUT structure (aligned)
-                            offset += std::mem::size_of::<RAWINPUT>();
-                        }
-                    } else if count == 0 {
-                        // Buffer too small or no data - fall back to GetRawInputData
-                        // for single message processing
-                        for event in self.parse_wm_input(msg.lParam, &mut last_absolute) {
-                            if !event_callback(event) {
-                                return Ok(());
-                            }
+                    // Process each WM_INPUT message individually via GetRawInputData.
+                    // NOTE: GetRawInputBuffer batch mode was removed because the
+                    // previous implementation had bugs (no size query, wrong stride).
+                    // Single-message processing is reliable and sufficient for 1000Hz mice.
+                    for event in self.parse_wm_input(msg.lParam, &mut last_absolute) {
+                        if !event_callback(event) {
+                            return Ok(());
                         }
                     }
                 }
