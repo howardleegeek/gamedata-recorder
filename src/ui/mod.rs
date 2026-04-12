@@ -129,8 +129,12 @@ impl WinitApp {
                 .expect("Failed to create window icon")
         }
 
-        let default_icon = load_icon_from_bytes(assets::get_logo_default_bytes());
-        let recording_icon = load_icon_from_bytes(assets::get_logo_recording_bytes());
+        let default_icon_bytes = assets::get_logo_default_bytes()
+            .ok_or_else(|| eyre::eyre!("Failed to load default logo asset"))?;
+        let default_icon = load_icon_from_bytes(default_icon_bytes);
+        let recording_icon_bytes = assets::get_logo_recording_bytes()
+            .ok_or_else(|| eyre::eyre!("Failed to load recording logo asset"))?;
+        let recording_icon = load_icon_from_bytes(recording_icon_bytes);
         tracing::debug!("Window icons loaded");
 
         tracing::debug!("WinitApp::new() complete");

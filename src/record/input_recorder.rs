@@ -88,8 +88,11 @@ impl InputEventWriter {
         // Most accurate possible timestamp of exactly when the stop input recording was called
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64();
+            .map(|d| d.as_secs_f64())
+            .unwrap_or_else(|_| {
+                tracing::warn!("System time is before UNIX epoch, using 0");
+                0.0
+            });
 
         // Flush any remaining events
         self.flush().await?;

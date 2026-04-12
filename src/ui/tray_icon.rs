@@ -38,12 +38,14 @@ impl TrayIconState {
             let (rgba, (width, height)) = assets::load_icon_data_from_bytes(bytes);
             Ok(tray_icon::Icon::from_rgba(rgba, width, height)?)
         }
-        let default_tray_icon_data =
-            create_tray_icon_data_from_bytes(assets::get_logo_default_bytes())
-                .context("Failed to create default tray icon")?;
-        let recording_tray_icon_data =
-            create_tray_icon_data_from_bytes(assets::get_logo_recording_bytes())
-                .context("Failed to create recording tray icon")?;
+        let default_icon_bytes = assets::get_logo_default_bytes()
+            .ok_or_else(|| eyre::eyre!("Failed to load default logo asset"))?;
+        let default_tray_icon_data = create_tray_icon_data_from_bytes(default_icon_bytes)
+            .context("Failed to create default tray icon")?;
+        let recording_icon_bytes = assets::get_logo_recording_bytes()
+            .ok_or_else(|| eyre::eyre!("Failed to load recording logo asset"))?;
+        let recording_tray_icon_data = create_tray_icon_data_from_bytes(recording_icon_bytes)
+            .context("Failed to create recording tray icon")?;
 
         tracing::debug!("Building tray icon");
         let tray_icon = TrayIconBuilder::new()

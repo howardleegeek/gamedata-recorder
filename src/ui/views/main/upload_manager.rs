@@ -1228,7 +1228,9 @@ fn render_recording_entry(
                 // Uploaded recordings are not shown in the local recordings UI
                 // They're already displayed in the successful uploads section as we pull
                 // them from the api endpoint.
-                unreachable!();
+                // This branch should not be reached due to filtering above, but handle gracefully.
+                tracing::warn!("Uploaded recording unexpectedly reached local_recordings_ui");
+                return;
             }
         },
     }

@@ -1119,8 +1119,10 @@ impl State {
                 RecordingState::Recording
             }
             (old_state, new_state) => {
-                // ????
-                panic!("Invalid state transition: {old_state:?} -> {new_state:?}");
+                tracing::error!("Invalid state transition: {old_state:?} -> {new_state:?}");
+                return Err(color_eyre::eyre::eyre!(
+                    "Invalid state transition: {old_state:?} -> {new_state:?}"
+                ));
             }
         };
         Ok(())
@@ -1252,10 +1254,17 @@ fn play_cue(
     sink.set_volume(volume);
 
     // Load the selected cue file with a per-thread cache
-    let cue_bytes = cue_cache
+    let cue_bytes = match cue_cache
         .entry(filename.to_string())
-        .or_insert_with(|| load_cue_bytes(filename))
-        .clone();
+        .or_insert_with(|| load_cue_bytes(filename).unwrap_or_default())
+        .clone()
+    {
+        bytes if !bytes.is_empty() => bytes,
+        _ => {
+            tracing::warn!("Cue file not available: {filename}");
+            return;
+        }
+    };
     let source = match Decoder::new_mp3(Cursor::new(cue_bytes)) {
         Ok(source) => source,
         Err(e) => {

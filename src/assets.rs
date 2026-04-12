@@ -13,41 +13,54 @@ impl AssetData {
         Self(OnceLock::new())
     }
 
-    pub fn get(&'static self, filename: &'static str) -> &'static [u8] {
-        self.0.get_or_init(move || {
-            std::fs::read(get_asset_path(filename)).unwrap_or_else(|e| {
-                panic!("Failed to load {filename}: {e}");
+    pub fn get(&'static self, filename: &'static str) -> Option<&'static [u8]> {
+        self.0
+            .get_or_init(move || match std::fs::read(get_asset_path(filename)) {
+                Ok(data) => data,
+                Err(e) => {
+                    tracing::error!("Failed to load asset {filename}: {e}");
+                    Vec::new()
+                }
             })
-        })
+            .as_slice()
+            .into()
     }
 }
 
-pub fn get_logo_default_bytes() -> &'static [u8] {
+pub fn get_logo_default_bytes() -> Option<&'static [u8]> {
     static DATA: AssetData = AssetData::new();
     DATA.get("owl-logo.png")
 }
 
-pub fn get_logo_recording_bytes() -> &'static [u8] {
+pub fn get_logo_recording_bytes() -> Option<&'static [u8]> {
     static DATA: AssetData = AssetData::new();
     DATA.get("owl-logo-recording.png")
 }
 
 /// Loads an arbitrary audio cue from the assets/cues/ directory.
 /// Falls back to default_start.mp3 if the requested cue fails to load.
-pub fn load_cue_bytes(filename: &str) -> Vec<u8> {
+pub fn load_cue_bytes(filename: &str) -> Option<Vec<u8>> {
     let path = format!("cues/{filename}");
-    std::fs::read(get_asset_path(&path)).unwrap_or_else(|e| {
-        // Try to fallback to default_start.mp3
-        if filename != "default_start.mp3" {
-            tracing::warn!("Failed to load {path}: {e}, falling back to default_start.mp3");
-            let default_path = "cues/default_start.mp3";
-            std::fs::read(get_asset_path(default_path)).unwrap_or_else(|e| {
-                panic!("Failed to load fallback {default_path}: {e}");
-            })
-        } else {
-            panic!("Failed to load {path}: {e}");
+    match std::fs::read(get_asset_path(&path)) {
+        Ok(data) => Some(data),
+        Err(e) => {
+            // Try to fallback to default_start.mp3
+            if filename != "default_start.mp3" {
+                tracing::warn!("Failed to load {path}: {e}, falling back to default_start.mp3");
+                let default_path = "cues/default_start.mp3";
+                match std::fs::read(get_asset_path(default_path)) {
+                    Ok(data) => Some(data),
+                    Err(e2) => {
+                        tracing::error!("Failed to load fallback {default_path}: {e2}");
+                        None
+                    }
+                }
+            } else {
+                tracing::error!("Failed to load {path}: {e}");
+                None
+            }
         }
-    })
+    }
 }
 
 /// Scans the cues folder and returns a list of available MP3 files
