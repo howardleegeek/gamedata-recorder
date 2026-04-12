@@ -605,9 +605,12 @@ impl LocalRecording {
             average_fps,
         };
 
-        // Write metadata to disk
+        // Write metadata to disk using atomic write pattern (write .tmp then rename).
+        // Prevents corruption if the process crashes mid-write.
         let metadata_json = serde_json::to_string_pretty(&metadata)?;
-        tokio::fs::write(&metadata_path, &metadata_json).await?;
+        let temp_path = metadata_path.with_extension("json.tmp");
+        tokio::fs::write(&temp_path, &metadata_json).await?;
+        tokio::fs::rename(&temp_path, &metadata_path).await?;
 
         // Validate the recording immediately after stopping to create [`constants::filename::recording::INVALID`] file if needed
         tracing::info!("Validating recording at {}", recording_location.display());
