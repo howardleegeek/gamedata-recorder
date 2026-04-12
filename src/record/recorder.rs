@@ -351,10 +351,7 @@ pub fn get_foregrounded_game() -> Result<Option<(String, game_process::Pid, HWND
 
     // Never record ourselves or known non-game processes
     let exe_lower = exe_name.to_lowercase();
-    if SELF_AND_SYSTEM_BLACKLIST
-        .iter()
-        .any(|b| exe_lower == *b)
-    {
+    if SELF_AND_SYSTEM_BLACKLIST.iter().any(|b| exe_lower == *b) {
         return Ok(None);
     }
 
