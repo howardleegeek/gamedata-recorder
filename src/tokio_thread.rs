@@ -375,10 +375,12 @@ async fn main(
                         });
                     }
                     AsyncRequest::DeleteAllInvalidRecordings => {
-                        let Some((api_key, _)) = valid_api_key_and_user_id.clone() else {
-                            tracing::error!("Cannot delete invalid recordings without valid API key");
-                            continue;
-                        };
+                        // Check if we have an API key for server cleanup
+                        let api_key_opt = valid_api_key_and_user_id.as_ref().map(|(k, _)| k.clone());
+                        let has_api_key = api_key_opt.is_some();
+                        if !has_api_key {
+                            tracing::info!("No API key available - will delete invalid recordings locally only");
+                        }
 
                         tokio::spawn({
                             let app_state = app_state.clone();
@@ -408,7 +410,14 @@ async fn main(
                                 let mut errors = vec![];
                                 for recording in invalid_recordings {
                                     let info = recording.info().clone();
-                                    if let Err(e) = recording.delete(&api_client, &api_key).await {
+                                    let delete_result = if let Some(ref api_key) = api_key_opt {
+                                        // Delete with server cleanup
+                                        recording.delete(&api_client, api_key).await
+                                    } else {
+                                        // Delete locally only
+                                        recording.delete_without_abort_sync()
+                                    };
+                                    if let Err(e) = delete_result {
                                         tracing::error!("Failed to delete {}: {:?}", info, e);
                                         errors.push(info.folder_name);
                                     } else {
@@ -428,10 +437,12 @@ async fn main(
                         });
                     }
                     AsyncRequest::DeleteAllUploadedLocalRecordings => {
-                        let Some((api_key, _)) = valid_api_key_and_user_id.clone() else {
-                            tracing::error!("Cannot delete invalid recordings without valid API key");
-                            continue;
-                        };
+                        // Check if we have an API key for server cleanup
+                        let api_key_opt = valid_api_key_and_user_id.as_ref().map(|(k, _)| k.clone());
+                        let has_api_key = api_key_opt.is_some();
+                        if !has_api_key {
+                            tracing::info!("No API key available - will delete uploaded recordings locally only");
+                        }
 
                         tokio::spawn({
                             let app_state = app_state.clone();
@@ -457,7 +468,14 @@ async fn main(
                                 let mut errors = vec![];
                                 for recording in local_recordings {
                                     let info = recording.info().clone();
-                                    if let Err(e) = recording.delete(&api_client, &api_key).await {
+                                    let delete_result = if let Some(ref api_key) = api_key_opt {
+                                        // Delete with server cleanup
+                                        recording.delete(&api_client, api_key).await
+                                    } else {
+                                        // Delete locally only
+                                        recording.delete_without_abort_sync()
+                                    };
+                                    if let Err(e) = delete_result {
                                         tracing::error!(e=?e, "Failed to delete uploaded recording: {info}");
                                         errors.push(info.folder_name);
                                     } else {
@@ -476,19 +494,23 @@ async fn main(
                         });
                     }
                     AsyncRequest::DeleteRecording(path) => {
-                        let Some((api_key, _)) = valid_api_key_and_user_id.as_ref() else {
-                            tracing::error!("Cannot delete recording without valid API key: {}", path.display());
-                            if let Err(e) = app_state.async_request_tx.send(AsyncRequest::LoadLocalRecordings).await {
-                                tracing::error!("Failed to send LoadLocalRecordings after delete error: {}", e);
-                            }
-                            continue;
-                        };
-
                         if let Some(recording) = LocalRecording::from_path(&path) {
-                            if let Err(e) = recording.delete(&api_client, api_key).await {
-                                tracing::error!(e=?e, "Failed to delete recording: {}", path.display());
+                            // Check if we have an API key for server cleanup
+                            if let Some((api_key, _)) = valid_api_key_and_user_id.as_ref() {
+                                // Delete with server cleanup (abort multipart uploads if needed)
+                                if let Err(e) = recording.delete(&api_client, api_key).await {
+                                    tracing::error!(e=?e, "Failed to delete recording: {}", path.display());
+                                } else {
+                                    tracing::info!("Deleted recording with server cleanup: {}", path.display());
+                                }
                             } else {
-                                tracing::info!("Deleted recording: {}", path.display());
+                                // No API key - just delete locally without server cleanup
+                                tracing::info!("Deleting recording locally (no API key for server cleanup): {}", path.display());
+                                if let Err(e) = recording.delete_without_abort_sync() {
+                                    tracing::error!(e=?e, "Failed to delete recording locally: {}", path.display());
+                                } else {
+                                    tracing::info!("Deleted recording locally: {}", path.display());
+                                }
                             }
                         } else {
                             tracing::error!("Cannot delete non-recording folder: {}", path.display());
