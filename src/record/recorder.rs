@@ -361,6 +361,18 @@ const SELF_AND_SYSTEM_BLACKLIST: &[&str] = &[
     // Communication
     "teams.exe",
     "msteams.exe",
+    // Steam/Epic launcher helpers (load D3D, briefly foreground between launcher and game)
+    "steamapprun.exe",
+    "gameoverlayui.exe",
+    "steamoverlayrenderhelper64.exe",
+    "galaxyclient helper.exe",
+    "epicwebhelper.exe",
+    "socialclubhelper.exe",
+    // Rockstar launcher
+    "rockstarservice.exe",
+    "launcherdll.exe",
+    "rockstarlauncher.exe",
+    "gtavlauncher.exe",
 ];
 
 pub fn get_foregrounded_game() -> Result<Option<(String, game_process::Pid, HWND)>> {

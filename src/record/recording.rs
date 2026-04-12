@@ -208,12 +208,16 @@ impl Recording {
 
         if let Err(e) = result {
             tracing::error!("Error while stopping recording, invalidating recording: {e}");
-            tokio::fs::write(
+            // Best-effort write — may fail on disk full, which is acceptable
+            if let Err(write_err) = tokio::fs::write(
                 self.recording_location
                     .join(constants::filename::recording::INVALID),
                 e.to_string(),
             )
-            .await?;
+            .await
+            {
+                tracing::error!("Failed to write INVALID marker (disk full?): {write_err}");
+            }
             return Ok(());
         }
 
