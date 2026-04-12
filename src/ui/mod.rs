@@ -138,7 +138,7 @@ impl WinitApp {
         let default_icon = load_icon_from_bytes(default_icon_bytes)?;
         let recording_icon_bytes = assets::get_logo_recording_bytes()
             .ok_or_else(|| eyre::eyre!("Failed to load recording logo asset"))?;
-        let recording_icon = load_icon_from_bytes(recording_icon_bytes);
+        let recording_icon = load_icon_from_bytes(recording_icon_bytes)?;
         tracing::debug!("Window icons loaded");
 
         tracing::debug!("WinitApp::new() complete");
@@ -227,9 +227,13 @@ impl ApplicationHandler for WinitApp {
             .with_resizable(true)
             .with_window_icon(Some(self.default_icon.clone()));
 
-        let window = event_loop
-            .create_window(window_attributes)
-            .map_err(|e| eyre::eyre!("Failed to create window: {e}"))?;
+        let window = match event_loop.create_window(window_attributes) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::error!("Failed to create window: {e}");
+                return;
+            }
+        };
 
         // Now that we have the scale factor, we can multiply the inner size by it
         // to ensure that the user will see the content at their DPI scaling.
