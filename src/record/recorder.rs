@@ -303,6 +303,41 @@ fn get_free_space_in_mb(path: &std::path::Path) -> Option<u64> {
         .map(|disk| disk.available_space() / 1024 / 1024)
 }
 
+/// Processes that should never be recorded (ourselves + common non-game apps)
+const SELF_AND_SYSTEM_BLACKLIST: &[&str] = &[
+    "gamedata-recorder.exe",
+    "owl-control.exe",
+    "explorer.exe",
+    "steamwebhelper.exe",
+    "steam.exe",
+    "epicgameslauncher.exe",
+    "unrealcefsubprocess.exe",
+    "gog.exe",
+    "galaxyclient.exe",
+    "origin.exe",
+    "uplay.exe",
+    "battlenet.exe",
+    "chrome.exe",
+    "firefox.exe",
+    "msedge.exe",
+    "discord.exe",
+    "slack.exe",
+    "spotify.exe",
+    "code.exe",
+    "windowsterminal.exe",
+    "cmd.exe",
+    "powershell.exe",
+    "taskmgr.exe",
+    "searchhost.exe",
+    "startmenuexperiencehost.exe",
+    "shellexperiencehost.exe",
+    "applicationframehost.exe",
+    "textinputhost.exe",
+    "systemsettings.exe",
+    "nvidia share.exe",
+    "nvcontainer.exe",
+];
+
 pub fn get_foregrounded_game() -> Result<Option<(String, game_process::Pid, HWND)>> {
     let (hwnd, pid) = game_process::foreground_window()?;
 
@@ -313,6 +348,15 @@ pub fn get_foregrounded_game() -> Result<Option<(String, game_process::Pid, HWND
         .to_str()
         .ok_or_eyre("Failed to convert exe name to unicode string")?
         .to_owned();
+
+    // Never record ourselves or known non-game processes
+    let exe_lower = exe_name.to_lowercase();
+    if SELF_AND_SYSTEM_BLACKLIST
+        .iter()
+        .any(|b| exe_lower == *b)
+    {
+        return Ok(None);
+    }
 
     Ok(Some((exe_name, pid, hwnd)))
 }
