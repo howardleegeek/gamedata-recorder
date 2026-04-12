@@ -336,6 +336,31 @@ const SELF_AND_SYSTEM_BLACKLIST: &[&str] = &[
     "systemsettings.exe",
     "nvidia share.exe",
     "nvcontainer.exe",
+    // Video players
+    "vlc.exe",
+    "mpv.exe",
+    "potplayer.exe",
+    "potplayermini64.exe",
+    // Streaming / recording tools (would cause recursive capture)
+    "obs64.exe",
+    "obs32.exe",
+    "streamlabs obs.exe",
+    "twitchstudio.exe",
+    // Remote desktop / streaming
+    "parsec.exe",
+    "sunshine.exe",
+    "moonlight.exe",
+    // Creative apps (load D3D but not games)
+    "blender.exe",
+    "resolve.exe",
+    "photoshop.exe",
+    // Hardware monitoring
+    "afterburner.exe",
+    "rtss.exe",
+    "rivatuner.exe",
+    // Communication
+    "teams.exe",
+    "msteams.exe",
 ];
 
 pub fn get_foregrounded_game() -> Result<Option<(String, game_process::Pid, HWND)>> {

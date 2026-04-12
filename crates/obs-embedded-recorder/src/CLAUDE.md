@@ -8,6 +8,4 @@
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
 | #15331 | 12:49 AM | 🔵 | GameData Recorder Critical Issues and Optimization Opportunities Identified | ~525 |
-| #15317 | 12:28 AM | 🔵 | Unsupported Games List Includes Major AAA Titles Marked "EnoughData" | ~395 |
-| #15316 | " | 🔵 | Unsupported Games List - Training Data Coverage Strategy | ~465 |
 </claude-mem-context>

@@ -202,10 +202,16 @@ struct RecordingRequest {
 
 pub fn vet_to_obs_vet(vet: VideoEncoderType) -> ObsVideoEncoderType {
     match vet {
-        VideoEncoderType::X265 => ObsVideoEncoderType::OBS_X264,
-        VideoEncoderType::NvEncHevc => ObsVideoEncoderType::OBS_NVENC_H264_TEX,
-        VideoEncoderType::AmfHevc => ObsVideoEncoderType::H264_TEXTURE_AMF,
-        VideoEncoderType::QsvHevc => ObsVideoEncoderType::OBS_QSV11_V2,
+        // HEVC (H.265) encoders — buyer spec requirement
+        VideoEncoderType::X265 => {
+            // No dedicated x265 in OBS — use ffmpeg_hevc_nvenc as software fallback
+            // TODO: Add obs_x265 when libobs-rs supports it
+            ObsVideoEncoderType::OBS_X264 // Temporary fallback
+        }
+        VideoEncoderType::NvEncHevc => ObsVideoEncoderType::OBS_NVENC_HEVC_TEX,
+        VideoEncoderType::AmfHevc => ObsVideoEncoderType::H265_TEXTURE_AMF,
+        VideoEncoderType::QsvHevc => ObsVideoEncoderType::OBS_QSV11_HEVC,
+        // H.264 encoders — fallback
         VideoEncoderType::X264 => ObsVideoEncoderType::OBS_X264,
         VideoEncoderType::NvEnc => ObsVideoEncoderType::OBS_NVENC_H264_TEX,
         VideoEncoderType::Amf => ObsVideoEncoderType::H264_TEXTURE_AMF,
@@ -215,6 +221,11 @@ pub fn vet_to_obs_vet(vet: VideoEncoderType) -> ObsVideoEncoderType {
 
 pub fn obs_vet_to_vet(vet: &ObsVideoEncoderType) -> Option<VideoEncoderType> {
     match vet {
+        // HEVC encoders
+        ObsVideoEncoderType::OBS_NVENC_HEVC_TEX => Some(VideoEncoderType::NvEncHevc),
+        ObsVideoEncoderType::H265_TEXTURE_AMF => Some(VideoEncoderType::AmfHevc),
+        ObsVideoEncoderType::OBS_QSV11_HEVC => Some(VideoEncoderType::QsvHevc),
+        // H.264 encoders
         ObsVideoEncoderType::OBS_X264 => Some(VideoEncoderType::X264),
         ObsVideoEncoderType::OBS_NVENC_H264_TEX => Some(VideoEncoderType::NvEnc),
         ObsVideoEncoderType::H264_TEXTURE_AMF => Some(VideoEncoderType::Amf),
