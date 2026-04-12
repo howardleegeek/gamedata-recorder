@@ -34,7 +34,7 @@ impl TarFileGuard {
     }
 
     fn path(&self) -> Option<&Path> {
-        self.path.as_ref()
+        self.path.as_ref().map(|p| p.as_path())
     }
 }
 

@@ -563,7 +563,13 @@ pub async fn run(
         }
     };
 
-    // Take ownership of the paused recording, disarming the drop guard (already done above)
+    // Take ownership of the paused recording, disarming the drop guard
+    let Some(mut paused) = guard.take_paused() else {
+        return Err(UploadTarError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Paused recording not available for completion",
+        )));
+    };
 
     if !completion_result.success {
         return Err(UploadTarError::FailedToCompleteMultipartUpload(
