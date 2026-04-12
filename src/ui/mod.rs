@@ -62,7 +62,8 @@ pub fn start(
     });
 
     tracing::debug!("Creating winit event loop");
-    let event_loop = EventLoop::new().unwrap();
+    let event_loop =
+        EventLoop::new().map_err(|e| eyre::eyre!("Failed to create event loop: {e}"))?;
     // setting controlflow::wait is important. This means that once minimized to tray,
     // unlike eframe, it will no longer poll for updates - massively saving CPU.
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
@@ -80,7 +81,9 @@ pub fn start(
     )?;
     tracing::debug!("WinitApp created, starting event loop");
 
-    event_loop.run_app(&mut app).unwrap();
+    event_loop
+        .run_app(&mut app)
+        .map_err(|e| eyre::eyre!("Event loop error: {e}"))?;
 
     tracing::debug!("Event loop exited");
     Ok(())

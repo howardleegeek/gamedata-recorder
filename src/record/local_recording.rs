@@ -547,11 +547,20 @@ impl LocalRecording {
         // Create metadata
         let duration = start_instant.elapsed().as_secs_f64();
 
-        let start_timestamp = start_time.duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+        let start_timestamp = start_time
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or_else(|_| {
+                tracing::warn!("Start time before UNIX epoch, using 0");
+                0.0
+            });
         let end_timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64();
+            .map(|d| d.as_secs_f64())
+            .unwrap_or_else(|_| {
+                tracing::warn!("Current time before UNIX epoch, using 0");
+                0.0
+            });
 
         let hardware_id = hardware_id::get()?;
 

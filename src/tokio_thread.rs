@@ -44,12 +44,9 @@ pub fn run(
     stopped_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<()> {
     tracing::debug!("Creating tokio runtime");
-    tokio::runtime::Runtime::new().unwrap().block_on(main(
-        app_state,
-        log_path,
-        async_request_rx,
-        stopped_rx,
-    ))
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| color_eyre::eyre::eyre!("Failed to create tokio runtime: {e}"))?;
+    runtime.block_on(main(app_state, log_path, async_request_rx, stopped_rx))
 }
 
 async fn main(
@@ -60,8 +57,8 @@ async fn main(
 ) -> Result<()> {
     tracing::debug!("Tokio async main started");
     tracing::debug!("Initializing audio stream");
-    let stream_handle =
-        rodio::OutputStreamBuilder::open_default_stream().expect("open default audio stream");
+    let stream_handle = rodio::OutputStreamBuilder::open_default_stream()
+        .map_err(|e| color_eyre::eyre::eyre!("Failed to open audio stream: {e}"))?;
 
     tracing::debug!("Initializing recorder");
     let recorder = Recorder::new(
@@ -78,9 +75,11 @@ async fn main(
                 base.join(
                     SystemTime::now()
                         .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                        .to_string(),
+                        .map(|d| d.as_secs().to_string())
+                        .unwrap_or_else(|_| {
+                            tracing::warn!("System time before UNIX epoch, using 0");
+                            "0".to_string()
+                        }),
                 )
             }
         }),
@@ -153,18 +152,36 @@ async fn main(
     loop {
         tokio::select! {
             r = &mut ctrlc_rx => {
-                r.expect("ctrl-c signal handler was closed early");
-                break;
+                match r {
+                    Ok(_) => break,
+                    Err(e) => {
+                        tracing::error!("Ctrl-C signal handler error: {e}");
+                        break;
+                    }
+                }
             },
             r = stopped_rx.recv() => {
-                r.expect("stopped signal handler was closed early");
-                // might seem redundant but sometimes there's an unreproducible bug where if the MainApp isn't
-                // performing repaints it won't receive the shut down signal until user interacts with the window
-                app_state.ui_update_tx.send(UiUpdate::ForceUpdate).ok();
-                break;
+                match r {
+                    Ok(_) => {
+                        // might seem redundant but sometimes there's an unreproducible bug where if the MainApp isn't
+                        // performing repaints it won't receive the shut down signal until user interacts with the window
+                        app_state.ui_update_tx.send(UiUpdate::ForceUpdate).ok();
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!("Stopped signal handler error: {e}");
+                        break;
+                    }
+                }
             },
             e = input_rx.recv() => {
-                let e = e.expect("raw input reader was closed early");
+                let e = match e {
+                    Some(e) => e,
+                    None => {
+                        tracing::error!("Raw input reader closed unexpectedly");
+                        break;
+                    }
+                };
                 if !debouncer.debounce(e) {
                     continue;
                 }
@@ -181,7 +198,13 @@ async fn main(
                 }
             },
             e = async_request_rx.recv() => {
-                let e = e.expect("async request reader was closed early");
+                let e = match e {
+                    Some(e) => e,
+                    None => {
+                        tracing::error!("Async request reader closed unexpectedly");
+                        break;
+                    }
+                };
                 let recording_location = {
                     app_state
                         .config

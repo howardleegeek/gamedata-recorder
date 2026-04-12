@@ -29,12 +29,12 @@ impl TarFileGuard {
     }
 
     /// Disarm the guard and return the path, preventing cleanup
-    fn into_path(mut self) -> PathBuf {
-        self.path.take().expect("TarFileGuard already consumed")
+    fn into_path(mut self) -> Option<PathBuf> {
+        self.path.take()
     }
 
-    fn path(&self) -> &Path {
-        self.path.as_ref().expect("TarFileGuard already consumed")
+    fn path(&self) -> Option<&Path> {
+        self.path.as_ref()
     }
 }
 
@@ -158,9 +158,16 @@ pub async fn upload_folder(
 
         // Initialize new upload session
         // If any operation fails, tar_guard will automatically clean up the tar file
-        let file_size = std::fs::metadata(tar_guard.path())
+        let tar_path = tar_guard.path().ok_or_else(|| {
+            UploadFolderError::FailedToGetFileSize(
+                PathBuf::from("<unknown>"),
+                std::io::Error::new(std::io::ErrorKind::NotFound, "Tar guard path not available"),
+            )
+        })?;
+
+        let file_size = std::fs::metadata(tar_path)
             .map(|m| m.len())
-            .map_err(|e| UploadFolderError::FailedToGetFileSize(tar_guard.path().to_owned(), e))?;
+            .map_err(|e| UploadFolderError::FailedToGetFileSize(tar_path.to_owned(), e))?;
 
         fn get_filename(path: &Path) -> Result<String, UploadFolderError> {
             Ok(path
@@ -174,18 +181,17 @@ pub async fn upload_folder(
         let hardware_id =
             crate::system::hardware_id::get().map_err(UploadFolderError::MissingHardwareId)?;
 
+        let filename = tar_path
+            .file_name()
+            .ok_or_else(|| UploadFolderError::MissingFilename(tar_path.to_owned()))?
+            .to_string_lossy()
+            .to_string();
+
         let init_response = api_client
             .init_multipart_upload(
                 api_token,
                 InitMultipartUploadArgs {
-                    filename: tar_guard
-                        .path()
-                        .file_name()
-                        .ok_or_else(|| {
-                            UploadFolderError::MissingFilename(tar_guard.path().to_owned())
-                        })?
-                        .to_string_lossy()
-                        .as_ref(),
+                    filename: &filename,
                     total_size_bytes: file_size,
                     hardware_id: &hardware_id,
                     tags: None,
@@ -208,10 +214,17 @@ pub async fn upload_folder(
             .await
             .map_err(UploadFolderError::InitMultipartUpload)?;
 
+        let tar_path = tar_guard.into_path().ok_or_else(|| {
+            UploadFolderError::FailedToGetFileSize(
+                PathBuf::from("<unknown>"),
+                std::io::Error::new(std::io::ErrorKind::NotFound, "Tar guard path not available"),
+            )
+        })?;
+
         let upload_progress = UploadProgressState::new(
             init_response.upload_id,
             init_response.game_control_id,
-            tar_guard.into_path(), // Disarm guard - tar file is now managed by upload progress
+            tar_path, // Disarm guard - tar file is now managed by upload progress
             init_response.total_chunks,
             init_response.chunk_size_bytes,
             init_response.expires_at,

@@ -24,12 +24,13 @@ pub fn ensure_single_instance() -> eyre::Result<()> {
             PCWSTR(mutex_name_wide.as_ptr()),
         );
 
-        if mutex_handle.is_err() {
-            tracing::warn!("Failed to create mutex for single instance check");
-            return Ok(());
-        }
-
-        let mutex_handle = mutex_handle.unwrap();
+        let mutex_handle = match mutex_handle {
+            Ok(handle) => handle,
+            Err(e) => {
+                tracing::warn!("Failed to create mutex for single instance check: {e}");
+                return Ok(());
+            }
+        };
 
         // Try to acquire the mutex (with 0 timeout to check immediately)
         let wait_result = WaitForSingleObject(mutex_handle, 0);

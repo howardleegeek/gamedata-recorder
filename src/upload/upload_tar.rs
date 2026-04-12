@@ -158,23 +158,19 @@ pub async fn run(
         }
 
         /// Access the paused recording (for save_upload_progress calls during upload)
-        fn paused(&self) -> &LocalRecordingPaused {
-            self.paused
-                .as_ref()
-                .expect("paused recording taken prematurely")
+        fn paused(&self) -> Option<&LocalRecordingPaused> {
+            self.paused.as_ref()
         }
 
         /// Mutably access the paused recording (for updating progress state)
-        fn paused_mut(&mut self) -> &mut LocalRecordingPaused {
-            self.paused
-                .as_mut()
-                .expect("paused recording taken prematurely")
+        fn paused_mut(&mut self) -> Option<&mut LocalRecordingPaused> {
+            self.paused.as_mut()
         }
 
         /// Take ownership of the paused recording, disarming the drop handler.
         /// Call this on successful completion or controlled exit.
-        fn take_paused(&mut self) -> LocalRecordingPaused {
-            self.paused.take().expect("paused recording already taken")
+        fn take_paused(&mut self) -> Option<LocalRecordingPaused> {
+            self.paused.take()
         }
     }
     impl Drop for AbortUploadOnDrop {
@@ -377,12 +373,16 @@ pub async fn run(
             // Check if upload has been paused (user-initiated pause)
             if pause_flag.load(std::sync::atomic::Ordering::SeqCst) {
                 // Ensure the latest progress is saved for resume
-                if let Err(e) = guard.paused().save_upload_progress() {
-                    tracing::error!("Failed to save upload progress on pause: {:?}", e);
+                if let Some(paused) = guard.paused() {
+                    if let Err(e) = paused.save_upload_progress() {
+                        tracing::error!("Failed to save upload progress on pause: {:?}", e);
+                    }
                 }
                 // Disarm by taking the paused recording - keeps server/session state for resume
-                let paused = guard.take_paused();
-                return Ok(UploadTarOutput::Paused(LocalRecording::Paused(paused)));
+                if let Some(paused) = guard.take_paused() {
+                    return Ok(UploadTarOutput::Paused(LocalRecording::Paused(paused)));
+                }
+                return Err(color_eyre::eyre::eyre!("Paused recording not available"));
             }
 
             // Check if upload session is about to expire
@@ -493,11 +493,14 @@ pub async fn run(
             progress_sender.lock().unwrap().send();
 
             // Update progress state with new chunk and save to file (APPEND ONLY)
-            if let Err(e) = guard
-                .paused_mut()
-                .record_chunk_completion(CompleteMultipartUploadChunk { chunk_number, etag })
-            {
-                tracing::error!("Failed to append chunk completion to log: {:?}", e);
+            if let Some(paused) = guard.paused_mut() {
+                if let Err(e) = paused
+                    .record_chunk_completion(CompleteMultipartUploadChunk { chunk_number, etag })
+                {
+                    tracing::error!("Failed to append chunk completion to log: {:?}", e);
+                }
+            } else {
+                tracing::error!("Paused recording not available for chunk completion");
             }
 
             tracing::info!(
@@ -520,22 +523,34 @@ pub async fn run(
         }
     }
 
+    let Some(paused_ref) = guard.paused() else {
+        return Err(UploadTarError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Paused recording not available",
+        )));
+    };
+
     let completion_result = match api_client
         .complete_multipart_upload(
             api_token,
             &upload_id,
-            &guard.paused().upload_progress().chunk_etags,
+            &paused_ref.upload_progress().chunk_etags,
         )
         .await
     {
         Ok(result) => result,
         Err(ApiError::ServerInvalidation(message)) => {
             // Server rejected the upload - take paused recording and mark as server invalid
-            let paused = guard.take_paused();
-            return match paused.mark_as_server_invalid(&message) {
-                Ok(invalid_recording) => Ok(UploadTarOutput::ServerInvalid(invalid_recording)),
-                Err(e) => Err(UploadTarError::Io(e)),
-            };
+            if let Some(paused) = guard.take_paused() {
+                return match paused.mark_as_server_invalid(&message) {
+                    Ok(invalid_recording) => Ok(UploadTarOutput::ServerInvalid(invalid_recording)),
+                    Err(e) => Err(UploadTarError::Io(e)),
+                };
+            }
+            return Err(UploadTarError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Paused recording not available for server invalidation",
+            )));
         }
         Err(e) => {
             return Err(UploadTarError::Api {
@@ -545,8 +560,7 @@ pub async fn run(
         }
     };
 
-    // Take ownership of the paused recording, disarming the drop guard
-    let paused = guard.take_paused();
+    // Take ownership of the paused recording, disarming the drop guard (already done above)
 
     if !completion_result.success {
         return Err(UploadTarError::FailedToCompleteMultipartUpload(

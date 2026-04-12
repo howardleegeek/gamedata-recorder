@@ -81,7 +81,9 @@ impl TrayIconState {
             Some(move |event: MenuEvent| match event.id() {
                 id if id == &quit_item_id => {
                     tracing::info!("Tray icon requested shutdown");
-                    stopped_tx.send(()).unwrap();
+                    if let Err(e) = stopped_tx.send(()) {
+                        tracing::error!("Failed to send stop signal: {e}");
+                    }
 
                     // a bit hacky, but we have to force the window to be visible again so that the MainApp can call main loop repaint,
                     // otherwise the app will remain active until the user clicks on tray icon to reopen it, and then it will kill itself

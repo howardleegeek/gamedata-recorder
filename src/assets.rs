@@ -3,7 +3,10 @@ use std::sync::OnceLock;
 
 // if run in dev mode will be relative to project root. When run from .exe will be relative to install directory.
 fn get_asset_path(filename: &str) -> PathBuf {
-    let cwd = std::env::current_dir().expect("Failed to get executable path");
+    let cwd = std::env::current_dir().unwrap_or_else(|e| {
+        tracing::error!("Failed to get current dir: {e}, using fallback");
+        PathBuf::from(".")
+    });
     cwd.join("assets").join(filename)
 }
 

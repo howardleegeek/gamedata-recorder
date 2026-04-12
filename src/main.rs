@@ -143,7 +143,9 @@ fn main() -> Result<()> {
         stopped_rx,
     )?;
     tracing::info!("UI thread shut down, joining tokio thread");
-    tokio_thread.join().unwrap();
+    if let Err(e) = tokio_thread.join() {
+        tracing::error!("Tokio thread panicked: {e:?}");
+    }
     tracing::info!("Tokio thread joined, shutting down");
 
     Ok(())

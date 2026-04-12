@@ -77,7 +77,9 @@ impl ProgressSender {
         }
 
         // Compute speed from the oldest retained sample to now.
-        let (oldest_time, oldest_bytes) = self.samples.front().copied().unwrap();
+        let Some((oldest_time, oldest_bytes)) = self.samples.front().copied() else {
+            return; // No samples available
+        };
         let elapsed = now.duration_since(oldest_time).as_secs_f64();
         let bps = if elapsed > 0.0 {
             (self.bytes_uploaded - oldest_bytes) as f64 / elapsed

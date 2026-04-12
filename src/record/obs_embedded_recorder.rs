@@ -264,12 +264,15 @@ fn recorder_thread_impl(
     let mut state = match RecorderState::new(adapter_index, skipped_frames.clone()) {
         Ok((state, available_encoders)) => {
             tracing::debug!("OBS recorder state created successfully");
-            init_success_tx.send(Ok(available_encoders)).unwrap();
+            if let Err(e) = init_success_tx.send(Ok(available_encoders)) {
+                tracing::error!("Failed to send init success: {e}");
+                return;
+            }
             state
         }
         Err(e) => {
             tracing::error!("Failed to create OBS recorder state: {}", e);
-            init_success_tx.send(Err(e)).unwrap();
+            let _ = init_success_tx.send(Err(e));
             return;
         }
     };
@@ -582,7 +585,11 @@ impl RecorderState {
         }
 
         // Just before we start, clear out our skipped frame counter
-        self.skipped_frames.lock().unwrap().take();
+        if let Ok(mut guard) = self.skipped_frames.lock() {
+            guard.take();
+        } else {
+            tracing::warn!("Skipped frames mutex poisoned, continuing anyway");
+        }
 
         self.output.start()?;
 
@@ -625,7 +632,8 @@ impl RecorderState {
         //
         // So, we wait 200ms to make sure we've cleared it.
         std::thread::sleep(std::time::Duration::from_millis(200));
-        if let Some(skipped_frames) = self.skipped_frames.lock().unwrap().take() {
+        let skipped_frames_opt = self.skipped_frames.lock().ok().and_then(|mut g| g.take());
+        if let Some(skipped_frames) = skipped_frames_opt {
             let percentage = skipped_frames.percentage();
             if percentage > 5.0 {
                 bail!(
