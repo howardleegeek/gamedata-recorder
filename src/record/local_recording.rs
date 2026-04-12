@@ -51,8 +51,8 @@ impl UploadProgressState {
     pub fn is_expired(&self) -> bool {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         now >= self.expires_at
     }
 
@@ -60,8 +60,8 @@ impl UploadProgressState {
     pub fn seconds_until_expiration(&self) -> i64 {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         self.expires_at as i64 - now as i64
     }
 
