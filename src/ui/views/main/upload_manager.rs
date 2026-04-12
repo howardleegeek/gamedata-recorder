@@ -484,21 +484,32 @@ pub fn view(
         });
     });
 
-    // Auto-upload on completion setting
-    ui.add_enabled_ui(!offline_mode, |ui| {
+    // Auto-upload on completion setting (disabled if no API key)
+    let has_api_key = !app_state
+        .config
+        .read()
+        .unwrap()
+        .credentials
+        .api_key
+        .is_empty();
+    let skip_api_key = std::env::var("GAMEDATA_SKIP_API_KEY").is_ok();
+    let can_auto_upload = !offline_mode && (has_api_key || skip_api_key);
+
+    ui.add_enabled_ui(can_auto_upload, |ui| {
         ui.horizontal(|ui| {
             ui.add(Checkbox::new(
                 &mut local_preferences.auto_upload_on_completion,
                 "Automatically upload recordings when complete",
             ));
-            util::tooltip(
-                ui,
+            let tooltip_text = if !has_api_key && !skip_api_key {
+                "Please enter your API key in Settings to enable automatic uploads."
+            } else {
                 concat!(
                     "Automatically start uploading recordings when they finish. ",
                     "If an upload is already in progress, new recordings will be queued."
-                ),
-                None,
-            );
+                )
+            };
+            util::tooltip(ui, tooltip_text, None);
 
             // Detect when auto-upload is turned off and clear the queue
             if upload_manager.prev_auto_upload_enabled
@@ -604,13 +615,29 @@ pub fn view(
             })
             .count();
 
-        let enabled = !offline_mode && !is_newer_release_available && uploadable_count > 0;
+        // Check if API key is available
+        let has_api_key = !app_state
+            .config
+            .read()
+            .unwrap()
+            .credentials
+            .api_key
+            .is_empty();
+        let skip_api_key = std::env::var("GAMEDATA_SKIP_API_KEY").is_ok();
+
+        let enabled = !offline_mode
+            && !is_newer_release_available
+            && uploadable_count > 0
+            && (has_api_key || skip_api_key);
         ui.add_enabled_ui(enabled, |ui| {
+            let button_text = if !has_api_key && !skip_api_key {
+                "API Key Required".to_string()
+            } else {
+                format!("Upload {uploadable_count} Recordings")
+            };
             let mut response = ui.add_sized(
                 vec2(ui.available_width(), 32.0),
-                Button::new(
-                    RichText::new(format!("Upload {uploadable_count} Recordings")).size(12.0),
-                ),
+                Button::new(RichText::new(button_text).size(12.0)),
             );
 
             // Add hover text explaining why uploads are disabled
@@ -621,6 +648,8 @@ pub fn view(
                     "Please update to the latest version before uploading."
                 } else if uploadable_count == 0 {
                     "No recordings available to upload."
+                } else if !has_api_key && !skip_api_key {
+                    "Please enter your API key in Settings to enable uploads."
                 } else {
                     "Unknown error."
                 };

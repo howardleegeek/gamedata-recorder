@@ -323,10 +323,15 @@ impl App {
             self.local_credentials.has_consented,
         );
 
-        match (has_api_key, has_consented) {
-            (true, true) => self.main_view(ctx),
-            (true, false) => self.consent_view(ctx),
-            (false, _) => self.login_view(ctx),
+        // SKIP_API_KEY: Allow running without API key for local testing
+        // Set GAMEDATA_SKIP_API_KEY=1 environment variable to enable
+        let skip_api_key = std::env::var("GAMEDATA_SKIP_API_KEY").is_ok();
+
+        match (has_api_key, has_consented, skip_api_key) {
+            (true, true, _) => self.main_view(ctx),
+            (true, false, _) => self.consent_view(ctx),
+            (false, _, true) => self.main_view(ctx), // Skip login if env var set
+            (false, _, false) => self.login_view(ctx),
         }
     }
 }
