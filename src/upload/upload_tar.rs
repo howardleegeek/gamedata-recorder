@@ -382,7 +382,10 @@ pub async fn run(
                 if let Some(paused) = guard.take_paused() {
                     return Ok(UploadTarOutput::Paused(LocalRecording::Paused(paused)));
                 }
-                return Err(color_eyre::eyre::eyre!("Paused recording not available"));
+                return Err(UploadTarError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Paused recording not available",
+                )));
             }
 
             // Check if upload session is about to expire

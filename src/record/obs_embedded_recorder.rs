@@ -265,7 +265,7 @@ fn recorder_thread_impl(
         Ok((state, available_encoders)) => {
             tracing::debug!("OBS recorder state created successfully");
             if let Err(e) = init_success_tx.send(Ok(available_encoders)) {
-                tracing::error!("Failed to send init success: {e}");
+                tracing::error!("Failed to send init success: {:?}", e);
                 return;
             }
             state
