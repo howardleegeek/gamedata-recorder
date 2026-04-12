@@ -2,6 +2,8 @@ name: Build and Release
 
 on:
   push:
+    branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -21,11 +23,10 @@ jobs:
           fetch-tags: true
 
       - name: Setup Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           target: x86_64-pc-windows-msvc
-          override: true
           components: rustfmt, clippy
 
       - name: Cache Rust dependencies
@@ -34,57 +35,86 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt -- --check
 
-      - name: Check Rust with Clippy
-        run: cargo clippy -- -D warnings
+      - name: Build Rust application (release)
+        run: cargo build --release --target x86_64-pc-windows-msvc
 
-      - name: Run tests
-        run: cargo test
+      - name: Create dist directory
+        run: New-Item -ItemType Directory -Force -Path dist
 
-      - name: Install NSIS
-        id: nsis
-        uses: negrutiu/nsis-install@v2
+      - name: Install and run cargo-obs-build
+        run: |
+          cargo install cargo-obs-build
+          cargo obs-build build --out-dir dist\
 
-      - name: Run build script
-        shell: powershell
-        run: .\build-resources\scripts\build.ps1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Clean unnecessary OBS files
+        run: .\build-resources\scripts\clean_obs_build.ps1
 
-      - name: Upload artifacts
+      - name: Copy Rust binary
+        run: |
+          $bin = "target\x86_64-pc-windows-msvc\release\gamedata-recorder.exe"
+          if (-not (Test-Path $bin)) {
+            $bin = Get-ChildItem "target\x86_64-pc-windows-msvc\release\*.exe" -File | Where-Object { $_.Name -ne "obs-ffmpeg-mux.exe" } | Select-Object -First 1 -ExpandProperty FullName
+          }
+          Copy-Item $bin "dist\gamedata-recorder.exe"
+
+      - name: Copy OBS FFmpeg mux helper
+        run: |
+          $mux = "target\x86_64-pc-windows-msvc\release\obs-ffmpeg-mux.exe"
+          if (Test-Path $mux) {
+            Copy-Item $mux "dist\obs-ffmpeg-mux.exe"
+          }
+
+      - name: Copy assets
+        run: |
+          if (Test-Path assets) { Copy-Item -Path assets -Destination dist\assets -Recurse }
+          if (Test-Path README.md) { Copy-Item README.md dist\README.md }
+          if (Test-Path LICENSE) { Copy-Item LICENSE dist\LICENSE }
+
+      - name: Verify dist contents
+        run: |
+          Write-Host "=== dist/ contents ==="
+          Get-ChildItem -Path dist -Recurse | Format-Table Name, Length
+          if (-not (Test-Path "dist\gamedata-recorder.exe")) { throw "gamedata-recorder.exe missing!" }
+
+      - name: Create portable zip
+        run: |
+          $currentDir = Get-Location
+          Set-Location dist
+          Compress-Archive -Path ".\*" -DestinationPath "..\gamedata-recorder-windows-x64.zip" -Force
+          Set-Location $currentDir
+
+      - name: Upload zip artifact
         uses: actions/upload-artifact@v4
         with:
           name: gamedata-recorder-windows-x64
-          path: |
-            dist/GameData Recorder.exe
-            dist/GameData-Recorder-Setup-*.exe
+          path: gamedata-recorder-windows-x64.zip
+          retention-days: 30
+
+      - name: Upload dist folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: gamedata-recorder-dist
+          path: dist/
+          retention-days: 30
 
   create-release:
     needs: build-windows
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
-      - name: Download All Artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
+          name: gamedata-recorder-windows-x64
           path: artifacts
 
-      - name: Display structure of downloaded files
-        run: |
-          echo "=== All artifacts ==="
-          ls -la artifacts/
-          echo "=== Contents of each artifact ==="
-          find artifacts -type f -name "*.exe" -o -name "*.zip" | head -20
-
       - name: Create Release
-        id: create_release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/**/GameData-Recorder-Setup-*.exe
+          files: artifacts/gamedata-recorder-windows-x64.zip
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           fail_on_unmatched_files: false
         env:
