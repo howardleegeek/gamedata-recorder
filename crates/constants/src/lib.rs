@@ -175,7 +175,6 @@ pub const GAME_WHITELIST: &[&str] = &[
     // League of Legends
     "league of legends",
     // Fortnite
-    "fortniteClient-Win64-Shipping",
     "fortniteclient-win64-shipping",
     // Minecraft
     "javaw",
@@ -270,9 +269,9 @@ pub const GAME_WHITELIST: &[&str] = &[
     "cities2",
 ];
 
-pub const FPS: u32 = 60;
-pub const RECORDING_WIDTH: u32 = 1280;
-pub const RECORDING_HEIGHT: u32 = 720;
+pub const FPS: u32 = 30;
+pub const RECORDING_WIDTH: u32 = 1920;
+pub const RECORDING_HEIGHT: u32 = 1080;
 
 /// Minimum free space required to record (in megabytes)
 pub const MIN_FREE_SPACE_MB: u64 = 512;
