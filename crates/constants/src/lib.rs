@@ -176,7 +176,8 @@ pub const GAME_WHITELIST: &[&str] = &[
     "league of legends",
     // Fortnite
     "fortniteclient-win64-shipping",
-    // Minecraft
+    // Minecraft (WARNING: javaw.exe is used by many Java apps, not just Minecraft)
+    // This may cause false positives for other Java applications
     "javaw",
     "minecraft",
     // Apex Legends
