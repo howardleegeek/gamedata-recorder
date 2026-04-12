@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use color_eyre::Result;
+use color_eyre::{Result, eyre};
 use egui_wgpu::wgpu;
 use winit::{
     application::ApplicationHandler,

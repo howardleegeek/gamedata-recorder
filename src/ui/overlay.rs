@@ -217,12 +217,14 @@ impl EguiOverlay for OverlayApp {
             .show(egui_context, |ui| {
                 ui.horizontal(|ui| {
                     // Get logo bytes, using empty fallback if unavailable
-                    let logo_bytes: std::borrow::Cow<'_, [u8]> = if self.rec_status.is_recording() {
+                    let logo_bytes: Vec<u8> = if self.rec_status.is_recording() {
                         get_logo_recording_bytes()
-                            .map(Into::into)
+                            .map(|b| b.to_vec())
                             .unwrap_or_default()
                     } else {
-                        get_logo_default_bytes().map(Into::into).unwrap_or_default()
+                        get_logo_default_bytes()
+                            .map(|b| b.to_vec())
+                            .unwrap_or_default()
                     };
                     ui.add(
                         Image::new(ImageSource::Bytes {
@@ -231,7 +233,7 @@ impl EguiOverlay for OverlayApp {
                             } else {
                                 "bytes://owl-logo.png".into()
                             },
-                            bytes: logo_bytes,
+                            bytes: logo_bytes.into(),
                         })
                         .fit_to_exact_size(Vec2 { x: 32.0, y: 32.0 })
                         .tint(Color32::WHITE),
