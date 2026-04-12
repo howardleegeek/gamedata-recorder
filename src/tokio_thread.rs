@@ -763,6 +763,24 @@ async fn main(
                 }
                 // Check foregrounded game
                 let foregrounded = get_foregrounded_game(&app_state.unsupported_games.read().unwrap(), &state.recorder);
+
+                // Clear user_stopped_game_exe if foreground game changed
+                if let Some(ref fg) = foregrounded {
+                    if let Some(ref exe_name) = fg.exe_name {
+                        if state.user_stopped_game_exe.as_ref() != Some(exe_name) {
+                            // Game changed, clear the suppression
+                            if state.user_stopped_game_exe.is_some() {
+                                tracing::debug!(
+                                    old_game = ?state.user_stopped_game_exe,
+                                    new_game = ?exe_name,
+                                    "Clearing user_stopped_game_exe: game changed"
+                                );
+                                state.user_stopped_game_exe = None;
+                            }
+                        }
+                    }
+                }
+
                 if let Some(ref fg) = foregrounded
                     && fg.is_recordable()
                     && fg.exe_name.is_some()
@@ -1007,7 +1025,25 @@ impl State {
                     .read()
                     .unwrap()
                     .clone();
-                if let Some(ref game) = fg
+
+                // Check if user manually stopped this game (suppress auto-record)
+                let user_stopped_this_game = if let Some(ref game) = fg {
+                    if let Some(ref exe_name) = game.exe_name {
+                        self.user_stopped_game_exe.as_ref() == Some(exe_name)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if user_stopped_this_game {
+                    // User manually stopped this game, don't auto-record until they switch games
+                    tracing::debug!(
+                        game = ?fg.as_ref().and_then(|g| g.exe_name.clone()),
+                        "Skipping auto-record: user manually stopped this game"
+                    );
+                } else if let Some(ref game) = fg
                     && game.is_recordable()
                     && game.exe_name.is_some()
                     && !self.app_state.is_out_of_date.load(Ordering::SeqCst)
