@@ -21,8 +21,8 @@ use windows::{
             },
             WindowsAndMessaging::{
                 self, CreateWindowExA, DefWindowProcA, DestroyWindow, DispatchMessageA,
-                GetMessageA, GetMessageTime, GetSystemMetrics, HWND_MESSAGE, MSG, PostQuitMessage,
-                RI_KEY_BREAK, RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
+                GetMessageA, GetSystemMetrics, HWND_MESSAGE, MSG, PostQuitMessage, RI_KEY_BREAK,
+                RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
                 RI_MOUSE_BUTTON_5_UP, RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP,
                 RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN,
                 RI_MOUSE_RIGHT_BUTTON_UP, RI_MOUSE_WHEEL, RegisterClassA, SM_CXSCREEN,
@@ -179,6 +179,8 @@ impl KbmCapture {
 
     /// Parse raw input from GetRawInputBuffer batch reading.
     /// Includes message time for latency tracking.
+    #[allow(dead_code)]
+    #[allow(clippy::unnecessary_unsafe)]
     fn parse_raw_input(
         &mut self,
         rawinput: &RAWINPUT,
