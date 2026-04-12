@@ -136,7 +136,7 @@ else {
 Write-Status "Copying Rust binary..."
 $RUST_BINARY = "target\x86_64-pc-windows-msvc\release\owl-control.exe"
 if (Test-Path $RUST_BINARY) {
-    Copy-Item -Path $RUST_BINARY -Destination "dist\OWL Control.exe"
+    Copy-Item -Path $RUST_BINARY -Destination "dist\gamedata-recorder.exe"
 }
 else {
     Write-Error-Custom "Rust binary not found at $RUST_BINARY"
@@ -144,12 +144,23 @@ else {
     $FOUND_BINARY = Get-ChildItem -Path "target\x86_64-pc-windows-msvc\release" -Filter "*.exe" -File | Select-Object -First 1
     if ($FOUND_BINARY) {
         Write-Warning-Custom "Using binary: $($FOUND_BINARY.FullName)"
-        Copy-Item -Path $FOUND_BINARY.FullName -Destination "dist\OWL Control.exe"
+        Copy-Item -Path $FOUND_BINARY.FullName -Destination "dist\gamedata-recorder.exe"
     }
     else {
         Write-Error-Custom "No executable found in release directory"
         exit 1
     }
+}
+
+# Copy OBS FFmpeg mux helper (required for recording)
+Write-Status "Copying OBS FFmpeg mux helper..."
+$MUX_HELPER = "target\x86_64-pc-windows-msvc\release\obs-ffmpeg-mux.exe"
+if (Test-Path $MUX_HELPER) {
+    Copy-Item -Path $MUX_HELPER -Destination "dist\obs-ffmpeg-mux.exe"
+    Write-Status "OBS FFmpeg mux helper copied successfully"
+}
+else {
+    Write-Warning-Custom "OBS FFmpeg mux helper not found at $MUX_HELPER - recording may not work"
 }
 
 
@@ -195,7 +206,27 @@ else {
     exit 1
 }
 
+# Create portable zip file
+Write-Status "Creating portable zip file..."
+$ZIP_FILE = "dist\gamedata-recorder-${VERSION}-windows-x86_64.zip"
+if (Test-Path $ZIP_FILE) {
+    Remove-Item -Path $ZIP_FILE -Force
+}
+
+# Change to dist directory first, then compress everything (more reliable)
+$currentDir = Get-Location
+try {
+    Set-Location "dist"
+    Compress-Archive -Path ".\*" -DestinationPath "..\$ZIP_FILE" -Force
+}
+finally {
+    Set-Location $currentDir
+}
+Write-Status "Portable zip file created: $ZIP_FILE"
+
 Write-Status "Build completed successfully!"
 Write-Host "======================================" -ForegroundColor Cyan
 Write-Host "Output directory: dist\" -ForegroundColor Cyan
+Write-Host "Installer: dist\GameData-Recorder-Setup-$VERSION.exe" -ForegroundColor Cyan
+Write-Host "Portable ZIP: $ZIP_FILE" -ForegroundColor Cyan
 Write-Host "======================================" -ForegroundColor Cyan
