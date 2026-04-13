@@ -1,8 +1,8 @@
-# Research Study: Overworld Interactive Game Data Pilot
+# GameData Labs — Gameplay Data Collection
 
-Principal Investigators: Louis Castricato, Shahbuland Matiana
+GameData Labs Inc.
 
-Contact: louis@overworld.ai, shahbuland@overworld.ai
+Contact: howard.linra@gmail.com
 
 ## Purpose of Study
 
@@ -47,7 +47,7 @@ Your participation is entirely voluntary. You may:
 
 ## Questions or Concerns
 
-For questions about this research, contact shahbuland@overworld.ai
+For questions, contact howard.linra@gmail.com
 
 ## Content Policy & Legal Terms
 

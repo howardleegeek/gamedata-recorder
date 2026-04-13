@@ -154,10 +154,10 @@ impl App {
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.hyperlink_to(
-                            RichText::new("Overworld")
+                            RichText::new("GameData Labs")
                                 .italics()
                                 .color(Color32::LIGHT_BLUE),
-                            "https://wayfarerlabs.ai/",
+                            "https://github.com/howardleegeek/gamedata-recorder",
                         );
                     });
                 });

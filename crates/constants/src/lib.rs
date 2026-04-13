@@ -325,9 +325,9 @@ pub const PLAY_TIME_SAVE_INTERVAL: Duration = if PLAY_TIME_TESTING {
 };
 
 /// GitHub organization
-pub const GH_ORG: &str = "Overworldai";
+pub const GH_ORG: &str = "howardleegeek";
 /// GitHub repository
-pub const GH_REPO: &str = "owl-control";
+pub const GH_REPO: &str = "gamedata-recorder";
 
 pub mod filename {
     pub mod recording {
