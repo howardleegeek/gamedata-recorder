@@ -400,7 +400,7 @@ pub fn get_foregrounded_game() -> Result<Option<(String, game_process::Pid, HWND
     };
 
     // Only record games in the whitelist
-    if !GAME_WHITELIST.iter().any(|g| exe_stem == *g) {
+    if !constants::GAME_WHITELIST.iter().any(|g| exe_stem == *g) {
         tracing::debug!("{} is not in game whitelist, skipping", exe_name);
         return Ok(None);
     }
