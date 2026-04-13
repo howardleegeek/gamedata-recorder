@@ -811,7 +811,7 @@ fn encoder_settings_window(
         .collapsible(false)
         .resizable(false)
         .show(ctx, |ui| match encoder_settings.encoder {
-            VideoEncoderType::X265 | VideoEncoderType::X264 => {
+            VideoEncoderType::X264 => {
                 encoder_settings_x264(ui, &mut encoder_settings.x264)
             }
             VideoEncoderType::NvEncHevc | VideoEncoderType::NvEnc => {

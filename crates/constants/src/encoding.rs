@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 /// Supported video encoder types — HEVC (H.265) preferred for GameData Labs buyer spec
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum VideoEncoderType {
-    X265,
+    // NOTE: X265 was removed — OBS has no software HEVC encoder.
+    // It silently fell back to x264 (H.264), misleading users.
+    // Use NvEncHevc/AmfHevc/QsvHevc for hardware HEVC instead.
     X264,
     NvEncHevc,
     NvEnc,
@@ -15,7 +17,6 @@ pub enum VideoEncoderType {
 impl std::fmt::Display for VideoEncoderType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VideoEncoderType::X265 => write!(f, "OBS x265 (CPU, HEVC)"),
             VideoEncoderType::X264 => write!(f, "OBS x264 (CPU, H.264)"),
             VideoEncoderType::NvEncHevc => write!(f, "NVIDIA NVENC (GPU, HEVC)"),
             VideoEncoderType::NvEnc => write!(f, "NVIDIA NVENC (GPU, H.264)"),
@@ -29,7 +30,6 @@ impl std::fmt::Display for VideoEncoderType {
 impl VideoEncoderType {
     pub fn id(&self) -> &str {
         match self {
-            VideoEncoderType::X265 => "x265",
             VideoEncoderType::X264 => "x264",
             VideoEncoderType::NvEncHevc => "nvenc_hevc",
             VideoEncoderType::NvEnc => "nvenc",
@@ -44,8 +44,7 @@ impl VideoEncoderType {
     pub fn is_hevc(&self) -> bool {
         matches!(
             self,
-            VideoEncoderType::X265
-                | VideoEncoderType::NvEncHevc
+            VideoEncoderType::NvEncHevc
                 | VideoEncoderType::AmfHevc
                 | VideoEncoderType::QsvHevc
         )
@@ -54,7 +53,6 @@ impl VideoEncoderType {
     /// Get the H.264 fallback for a HEVC encoder
     pub fn h264_fallback(&self) -> Self {
         match self {
-            VideoEncoderType::X265 => VideoEncoderType::X264,
             VideoEncoderType::NvEncHevc => VideoEncoderType::NvEnc,
             VideoEncoderType::AmfHevc => VideoEncoderType::Amf,
             VideoEncoderType::QsvHevc => VideoEncoderType::Qsv,
