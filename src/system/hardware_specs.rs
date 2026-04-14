@@ -127,14 +127,19 @@ pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
         },
         ..Default::default()
     };
-    unsafe {
+    if let Err(e) = unsafe {
         GetMonitorInfoW(
             primary_monitor,
             &mut monitor_info as *mut _ as *mut MONITORINFO,
         )
+    } {
+        let last_error = windows::Win32::Foundation::GetLastError();
+        tracing::warn!(
+            "Failed to get monitor info: {e} (GetLastError: {:?})",
+            last_error.to_hresult()
+        );
+        return None;
     }
-    .map_err(|e| tracing::warn!("Failed to get monitor info: {e}"))
-    .ok()?;
 
     // Get the display mode
     let mut devmode = DEVMODEW {
@@ -151,15 +156,20 @@ pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
             return None;
         }
     };
-    unsafe {
+    if let Err(e) = unsafe {
         EnumDisplaySettingsW(
             PCWSTR(device_name.as_ptr()),
             ENUM_CURRENT_SETTINGS,
             &mut devmode,
         )
+    } {
+        let last_error = windows::Win32::Foundation::GetLastError();
+        tracing::warn!(
+            "Failed to get display settings: {e} (GetLastError: {:?})",
+            last_error.to_hresult()
+        );
+        return None;
     }
-    .map_err(|e| tracing::warn!("Failed to get display settings: {e}"))
-    .ok()?;
 
     // Validate resolution values to prevent downstream issues
     let width = devmode.dmPelsWidth;
