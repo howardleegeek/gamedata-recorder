@@ -121,8 +121,26 @@ impl InputCapture {
     }
 
     pub fn active_input(&self) -> ActiveInput {
-        let active_keys = self.active_keys.lock().unwrap();
-        let active_gamepad = self.active_gamepad.lock().unwrap();
+        // Handle poisoned locks gracefully: if another thread panicked while holding
+        // the lock, log the error and return default/empty input state rather than crashing.
+        let active_keys = match self.active_keys.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::error!("ActiveKeys mutex poisoned, returning empty keyboard/mouse state: {e}");
+                return ActiveInput::default();
+            }
+        };
+        let active_gamepad = match self.active_gamepad.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::error!("ActiveGamepads mutex poisoned, returning empty gamepad state: {e}");
+                return ActiveInput {
+                    keyboard: active_keys.keyboard.clone(),
+                    mouse: active_keys.mouse.clone(),
+                    gamepads: HashMap::new(),
+                };
+            }
+        };
         ActiveInput {
             keyboard: active_keys.keyboard.clone(),
             mouse: active_keys.mouse.clone(),
@@ -131,6 +149,13 @@ impl InputCapture {
     }
 
     pub fn gamepads(&self) -> HashMap<GamepadId, GamepadMetadata> {
-        self.gamepads.read().unwrap().clone()
+        // Handle poisoned locks gracefully: return empty map instead of panicking
+        match self.gamepads.read() {
+            Ok(guard) => guard.clone(),
+            Err(e) => {
+                tracing::error!("Gamepads RwLock poisoned, returning empty gamepad metadata: {e}");
+                HashMap::new()
+            }
+        }
     }
 }
