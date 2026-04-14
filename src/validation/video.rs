@@ -42,6 +42,15 @@ pub fn validate(video_path: &Path, metadata: &Metadata) -> Vec<String> {
     let baseline_bitrate_mbps = 3.8;
     let expected_mbits = baseline_bitrate_mbps * metadata.duration;
 
+    // Validate expected_mbits is finite to prevent overflow with extreme duration values
+    if !expected_mbits.is_finite() {
+        invalid_reasons.push(format!(
+            "Video expected size calculation overflow: duration={} too large",
+            metadata.duration
+        ));
+        return invalid_reasons;
+    }
+
     // Log video file stats for diagnostics
     let actual_bitrate_mbps = size_mbits / metadata.duration;
 
