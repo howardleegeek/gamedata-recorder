@@ -956,7 +956,7 @@ fn render_recording_entry(
     }
 
     fn duration(ui: &mut Ui, duration: f64, font_size: f32) {
-        ui.label(RichText::new(util::format_seconds(duration as u64)).size(font_size));
+        ui.label(RichText::new(util::format_seconds(duration.max(0.0) as u64)).size(font_size));
     }
 
     fn local_recording_link(
