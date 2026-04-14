@@ -138,7 +138,10 @@ impl HighPrecisionTimer {
     pub fn wall_time_str(&self) -> String {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                tracing::warn!("System time is before UNIX epoch: {}", e);
+                std::time::Duration::default()
+            });
         let secs = now.as_secs();
         let ms = now.subsec_millis();
         let hours = (secs / 3600) % 24;
