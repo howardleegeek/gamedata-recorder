@@ -117,7 +117,9 @@ fn validate_folder_impl(path: &Path) -> Result<ValidationResult, Vec<String>> {
             } else if let Err(e) = std::fs::rename(&temp_path, &meta_path) {
                 invalid_reasons.push(format!("Error renaming metadata temp file: {e:?}"));
                 // Clean up temp file on failure
-                std::fs::remove_file(&temp_path).ok();
+                if let Err(e) = std::fs::remove_file(&temp_path) {
+                    tracing::warn!("Failed to clean up temp file after rename failure: {}", e);
+                }
             }
         }
         Err(e) => invalid_reasons.push(format!("Error generating JSON for metadata file: {e:?}")),
