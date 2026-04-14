@@ -4,6 +4,13 @@
 
 set -euo pipefail
 
+# Check for required API key
+if [ -z "${FIREWORKS_API_KEY:-}" ]; then
+    echo "Error: FIREWORKS_API_KEY environment variable is required"
+    echo "Usage: FIREWORKS_API_KEY=<your_key> $0"
+    exit 1
+fi
+
 echo "=== GameData Recorder autoresearch setup on nucbox-wsl-1 ==="
 
 # 1. System deps
@@ -27,11 +34,11 @@ export PATH="$HOME/.opencode/bin:$PATH"
 
 # 4. Configure Fireworks API key (Kimi K2.5 Turbo)
 mkdir -p ~/.config/opencode
-cat > ~/.config/opencode/auth.json <<'EOF'
+cat > ~/.config/opencode/auth.json <<EOF
 {
   "fireworks": {
     "type": "api",
-    "key": "fw_GqRyWohrw849BSZ6xRNuyA"
+    "key": "$FIREWORKS_API_KEY"
   }
 }
 EOF
@@ -65,6 +72,6 @@ echo
 echo "Setup complete. Ready to run autoresearch."
 echo
 echo "Usage:"
+echo "  export FIREWORKS_API_KEY=<your_api_key>"
 echo "  cd ~/gamedata-recorder"
-echo "  FIREWORKS_API_KEY=fw_GqRyWohrw849BSZ6xRNuyA \\"
-echo "    ~/.opencode/bin/opencode run \"<your task>\""
+echo "  ~/.opencode/bin/opencode run \"<your task>\""
