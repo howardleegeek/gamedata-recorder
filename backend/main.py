@@ -93,10 +93,7 @@ logger = logging.getLogger(__name__)
 async def get_db() -> AsyncSession:
     """Get database session."""
     async with SessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
+        yield session
 
 
 # --- Startup Validation ---
