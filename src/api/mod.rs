@@ -110,6 +110,13 @@ impl ApiClient {
             ));
         }
 
+        // Check for control characters to prevent HTTP header injection
+        if api_key.chars().any(|c| c.is_ascii_control()) {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "API key contains invalid control characters".into(),
+            ));
+        }
+
         // Simple validation - check if it starts with 'sk_'
         if !api_key.starts_with("sk_") {
             return Err(ApiError::ApiKeyValidationFailure(
