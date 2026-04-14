@@ -338,8 +338,9 @@ fn get_obs_window_encoding(hwnd: HWND, game_exe: &str) -> String {
     // Get window title
     let title_len = unsafe { GetWindowTextLengthW(hwnd) };
     let mut title = String::new();
-    if title_len > 0 {
-        let mut buf = vec![0u16; (title_len + 1) as usize];
+    // Bounds check: ensure title_len is positive and +1 won't overflow
+    if title_len > 0 && title_len < i32::MAX {
+        let mut buf = vec![0u16; (title_len as usize).saturating_add(1)];
         let copied = unsafe { GetWindowTextW(hwnd, &mut buf) };
         if copied > 0 {
             if let Some(end) = buf.iter().position(|&c| c == 0) {
