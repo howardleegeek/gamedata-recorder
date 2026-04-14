@@ -170,12 +170,33 @@ impl ApiClient {
             .send()
             .await?;
 
-        Ok(
-            check_for_response_success(response, "Upload initialization failed")
-                .await?
-                .json()
-                .await?,
-        )
+        let response = check_for_response_success(response, "Upload initialization failed")
+            .await?
+            .json::<InitMultipartUploadResponse>()
+            .await?;
+
+        // Validate chunk_size_bytes is reasonable to prevent downstream issues
+        const MIN_CHUNK_SIZE: u64 = 1024; // 1KB minimum
+        const MAX_CHUNK_SIZE: u64 = 512 * 1024 * 1024; // 512MB maximum
+        if response.chunk_size_bytes == 0 {
+            return Err(ApiError::ServerInvalidation(
+                "Server returned invalid chunk_size_bytes: 0".into(),
+            ));
+        }
+        if response.chunk_size_bytes < MIN_CHUNK_SIZE {
+            return Err(ApiError::ServerInvalidation(format!(
+                "Server returned chunk_size_bytes too small: {} (min: {})",
+                response.chunk_size_bytes, MIN_CHUNK_SIZE
+            )));
+        }
+        if response.chunk_size_bytes > MAX_CHUNK_SIZE {
+            return Err(ApiError::ServerInvalidation(format!(
+                "Server returned chunk_size_bytes too large: {} (max: {})",
+                response.chunk_size_bytes, MAX_CHUNK_SIZE
+            )));
+        }
+
+        Ok(response)
     }
 
     pub async fn upload_multipart_chunk(
