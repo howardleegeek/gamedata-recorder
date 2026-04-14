@@ -40,19 +40,22 @@ impl TarFileGuard {
 
 impl Drop for TarFileGuard {
     fn drop(&mut self) {
-        if let Some(path) = &self.path {
-            if let Err(e) = std::fs::remove_file(path) {
-                tracing::warn!(
-                    "Tar file guard triggered but failed to clean up tar file at {}: {}",
-                    path.display(),
-                    e
-                );
-            } else {
-                tracing::info!(
-                    "Tar file guard triggered, cleaned up tar file at {}",
-                    path.display()
-                );
-            }
+        if let Some(path) = self.path.take() {
+            // Offload blocking I/O to a blocking thread to avoid stalling the async runtime
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::warn!(
+                        "Tar file guard triggered but failed to clean up tar file at {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    tracing::info!(
+                        "Tar file guard triggered, cleaned up tar file at {}",
+                        path.display()
+                    );
+                }
+            });
         }
     }
 }
