@@ -343,8 +343,6 @@ impl KbmCapture {
     ) -> Vec<Event> {
         unsafe {
             let hrawinput = HRAWINPUT(lparam.0 as *mut _);
-            let mut rawinput = RAWINPUT::default();
-            let mut pcbsize = size_of_val(&rawinput) as u32;
             let header_size = match size_of::<RAWINPUTHEADER>().try_into() {
                 Ok(size) => size,
                 Err(e) => {
@@ -352,10 +350,27 @@ impl KbmCapture {
                     return Vec::new();
                 }
             };
+
+            // Query required buffer size first - critical for HID devices with variable data
+            let mut pcbsize: u32 = 0;
+            let size_result =
+                GetRawInputData(hrawinput, RID_INPUT, None, &mut pcbsize, header_size);
+            if size_result == u32::MAX || pcbsize == 0 {
+                use windows::Win32::Foundation::GetLastError;
+                let error = GetLastError();
+                tracing::warn!(
+                    "GetRawInputData size query failed: {:?}, dropping input event",
+                    error
+                );
+                return Vec::new();
+            }
+
+            // Allocate buffer of required size and fetch data
+            let mut buffer = vec![0u8; pcbsize as usize];
             let result = GetRawInputData(
                 hrawinput,
                 RID_INPUT,
-                Some(&mut rawinput as *mut _ as *mut _),
+                Some(buffer.as_mut_ptr() as *mut _),
                 &mut pcbsize,
                 header_size,
             );
@@ -365,6 +380,11 @@ impl KbmCapture {
                 tracing::warn!("GetRawInputData failed: {:?}, dropping input event", error);
                 return Vec::new();
             }
+
+            // SAFETY: We trust the RAWINPUT data from Windows. The buffer is sized correctly
+            // from the first call. Union field access is required because RAWINPUT.data is a
+            // union of mouse/keyboard/hid. The dwType field tells us which union variant is valid.
+            let rawinput = &*(buffer.as_ptr() as *const RAWINPUT);
 
             match Input::RID_DEVICE_INFO_TYPE(rawinput.header.dwType) {
                 Input::RIM_TYPEMOUSE => {
