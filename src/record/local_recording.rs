@@ -621,13 +621,15 @@ impl LocalRecording {
 
         // Validate the recording immediately after stopping to create [`constants::filename::recording::INVALID`] file if needed
         tracing::info!("Validating recording at {}", recording_location.display());
-        tokio::task::spawn_blocking(move || {
+        if let Err(e) = tokio::task::spawn_blocking(move || {
             if let Err(e) = crate::validation::validate_folder(&recording_location) {
                 tracing::error!("Error validating recording on stop: {e}");
             }
         })
         .await
-        .ok();
+        {
+            tracing::error!("Validation task panicked or was cancelled: {e}");
+        }
 
         Ok(())
     }
