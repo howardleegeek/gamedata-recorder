@@ -141,7 +141,7 @@ static VIRTUAL_KEYCODE_TO_NAME_ARRAY: &[(u16, &str)] = &[
     (0xB5, "Select Media"),
     (0xB6, "Start Application 1"),
     (0xB7, "Start Application 2"),
-    (0xBA, "Semiсolon/Colon (ANSI)"),
+    (0xBA, "Semicolon/Colon (ANSI)"),
     (0xBB, "Equals/Plus"),
     (0xBC, "Comma/Less Than"),
     (0xBD, "Dash/Underscore"),
