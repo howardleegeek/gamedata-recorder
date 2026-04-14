@@ -31,8 +31,12 @@ pub fn validate(video_path: &Path, metadata: &Metadata) -> Vec<String> {
     let baseline_bitrate_mbps = 3.8;
     let expected_mbits = baseline_bitrate_mbps * metadata.duration;
 
-    // Log video file stats for diagnostics
-    let actual_bitrate_mbps = size_mbits / metadata.duration;
+    // Guard against zero duration to prevent division by zero (metadata corruption edge case)
+    let actual_bitrate_mbps = if metadata.duration > 0.0 {
+        size_mbits / metadata.duration
+    } else {
+        0.0
+    };
     tracing::info!(
         "Video validation: size={:.2}MB ({} bytes), duration={:.2}s, actual_bitrate={:.2}Mbps, expected_baseline={:.2}Mb",
         size_mbytes,
