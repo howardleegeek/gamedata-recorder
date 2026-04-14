@@ -243,14 +243,16 @@ async def global_exception_handler(request: Request, exc: Exception):
 def sanitize_filename(filename: str) -> str:
     """Sanitize filename to prevent path traversal attacks.
     
-    Removes path separators and null bytes that could be used
-    to escape the intended upload directory.
+    Removes path separators, null bytes, and leading dots that could be used
+    to escape the intended upload directory or target hidden files.
     """
     if not filename:
         return "unnamed"
     # Remove path traversal sequences and null bytes
     sanitized = filename.replace("..", "").replace("/", "").replace("\\", "")
     sanitized = sanitized.replace("\x00", "")  # Null bytes
+    # Remove leading dots to prevent hidden file targeting (.htaccess, .env, etc.)
+    sanitized = sanitized.lstrip(".")
     # Ensure we have a valid filename left
     if not sanitized or sanitized.strip(".") == "":
         return "unnamed"
