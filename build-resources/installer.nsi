@@ -105,12 +105,17 @@ Section "MainSection" SEC01
     DetailPrint "Installing Visual C++ Redistributable..."
     File /oname=$PLUGINSDIR\vc_redist.x64.exe "downloads\vc_redist.x64.exe"
     ExecWait '"$PLUGINSDIR\vc_redist.x64.exe" /norestart' $0
-    IntCmp $0 0 vc_redist_success vc_redist_failed vc_redist_failed
+    IntCmp $0 0 vc_redist_success
+    IntCmp $0 3010 vc_redist_success_reboot
     vc_redist_failed:
       DetailPrint "Visual C++ Redistributable installation failed with exit code $0"
       Abort "Installation failed: Visual C++ Redistributable could not be installed."
+    vc_redist_success_reboot:
+      DetailPrint "Visual C++ Redistributable installed successfully (reboot required)"
+      Goto vc_redist_done
     vc_redist_success:
       DetailPrint "Visual C++ Redistributable installed successfully"
+    vc_redist_done:
   ${endIf}
 
   ; Copy all files and folders from dist directory
