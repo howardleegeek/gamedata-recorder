@@ -411,7 +411,7 @@ Layer 5: GPU 占用 (nvml-wrapper, >40% 持续 5s)
 
 ## 十一、后端 Pipeline
 
-> 完整文档: `gamedata-labs-architecture.md`
+> 完整文档: `backend-architecture.md`
 
 ### 11.1 架构
 
@@ -500,7 +500,7 @@ Buyer API: REST + Stripe 计量 + R2 Presigned URL 下载
 
 ## 十三、引擎插件 (Premium 数据, 3-5x 溢价)
 
-> 完整文档: `gamedata-labs-engine-plugin-research.md`
+> 完整文档: `engine-plugin-research.md`
 
 ### 13.1 方案
 
