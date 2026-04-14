@@ -120,12 +120,13 @@ impl<K: Eq + Hash> AnalogDebouncer<K> {
     /// Remove stale entries to prevent unbounded memory growth during long sessions.
     /// Called periodically from the hot path to amortize cleanup cost.
     fn maybe_cleanup(&mut self, now: std::time::Instant) {
-        if now.duration_since(self.last_cleanup)
+        if now.saturating_duration_since(self.last_cleanup)
             > Duration::from_micros(CLEANUP_INTERVAL_MICROSECONDS)
         {
             let stale_threshold = Duration::from_micros(STALE_ENTRY_MICROSECONDS);
-            self.last_change
-                .retain(|_, &mut instant| now.duration_since(instant) <= stale_threshold);
+            self.last_change.retain(|_, &mut instant| {
+                now.saturating_duration_since(instant) <= stale_threshold
+            });
             self.last_cleanup = now;
         }
     }
