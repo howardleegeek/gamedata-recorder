@@ -14,8 +14,8 @@ pub enum VideoEncoderType {
     QsvHevc,
     Qsv,
 }
-impl std::fmt::Display for VideoEncoderType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for VideoEncoderType {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             VideoEncoderType::X264 => write!(f, "OBS x264 (CPU, H.264)"),
             VideoEncoderType::NvEncHevc => write!(f, "NVIDIA NVENC (GPU, HEVC)"),
