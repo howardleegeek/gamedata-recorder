@@ -760,6 +760,8 @@ async def upload_complete(
             earnings_per_hour *= game.earnings_multiplier
 
     earnings = round(duration_hours * earnings_per_hour, 2)
+    # Ensure earnings are never negative (protects against negative multipliers in DB)
+    earnings = max(0.0, earnings)
     upload.earnings_usd = earnings
 
     # Update user balance
