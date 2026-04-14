@@ -1,7 +1,7 @@
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 
-use crate::api::{API_BASE_URL, ApiClient, ApiError, check_for_response_success};
+use crate::api::{check_for_response_success, ApiClient, ApiError, API_BASE_URL};
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]
 #[allow(unused)]
@@ -284,6 +284,12 @@ impl ApiClient {
         if !chunk_hash.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(ApiError::ApiKeyValidationFailure(
                 "Chunk hash must contain only hexadecimal characters (0-9, a-f, A-F)".into(),
+            ));
+        }
+        // Validate chunk_hash has even length (hex strings must have even length to represent complete bytes)
+        if chunk_hash.len() % 2 != 0 {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "Chunk hash must have even length (each byte requires 2 hex characters)".into(),
             ));
         }
 
