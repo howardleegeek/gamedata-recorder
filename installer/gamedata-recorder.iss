@@ -69,7 +69,8 @@ var
 begin
   // Query tasklist via cmd to handle PATH/WOW64 issues - returns 0 if found, 1 if not found
   // If tasklist itself fails to execute, assume process is not running to be safe
-  ExecSuccess := Exec(ExpandConstant('{cmd}'), '/C tasklist /FI "IMAGENAME eq {#MyAppExeName}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Use {sys} constant for cmd.exe to ensure it's found regardless of PATH
+  ExecSuccess := Exec(ExpandConstant('{sys}\cmd.exe'), '/C tasklist /FI "IMAGENAME eq {#MyAppExeName}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if not ExecSuccess then
     Result := False
   else
