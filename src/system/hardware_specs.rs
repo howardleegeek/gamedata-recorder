@@ -111,11 +111,9 @@ pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
         )
     };
     if primary_monitor.is_invalid() {
-        let last_error = windows::Win32::Foundation::GetLastError();
-        tracing::warn!(
-            "Failed to get primary monitor handle: {:?}",
-            last_error.to_hresult()
-        );
+        // MonitorFromPoint does not set last error per Windows docs;
+        // invalid handle indicates no monitor found at the point
+        tracing::warn!("Failed to get primary monitor handle: invalid monitor returned");
         return None;
     }
 
