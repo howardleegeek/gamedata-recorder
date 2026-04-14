@@ -63,6 +63,16 @@ pub enum TrajectoryTerminator {
 /// Input: chronologically sorted events with timestamps.
 /// Output: list of Trajectory structs.
 pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec<Trajectory> {
+    // Validate pause_threshold_ms to ensure pause detection works correctly
+    let pause_threshold_ms = if pause_threshold_ms <= 0.0 || !pause_threshold_ms.is_finite() {
+        tracing::warn!(
+            "Invalid pause_threshold_ms: {}, using default 250.0",
+            pause_threshold_ms
+        );
+        250.0
+    } else {
+        pause_threshold_ms
+    };
     let mut trajectories = Vec::new();
     let mut current_path: Vec<[i32; 2]> = Vec::new();
     let mut current_start_ns: Option<u64> = None;
