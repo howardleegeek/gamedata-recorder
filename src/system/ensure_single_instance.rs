@@ -13,7 +13,10 @@ use color_eyre::eyre;
 pub fn ensure_single_instance() -> eyre::Result<()> {
     use windows::{
         core::PCWSTR,
-        Win32::{Foundation::ERROR_ALREADY_EXISTS, System::Threading::CreateMutexW},
+        Win32::{
+            Foundation::{GetLastError, ERROR_ALREADY_EXISTS},
+            System::Threading::CreateMutexW,
+        },
     };
 
     let mutex_name = "GameData-Recorder-SingleInstance";
@@ -25,13 +28,14 @@ pub fn ensure_single_instance() -> eyre::Result<()> {
     unsafe {
         // bInitialOwner = false — we don't want to own it yet, just check if it exists
         let mutex_result = CreateMutexW(None, false, PCWSTR(mutex_name_wide.as_ptr()));
-        // Must check GetLastError() IMMEDIATELY after CreateMutexW, before any other
-        // operations that could overwrite the last error code. This is the correct
-        // pattern to detect if the mutex already existed (another instance running).
-        let last_error = windows::Win32::Foundation::GetLastError();
 
         match mutex_result {
             Ok(_handle) => {
+                // Check GetLastError() IMMEDIATELY after CreateMutexW, before any other
+                // operations that could overwrite the last error code. This is the correct
+                // pattern to detect if the mutex already existed (another instance running).
+                let last_error = GetLastError();
+
                 // Check if the mutex already existed (another instance created it)
                 if last_error == ERROR_ALREADY_EXISTS {
                     use crate::ui::notification::error_message_box;
