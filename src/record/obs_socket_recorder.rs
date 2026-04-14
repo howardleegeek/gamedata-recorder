@@ -319,12 +319,21 @@ impl Drop for ObsSocketRecorder {
     fn drop(&mut self) {
         tracing::info!("Shutting down OBS socket recorder");
         let client = self.client.take();
-        tokio::spawn(async move {
-            if let Some(client) = &client {
-                // Log, but do not explode if it fails
-                if let Err(e) = client.recording().stop().await {
-                    tracing::error!("Failed to stop recording: {e}");
-                }
+        // Spawn a blocking thread to stop the recording synchronously.
+        // tokio::spawn cannot be used in Drop because the runtime may be
+        // shutting down or unavailable, causing the task to never execute.
+        std::thread::spawn(move {
+            // Create a temporary runtime for the blocking stop call
+            if let Ok(rt) = tokio::runtime::Runtime::new() {
+                rt.block_on(async {
+                    if let Some(client) = &client {
+                        if let Err(e) = client.recording().stop().await {
+                            tracing::error!("Failed to stop recording: {e}");
+                        }
+                    }
+                });
+            } else {
+                tracing::warn!("Failed to create runtime for OBS stop in Drop handler");
             }
         });
     }
