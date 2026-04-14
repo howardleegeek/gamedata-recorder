@@ -256,6 +256,11 @@ async fn run_logger<W: OutputWriter>(
             })?;
         }
     }
+    // Final flush to ensure all buffered data is written before exit
+    out.flush_output().map_err(|e| {
+        tracing::error!("Failed to flush output on exit: {}", e);
+        e
+    })?;
     Ok(())
 }
 
