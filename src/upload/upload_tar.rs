@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use backoff::{Error as BackoffError, ExponentialBackoff, future::retry_notify};
+use backoff::{future::retry_notify, Error as BackoffError, ExponentialBackoff};
 
 use futures::TryStreamExt as _;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
@@ -425,7 +425,10 @@ pub async fn run(
             let bytes_before_chunk = progress_sender
                 .lock()
                 .map(|s| s.bytes_uploaded())
-                .unwrap_or_default();
+                .unwrap_or_else(|e| {
+                    tracing::error!("Progress sender mutex poisoned: {}", e);
+                    0
+                });
             let retries = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
 
             // Should be about 5-6 retries
