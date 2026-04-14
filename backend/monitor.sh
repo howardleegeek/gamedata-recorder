@@ -71,7 +71,7 @@ check_log_size() {
         else
             size_mb=$(stat -c%s "$log_file" 2>/dev/null | awk '{print $1/1024/1024}' || echo "0")
         fi
-        if (( $(echo "$size_mb > 100" | bc -l) )); then
+        if (( $(echo "$size_mb > 100" | bc) )); then
             log "⚠️ Log file size is ${size_mb}MB (>100MB), consider rotation"
         fi
     fi
