@@ -534,7 +534,13 @@ impl RecorderState {
         self.last_video_encoder_type = Some(encoder_type);
 
         // Listen for signals to pass onto the event stream
-        self.was_hooked.store(false, Ordering::SeqCst);
+        self.was_hooked.store(false, Ordering::Relaxed);
+
+        // Get the Tokio runtime handle to use in the spawned thread.
+        // This ensures tokio::select! and tokio channels work correctly.
+        let runtime_handle = tokio::runtime::Handle::try_current()
+            .context("Failed to get Tokio runtime handle for signal monitoring thread")?;
+
         std::thread::spawn({
             let event_stream = request.event_stream;
             let was_hooked = self.was_hooked.clone();
@@ -563,10 +569,8 @@ impl RecorderState {
 
             move || {
                 let initial_time = Instant::now();
-                // Use the current Tokio runtime (from recorder_thread) instead of futures executor
-                // to ensure tokio::select! and tokio channels work correctly
-                let rt = tokio::runtime::Handle::current();
-                rt.block_on(async {
+                // Use Tokio runtime handle to properly execute async code with tokio::select!
+                runtime_handle.block_on(async {
                     loop {
                         tokio::select! {
                             r = start_signal_rx.recv() => {
@@ -588,9 +592,9 @@ impl RecorderState {
                             r = stop_signal_rx.recv() => {
                                 if r.is_ok() {
                                     tracing::info!("Video ended at {}s", initial_time.elapsed().as_secs_f64());
-                                    if let Err(e) = event_stream.send(InputEventType::VideoEnd) {
-                                        tracing::warn!("Failed to send VideoEnd event: {}", e);
-                                    }
+                                    let _ = event_stream.send(InputEventType::VideoEnd);
+                                    // Exit thread after recording stops to prevent resource leak
+                                    break;
                                 }
                             }
                             r = hook_signal_rx.recv() => {

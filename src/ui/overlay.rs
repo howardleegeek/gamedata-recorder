@@ -1,20 +1,19 @@
 use std::{
-    sync::{Arc, atomic::Ordering},
+    sync::{atomic::Ordering, Arc},
     time::{Duration, Instant},
 };
 
 use egui::{
-    Color32, Context, FontFamily, FontId, Image, ImageSource, Margin, RichText, Stroke, TextFormat,
-    TextWrapMode, Vec2, WidgetText, Window, containers::Frame, text::LayoutJob,
+    containers::Frame, text::LayoutJob, Color32, Context, FontFamily, FontId, Image, ImageSource,
+    Margin, RichText, Stroke, TextFormat, TextWrapMode, Vec2, WidgetText, Window,
 };
 use egui_overlay::EguiOverlay;
 use egui_render_three_d::ThreeDBackend as DefaultGfxBackend;
 use windows::Win32::{
     Foundation::HWND,
     UI::WindowsAndMessaging::{
-        FLASHW_STOP, FLASHWINFO, FlashWindowEx, GWL_EXSTYLE, GetWindowLongPtrW, SW_HIDE,
-        SW_SHOWDEFAULT, SetWindowLongPtrW, ShowWindow, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW,
+        FlashWindowEx, GetWindowLongPtrW, SetWindowLongPtrW, ShowWindow, FLASHWINFO, FLASHW_STOP,
+        GWL_EXSTYLE, SW_HIDE, SW_SHOWDEFAULT, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     },
 };
 
@@ -217,14 +216,12 @@ impl EguiOverlay for OverlayApp {
             .show(egui_context, |ui| {
                 ui.horizontal(|ui| {
                     // Get logo bytes, using empty fallback if unavailable
-                    let logo_bytes: Vec<u8> = if self.rec_status.is_recording() {
+                    let logo_bytes: Arc<[u8]> = if self.rec_status.is_recording() {
                         get_logo_recording_bytes()
-                            .map(|b| b.to_vec())
+                            .map(Arc::from)
                             .unwrap_or_default()
                     } else {
-                        get_logo_default_bytes()
-                            .map(|b| b.to_vec())
-                            .unwrap_or_default()
+                        get_logo_default_bytes().map(Arc::from).unwrap_or_default()
                     };
                     ui.add(
                         Image::new(ImageSource::Bytes {
@@ -381,15 +378,15 @@ fn update_overlay_position_based_on_location(
             window.set_pos(OFFSET, OFFSET);
         }
         OverlayLocation::TopRight => {
-            window.set_pos(monitor_width - width - OFFSET, OFFSET);
+            window.set_pos((monitor_width - width - OFFSET).max(OFFSET), OFFSET);
         }
         OverlayLocation::BottomLeft => {
-            window.set_pos(OFFSET, monitor_height - height - OFFSET);
+            window.set_pos(OFFSET, (monitor_height - height - OFFSET).max(OFFSET));
         }
         OverlayLocation::BottomRight => {
             window.set_pos(
-                monitor_width - width - OFFSET,
-                monitor_height - height - OFFSET,
+                (monitor_width - width - OFFSET).max(OFFSET),
+                (monitor_height - height - OFFSET).max(OFFSET),
             );
         }
     }

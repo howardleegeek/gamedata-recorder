@@ -331,24 +331,21 @@ impl VideoRecorder for ObsSocketRecorder {
 impl Drop for ObsSocketRecorder {
     fn drop(&mut self) {
         tracing::info!("Shutting down OBS socket recorder");
-        if let Some(client) = self.client.take() {
-            // Spawn the shutdown task and store its handle for cleanup
-            self.shutdown_handle = Some(tokio::spawn(async move {
-                // Log, but do not explode if it fails
-                if let Err(e) = client.recording().stop().await {
-                    tracing::error!("Failed to stop recording: {e}");
+        let client = self.client.take();
+        // Use block_on to ensure recording is stopped before drop completes.
+        // This prevents race conditions where the recording continues after
+        // the recorder is dropped, causing OBS to record indefinitely.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.block_on(async move {
+                if let Some(client) = &client {
+                    // Log, but do not explode if it fails
+                    if let Err(e) = client.recording().stop().await {
+                        tracing::error!("Failed to stop recording: {e}");
+                    }
                 }
-            }));
-        }
-
-        // Wait for the shutdown task to complete to ensure proper cleanup.
-        // This prevents the task from being orphaned if the runtime shuts down.
-        if let Some(shutdown_handle) = self.shutdown_handle.take() {
-            // Try to block on the handle if we're in a tokio runtime context.
-            // If not in a runtime, the task will run fire-and-forget (fallback).
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                let _ = runtime.block_on(shutdown_handle);
-            }
+            });
+        } else {
+            tracing::warn!("No tokio runtime available, cannot stop OBS recording synchronously");
         }
     }
 }

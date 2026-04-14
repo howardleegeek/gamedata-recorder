@@ -8,7 +8,7 @@ pub(crate) fn get() -> Result<String> {
         if id.len() >= 2 && id.starts_with('{') && id.ends_with('}') {
             id[1..id.len() - 1].to_owned()
         } else {
-            id.to_owned()
+            id
         }
     })
 }

@@ -1,5 +1,5 @@
 use egui::{
-    Align, Button, CentralPanel, Frame, Layout, Margin, RichText, ScrollArea, TopBottomPanel, vec2,
+    vec2, Align, Button, CentralPanel, Frame, Layout, Margin, RichText, ScrollArea, TopBottomPanel,
 };
 
 use crate::ui::views::{App, HEADING_TEXT_SIZE, SUBHEADING_TEXT_SIZE};
@@ -66,9 +66,11 @@ impl App {
                         );
                     });
 
-                    self.has_scrolled_to_bottom_of_consent |= (output.state.offset.y
-                        + output.inner_rect.height())
-                        >= output.content_size.y;
+                    // Only enable if content is actually loaded and user scrolled to bottom
+                    let content_loaded = output.content_size.y > 0.0;
+                    let viewport_bottom = output.state.offset.y + output.inner_rect.height();
+                    let scrolled_to_bottom = viewport_bottom >= output.content_size.y - 1.0; // 1px tolerance
+                    self.has_scrolled_to_bottom_of_consent |= content_loaded && scrolled_to_bottom;
                 });
         });
     }

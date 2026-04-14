@@ -440,7 +440,7 @@ pub fn view(
         ui.label(format!(
             "Speed: {:.1} MB/s • ETA: {}",
             progress.speed_mbps,
-            util::format_seconds(progress.eta_seconds as u64),
+            util::format_seconds(progress.eta_seconds.max(0.0) as u64),
         ));
 
         // Show queued recordings count if any
@@ -677,7 +677,7 @@ pub fn view(
 
 fn upload_stats_view(ui: &mut Ui, recordings: &Recordings) {
     let cell_count = 5;
-    let available_width = ui.available_width() - (cell_count as f32 * 10.0);
+    let available_width = (ui.available_width() - (cell_count as f32 * 10.0)).max(0.0);
     let cell_width = available_width / cell_count as f32;
 
     // Calculate pending stats
@@ -719,7 +719,7 @@ fn upload_stats_view(ui: &mut Ui, recordings: &Recordings) {
         Layout::top_down(Align::Center),
         |ui| {
             let val = if let Some(stats) = &recordings.statistics {
-                util::format_seconds(stats.total_video_time.seconds as u64)
+                util::format_seconds(stats.total_video_time.seconds.max(0.0) as u64)
             } else if recordings.uploads_available() {
                 "0s".to_string()
             } else {
@@ -772,7 +772,7 @@ fn upload_stats_view(ui: &mut Ui, recordings: &Recordings) {
                 "Pending Uploads",
                 &format!(
                     "{} / {} files / {}",
-                    util::format_seconds(unuploaded_duration as u64),
+                    util::format_seconds(unuploaded_duration.max(0.0) as u64),
                     unuploaded_count,
                     util::format_bytes(unuploaded_size)
                 ),
@@ -794,7 +794,7 @@ fn upload_stats_view(ui: &mut Ui, recordings: &Recordings) {
                         .latest_upload_timestamp()
                         .map(|dt| dt.with_timezone(&chrono::Local))
                         .map(util::format_datetime)
-                        .unwrap_or("Never".to_string())
+                        .unwrap_or_else(|| "Never".to_string())
                 } else {
                     "Loading...".to_string()
                 },
@@ -860,7 +860,7 @@ fn recordings_view(
             {
                 ui.horizontal(|ui| {
                     let total_pages =
-                        (stats.total_uploads as f32 / recordings.limit as f32).ceil() as u32;
+                        (stats.total_uploads as f32 / recordings.limit.max(1) as f32).ceil() as u32;
                     let current_page = (recordings.offset / recordings.limit.max(1)) + 1;
 
                     ui.add_enabled_ui(recordings.offset > 0, |ui| {
@@ -880,7 +880,7 @@ fn recordings_view(
 
                     ui.add_enabled_ui(current_page < total_pages, |ui| {
                         if ui.button("Next").clicked() {
-                            let new_offset = recordings.offset + recordings.limit;
+                            let new_offset = recordings.offset.saturating_add(recordings.limit);
                             app_state
                                 .async_request_tx
                                 .blocking_send(AsyncRequest::LoadUploadList {
@@ -956,7 +956,7 @@ fn render_recording_entry(
     }
 
     fn duration(ui: &mut Ui, duration: f64, font_size: f32) {
-        ui.label(RichText::new(util::format_seconds(duration as u64)).size(font_size));
+        ui.label(RichText::new(util::format_seconds(duration.max(0.0) as u64)).size(font_size));
     }
 
     fn local_recording_link(
