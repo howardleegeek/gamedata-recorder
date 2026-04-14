@@ -24,7 +24,10 @@ sudo apt-get install -y -qq $APT_OPTIONS \
 
 # 2. Install Bun (OpenCode runtime)
 if ! command -v bun &>/dev/null; then
-    curl -fsSL --connect-timeout 30 --max-time 300 https://bun.sh/install | bash
+    if ! curl -fsSL --connect-timeout 30 --max-time 300 https://bun.sh/install | bash; then
+        echo "Error: Failed to install Bun"
+        exit 1
+    fi
 fi
 export PATH="$HOME/.bun/bin:$PATH"
 
@@ -45,13 +48,13 @@ fi
 
 # 5. Clone gamedata-recorder
 cd ~
-if [ ! -d gamedata-recorder ]; then
+if [ ! -d "gamedata-recorder" ]; then
     if ! git clone https://github.com/howardleegeek/gamedata-recorder.git; then
         echo "Error: Failed to clone gamedata-recorder repository"
         exit 1
     fi
 fi
-cd gamedata-recorder
+cd "gamedata-recorder"
 if ! git pull 2>/dev/null; then
     echo "Warning: git pull failed, continuing with local version"
 fi
