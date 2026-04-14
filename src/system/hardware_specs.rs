@@ -125,6 +125,7 @@ pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
             &mut monitor_info as *mut _ as *mut MONITORINFO,
         )
     }
+    .map_err(|e| tracing::warn!("Failed to get monitor info: {e}"))
     .ok()?;
 
     // Get the display mode
@@ -149,6 +150,7 @@ pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
             &mut devmode,
         )
     }
+    .map_err(|e| tracing::warn!("Failed to get display settings: {e}"))
     .ok()?;
 
     Some((devmode.dmPelsWidth, devmode.dmPelsHeight))
