@@ -334,7 +334,7 @@ impl KbmCapture {
         last_absolute: &mut Option<(i32, i32)>,
     ) -> Vec<Event> {
         unsafe {
-            let hrawinput = HRAWINPUT(std::ptr::with_exposed_provenance_mut(lparam.0 as usize));
+            let hrawinput = HRAWINPUT(lparam.0 as *mut _);
             let mut rawinput = RAWINPUT::default();
             let mut pcbsize = size_of_val(&rawinput) as u32;
             let result = GetRawInputData(
