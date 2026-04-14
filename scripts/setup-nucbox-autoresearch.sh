@@ -34,6 +34,7 @@ export PATH="$HOME/.opencode/bin:$PATH"
 
 # 4. Configure Fireworks API key (Kimi K2.5 Turbo)
 mkdir -p ~/.config/opencode
+chmod 700 ~/.config/opencode
 jq -n --arg key "$FIREWORKS_API_KEY" '{"fireworks": {"type": "api", "key": $key}}' > ~/.config/opencode/auth.json
 chmod 600 ~/.config/opencode/auth.json
 
@@ -60,6 +61,7 @@ echo "=== Verification ==="
 echo "Bun:      $(bun --version 2>/dev/null || echo MISSING)"
 echo "OpenCode: $(~/.opencode/bin/opencode --version 2>/dev/null || echo MISSING)"
 echo "Cargo:    $(cargo --version 2>/dev/null || echo MISSING)"
+echo "jq:       $(jq --version 2>/dev/null || echo MISSING)"
 echo "Repo:     $(git -C ~/gamedata-recorder log -1 --oneline 2>/dev/null || echo MISSING)"
 echo "Memory:   $(free -h | awk '/^Mem:/{print $2}')"
 echo "CPUs:     $(nproc)"
