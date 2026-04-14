@@ -1,6 +1,6 @@
 # GameData Recorder — Architecture Decision Record
 
-> All decisions backed by research in `docs/tech-research.md`
+> All decisions backed by research in [tech-research.md](tech-research.md)
 
 ## 1. Core Architecture
 
