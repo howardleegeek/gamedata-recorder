@@ -56,6 +56,10 @@ pub struct UserUpload {
 
 impl ApiClient {
     const MAX_USER_ID_LENGTH: usize = 256;
+    /// Maximum number of uploads to request in a single API call (pagination limit)
+    const MAX_UPLOADS_LIMIT: u32 = 1000;
+    /// Maximum offset for pagination to prevent resource exhaustion
+    const MAX_UPLOADS_OFFSET: u32 = 10_000_000;
 
     fn validate_user_id(user_id: &str) -> Result<(), ApiError> {
         if user_id.is_empty() {
@@ -144,6 +148,20 @@ impl ApiClient {
         }
 
         Self::validate_user_id(user_id)?;
+
+        // Validate limit to prevent DoS from requesting too many records
+        if limit == 0 || limit > Self::MAX_UPLOADS_LIMIT {
+            return Err(ApiError::ApiKeyValidationFailure(
+                format!("Limit must be between 1 and {}", Self::MAX_UPLOADS_LIMIT).into(),
+            ));
+        }
+        // Validate offset to prevent resource exhaustion from deep pagination
+        if offset > Self::MAX_UPLOADS_OFFSET {
+            return Err(ApiError::ApiKeyValidationFailure(
+                format!("Offset cannot exceed {}", Self::MAX_UPLOADS_OFFSET).into(),
+            ));
+        }
+
         let encoded_user_id = utf8_percent_encode(user_id, NON_ALPHANUMERIC).to_string();
         let mut url = format!(
             "{}/tracker/v2/uploads/user/{encoded_user_id}/list?limit={limit}&offset={offset}",
@@ -185,6 +203,20 @@ impl ApiClient {
         offset: u32,
     ) -> Result<UserUploads, ApiError> {
         Self::validate_user_id(user_id)?;
+
+        // Validate limit to prevent DoS from requesting too many records
+        if limit == 0 || limit > Self::MAX_UPLOADS_LIMIT {
+            return Err(ApiError::ApiKeyValidationFailure(
+                format!("Limit must be between 1 and {}", Self::MAX_UPLOADS_LIMIT).into(),
+            ));
+        }
+        // Validate offset to prevent resource exhaustion from deep pagination
+        if offset > Self::MAX_UPLOADS_OFFSET {
+            return Err(ApiError::ApiKeyValidationFailure(
+                format!("Offset cannot exceed {}", Self::MAX_UPLOADS_OFFSET).into(),
+            ));
+        }
+
         let statistics = self
             .get_user_upload_statistics(api_key, user_id, None, None)
             .await?;
