@@ -115,12 +115,12 @@ Section "MainSection" SEC01
 
   ; Copy all files and folders from dist directory
   File /r /x "GameData-Recorder-Setup-*.exe" "..\dist\*.*"
-  File "gamedata-logo.ico"
+  File "owl-logo.ico"
 
   ; Create shortcuts
   CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
-  CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\GameData Recorder.exe" "" "$INSTDIR\gamedata-logo.ico" 0
-  CreateShortcut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\GameData Recorder.exe" "" "$INSTDIR\gamedata-logo.ico" 0
+  CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\GameData Recorder.exe" "" "$INSTDIR\owl-logo.ico" 0
+  CreateShortcut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\GameData Recorder.exe" "" "$INSTDIR\owl-logo.ico" 0
   CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk" "$INSTDIR\uninst.exe"
 SectionEnd
 
