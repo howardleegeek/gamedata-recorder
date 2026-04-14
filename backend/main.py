@@ -461,8 +461,15 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 @app.post("/api/v1/auth/login")
 async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     """Login with email and password."""
-    # Find user by email
-    result = await db.execute(select(User).where(User.email == req.email))
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    # Find user by email with row lock to prevent TOCTOU race on status check
+    result = await db.execute(
+        select(User)
+        .where(User.email == req.email)
+        .with_for_update()
+    )
     user = result.scalar_one_or_none()
 
     if not user or not user.password_hash:
@@ -472,7 +479,7 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     if not verify_password(req.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    # Check user status
+    # Check user status (now safe from race conditions due to row lock)
     if user.status != UserStatus.ACTIVE:
         raise HTTPException(
             status_code=403,
