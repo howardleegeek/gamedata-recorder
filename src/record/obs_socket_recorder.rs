@@ -88,10 +88,7 @@ impl VideoRecorder for ObsSocketRecorder {
         let all_profiles = profiles.list().await.wrap_err("Failed to get profiles")?;
 
         // Create and activate OWL profile
-        if !all_profiles
-            .profiles
-            .contains(&OWL_PROFILE_NAME.to_string())
-        {
+        if !all_profiles.profiles.iter().any(|p| p == OWL_PROFILE_NAME) {
             profiles
                 .create(OWL_PROFILE_NAME)
                 .await
@@ -355,7 +352,11 @@ fn get_obs_window_encoding(hwnd: HWND, game_exe: &str) -> String {
         // Check if 0 means error or truly empty title
         let last_error = unsafe { windows::Win32::Foundation::GetLastError() };
         if last_error.0 != 0 {
-            tracing::warn!("GetWindowTextLengthW failed for hwnd {:?}: error {}", hwnd, last_error.0);
+            tracing::warn!(
+                "GetWindowTextLengthW failed for hwnd {:?}: error {}",
+                hwnd,
+                last_error.0
+            );
         }
     }
 
