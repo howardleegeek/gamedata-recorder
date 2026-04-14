@@ -779,7 +779,9 @@ fn recording_notice(ui: &mut Ui, app_state: &AppState) {
                         job.append(
                             &format!(
                                 " ({})",
-                                util::format_seconds(start_time.elapsed().as_secs())
+                                util::format_seconds(
+                                    start_time.elapsed().as_secs_f64().round() as u64
+                                )
                             ),
                             0.0,
                             TextFormat {
