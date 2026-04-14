@@ -234,7 +234,7 @@ pub async fn upload_folder(
                     } else {
                         None
                     },
-                    additional_metadata: serde_json::to_value(&validation.metadata)?,
+                    additional_metadata: Some(serde_json::to_value(&validation.metadata)?),
                     uploading_recorder_version: Some(env!("CARGO_PKG_VERSION")),
                 },
             )

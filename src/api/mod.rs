@@ -74,14 +74,24 @@ pub struct ApiClient {
     client: reqwest::Client,
 }
 impl ApiClient {
+    /// Creates a new API client with sensible timeouts for recording operations.
+    /// Prevents indefinite hangs during uploads which could destabilize recording sessions.
     pub fn new() -> Self {
         tracing::debug!("ApiClient::new() called");
-        Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(60))
-                .build()
-                .expect("Failed to build HTTP client"),
-        }
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(300))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to build client with timeouts, using minimal fallback: {e}");
+                // Fallback with at least timeout protection to prevent hangs during uploads
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(300))
+                    .build()
+                    .expect("Failed to build even minimal HTTP client")
+            });
+        Self { client }
     }
 
     /// Attempts to validate the API key. Returns an error if the API key is invalid or the server is unavailable.
