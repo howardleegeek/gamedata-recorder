@@ -34,6 +34,8 @@ const SET_ENCODER: bool = false;
 pub struct ObsSocketRecorder {
     // Use an Option to allow it to be consumed within the destructor
     client: Option<Client>,
+    /// Handle to the shutdown task for proper cleanup in Drop
+    shutdown_handle: Option<tokio::task::JoinHandle<()>>,
 }
 impl ObsSocketRecorder {
     pub async fn new() -> Result<Self>
@@ -41,7 +43,10 @@ impl ObsSocketRecorder {
         Self: Sized,
     {
         tracing::debug!("ObsSocketRecorder::new() called");
-        Ok(Self { client: None })
+        Ok(Self {
+            client: None,
+            shutdown_handle: None,
+        })
     }
 }
 #[async_trait::async_trait(?Send)]
@@ -326,15 +331,25 @@ impl VideoRecorder for ObsSocketRecorder {
 impl Drop for ObsSocketRecorder {
     fn drop(&mut self) {
         tracing::info!("Shutting down OBS socket recorder");
-        let client = self.client.take();
-        tokio::spawn(async move {
-            if let Some(client) = &client {
+        if let Some(client) = self.client.take() {
+            // Spawn the shutdown task and store its handle for cleanup
+            self.shutdown_handle = Some(tokio::spawn(async move {
                 // Log, but do not explode if it fails
                 if let Err(e) = client.recording().stop().await {
                     tracing::error!("Failed to stop recording: {e}");
                 }
+            }));
+        }
+
+        // Wait for the shutdown task to complete to ensure proper cleanup.
+        // This prevents the task from being orphaned if the runtime shuts down.
+        if let Some(shutdown_handle) = self.shutdown_handle.take() {
+            // Try to block on the handle if we're in a tokio runtime context.
+            // If not in a runtime, the task will run fire-and-forget (fallback).
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let _ = runtime.block_on(shutdown_handle);
             }
-        });
+        }
     }
 }
 
