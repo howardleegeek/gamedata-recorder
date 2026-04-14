@@ -33,6 +33,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "chinese_simplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Tasks]
+Name: "desktopicon"; Description: "Create a desktop icon"; GroupDescription: "Additional options:"; Flags: checkedonce
 Name: "startup"; Description: "Start automatically when Windows starts"; GroupDescription: "Additional options:"; Flags: checkedonce
 
 [Files]
@@ -44,7 +45,7 @@ Source: "..\config.default.toml"; DestDir: "{app}"; DestName: "config.toml"; Fla
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: startup
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]
 ; Start with Windows (user-level, no admin needed)
