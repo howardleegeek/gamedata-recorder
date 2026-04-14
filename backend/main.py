@@ -783,7 +783,9 @@ async def upload_complete(
         )
         game = game_result.scalar_one_or_none()
         if game:
-            earnings_per_hour *= game.earnings_multiplier or 1.0
+            earnings_per_hour *= (
+                game.earnings_multiplier if game.earnings_multiplier is not None else 1.0
+            )
 
     earnings = round(duration_hours * earnings_per_hour, 2)
     # Ensure earnings are never negative (protects against negative multipliers in DB)
