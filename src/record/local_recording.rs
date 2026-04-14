@@ -220,6 +220,7 @@ impl LocalRecordingPaused {
         serde_json::to_writer(&mut file, &chunk)?;
         use std::io::Write;
         writeln!(&mut file)?;
+        file.flush()?;
 
         Ok(())
     }
