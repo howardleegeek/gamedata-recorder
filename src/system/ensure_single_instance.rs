@@ -53,8 +53,8 @@ pub fn ensure_single_instance() -> eyre::Result<()> {
                 std::mem::forget(_handle);
             }
             Err(e) => {
-                tracing::warn!("Failed to create mutex for single instance check: {e}");
-                // Fail open — allow the instance to run
+                tracing::error!("Failed to create mutex for single instance check: {e}");
+                return Err(eyre::eyre!("Failed to create single-instance mutex: {e}"));
             }
         }
     }
