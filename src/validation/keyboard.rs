@@ -25,13 +25,24 @@ pub(super) fn validate(input: &super::ValidationInput) -> (KeyboardOutputStats, 
     let mut invalid_reasons = vec![];
     let stats = get_stats(input);
 
-    if stats.wasd_apm < 5.0 {
+    // Validate stats are finite before comparison to prevent NaN from bypassing checks
+    if !stats.wasd_apm.is_finite() {
+        invalid_reasons.push(format!(
+            "WASD actions per minute is invalid: {}",
+            stats.wasd_apm
+        ));
+    } else if stats.wasd_apm < 5.0 {
         invalid_reasons.push(format!(
             "WASD actions per minute too low: {}",
             stats.wasd_apm
         ));
     }
-    if stats.apm < 5.0 {
+    if !stats.apm.is_finite() {
+        invalid_reasons.push(format!(
+            "Keyboard actions per minute is invalid: {}",
+            stats.apm
+        ));
+    } else if stats.apm < 5.0 {
         invalid_reasons.push(format!(
             "Keyboard actions per minute too low: {}",
             stats.apm
