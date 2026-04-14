@@ -54,7 +54,7 @@ pub struct HardwareSpecs {
 
 pub fn get_hardware_specs(gpus: Vec<GpuSpecs>) -> Result<HardwareSpecs> {
     let mut sys = System::new_all();
-    sys.refresh_all();
+    // System::new_all() already refreshes all information, no need for separate refresh_all()
 
     // CPU info
     let cpu_info = sys
