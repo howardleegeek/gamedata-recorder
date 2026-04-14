@@ -17,7 +17,7 @@ def _run_tests_with_client(client):
     print(f"[PASS] Health: {r.json()}")
 
     # 2. Login
-    r = client.post("/api/v1/auth/login", json={"email": "gamer@test.com"})
+    r = client.post("/api/v1/auth/login", json={"email": "test@gamedatalabs.com", "password": "testpassword123"})
     assert r.status_code == 200
     token = r.json()["token"]
     user_id = r.json()["user_id"]
