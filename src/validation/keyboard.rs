@@ -96,10 +96,10 @@ fn get_stats(input: &super::ValidationInput) -> KeyboardStats {
 
         let effective_duration = input.duration_minutes.max(MIN_DURATION_MINUTES);
 
-        wasd_apm = if input.duration_minutes > 0.0 {
-            wasd_presses as f64 / effective_duration
+        wasd_apm = if input.duration_minutes >= MIN_DURATION_MINUTES {
+            wasd_presses as f64 / input.duration_minutes
         } else {
-            0.0
+            wasd_presses as f64 / MIN_DURATION_MINUTES
         };
 
         // Get unique keys from pressed events
@@ -156,6 +156,10 @@ fn get_stats(input: &super::ValidationInput) -> KeyboardStats {
         unique_keys,
         button_diversity: diversity,
         total_keyboard_events: keyboard_events.len() as u64,
-        apm: keyboard_events.len() as f64 / effective_duration,
+        apm: if input.duration_minutes >= MIN_DURATION_MINUTES {
+            keyboard_events.len() as f64 / input.duration_minutes
+        } else {
+            keyboard_events.len() as f64 / MIN_DURATION_MINUTES
+        },
     }
 }
