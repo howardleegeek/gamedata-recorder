@@ -237,6 +237,26 @@ async def global_exception_handler(request: Request, exc: Exception):
         )
 
 
+# --- Security Utilities ---
+
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename to prevent path traversal attacks.
+    
+    Removes path separators and null bytes that could be used
+    to escape the intended upload directory.
+    """
+    if not filename:
+        return "unnamed"
+    # Remove path traversal sequences and null bytes
+    sanitized = filename.replace("..", "").replace("/", "").replace("\\", "")
+    sanitized = sanitized.replace("\x00", "")  # Null bytes
+    # Ensure we have a valid filename left
+    if not sanitized or sanitized.strip(".") == "":
+        return "unnamed"
+    return sanitized
+
+
 # --- Auth Utilities ---
 
 
@@ -526,12 +546,15 @@ async def upload_init(
         max(1, (req.total_size_bytes + chunk_size - 1) // chunk_size), MAX_CHUNKS
     )
 
+    # Sanitize filename to prevent path traversal
+    safe_filename = sanitize_filename(req.filename)
+
     # Create upload record
     upload = Upload(
         id=upload_id,
         user_id=current_user.id,
         game_control_id=game_control_id,
-        filename=req.filename,
+        filename=safe_filename,
         total_size_bytes=req.total_size_bytes,
         chunk_size_bytes=chunk_size,
         total_chunks=total_chunks,
@@ -561,8 +584,8 @@ async def upload_init(
                 aws_secret_access_key=AWS_SECRET_KEY,
             )
 
-            # Create multipart upload
-            s3_key = f"uploads/{current_user.id}/{upload_id}/{req.filename}"
+            # Create multipart upload with sanitized filename
+            s3_key = f"uploads/{current_user.id}/{upload_id}/{safe_filename}"
             mpu = s3.create_multipart_upload(Bucket=S3_BUCKET, Key=s3_key)
 
             upload.s3_key = s3_key
