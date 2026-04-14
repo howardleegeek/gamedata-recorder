@@ -184,10 +184,10 @@ fn validate_files(
 
     // Validate timeline consistency to prevent empty filtered events and confusing errors
     if start_time > end_time {
-        return Err(vec![format!(
+        eyre::bail!(
             "Invalid timeline: start_time ({}) is after end_time ({})",
             start_time, end_time
-        )]);
+        );
     }
 
     let filtered_events: Vec<_> = events
