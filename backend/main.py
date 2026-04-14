@@ -630,7 +630,7 @@ async def upload_complete(
     earnings_per_hour = 0.50  # Default
     if upload.game_exe:
         game_result = await db.execute(
-            select(Game).where(Game.exe_name == upload.game_exe.lower())
+            select(Game).where(func.lower(Game.exe_name) == func.lower(upload.game_exe))
         )
         game = game_result.scalar_one_or_none()
         if game:
