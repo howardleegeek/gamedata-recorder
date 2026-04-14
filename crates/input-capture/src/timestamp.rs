@@ -177,14 +177,19 @@ impl HighPrecisionTimer {
     }
 
     /// Calculate the drift between QPC and GetMessageTime.
-    /// Returns the difference in milliseconds.
+    /// Returns the difference in milliseconds (QPC-based time minus message-time-based time).
     /// Useful for detecting timing anomalies.
+    ///
+    /// The drift is calculated as: elapsed_qpc_ms - (current_msg_time - initial_msg_time).
+    /// This avoids i32 overflow when the timer runs for extended periods (>24 days).
     #[cfg(target_os = "windows")]
     pub fn time_drift_ms(&self) -> i32 {
         let current_msg_time = unsafe { GetMessageTime() };
+        // Calculate message time delta (time passed according to GetMessageTime)
+        let msg_delta_ms = current_msg_time.wrapping_sub(self.msg_time_offset_ms);
         let elapsed = self.elapsed_ms() as i32;
-        let expected_msg_time = self.msg_time_offset_ms + elapsed;
-        current_msg_time - expected_msg_time
+        // Drift is QPC elapsed time minus message time delta
+        elapsed - msg_delta_ms
     }
 }
 
