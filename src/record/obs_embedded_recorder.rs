@@ -154,6 +154,7 @@ impl VideoRecorder for ObsEmbeddedRecorder {
     async fn poll(&mut self) -> PollUpdate {
         if let Err(e) = self.obs_tx.send(RecorderMessage::Poll).await {
             tracing::error!("Failed to send poll message to OBS thread: {e}");
+            return PollUpdate { active_fps: None };
         }
         PollUpdate {
             active_fps: Some(unsafe { libobs_wrapper::sys::obs_get_active_fps() }),
