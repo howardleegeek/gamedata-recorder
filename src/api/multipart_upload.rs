@@ -409,7 +409,7 @@ impl ApiClient {
         if !response.success {
             return Err(ApiError::ApiFailure {
                 context: "Complete upload request failed".into(),
-                error: response.message.clone(),
+                error: response.message,
                 status: None,
             });
         }
@@ -442,7 +442,7 @@ impl ApiClient {
         if !response.success {
             return Err(ApiError::ApiFailure {
                 context: "Abort upload request failed".into(),
-                error: response.message.clone(),
+                error: response.message,
                 status: None,
             });
         }
