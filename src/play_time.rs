@@ -136,7 +136,7 @@ impl PlayTimeTracker {
         let state: SerializedState =
             serde_json::from_str(&std::fs::read_to_string(Self::file_path()?)?)?;
         let mut tracker = Self {
-            total_active_duration: Duration::from_secs(state.total_active_secs),
+            total_active_duration: Duration::from_millis(state.total_active_millis),
             current_session_start: None,
             last_activity_time: state.last_activity_time,
             last_break_end: state.last_break_end,
@@ -171,7 +171,7 @@ impl Drop for PlayTimeTracker {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SerializedState {
-    total_active_secs: u64,
+    total_active_millis: u64,
     last_activity_time: DateTime<Utc>,
     last_break_end: DateTime<Utc>,
 }
@@ -179,7 +179,7 @@ struct SerializedState {
 impl From<&PlayTimeTracker> for SerializedState {
     fn from(t: &PlayTimeTracker) -> Self {
         Self {
-            total_active_secs: t.total_active_duration.as_secs(),
+            total_active_millis: t.total_active_duration.as_millis() as u64,
             last_activity_time: t.last_activity_time,
             last_break_end: t.last_break_end,
         }
