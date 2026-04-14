@@ -344,6 +344,13 @@ impl ApiClient {
     ) -> Result<CompleteMultipartUploadResponse, ApiError> {
         Self::validate_upload_id(upload_id)?;
 
+        // Validate chunk_etags is not empty to prevent meaningless API calls
+        if chunk_etags.is_empty() {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "Chunk ETags list cannot be empty".into(),
+            ));
+        }
+
         #[derive(Serialize, Debug)]
         struct CompleteMultipartUploadRequest<'a> {
             upload_id: &'a str,
