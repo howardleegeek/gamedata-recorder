@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List
 from contextlib import asynccontextmanager
+from urllib.parse import quote_plus
 
 import boto3
 from fastapi import FastAPI, HTTPException, Header, Depends, Request, status
@@ -60,8 +61,10 @@ if not DATABASE_URL:
     DB_HOST = os.getenv("DB_HOST", "localhost")
     DB_PORT = os.getenv("DB_PORT", "5432")
     DB_NAME = os.getenv("DB_NAME", "gamedata")
+    # URL-encode credentials to handle special characters in passwords
     DATABASE_URL = (
-        f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+        f"postgresql+asyncpg://{quote_plus(DB_USER)}:{quote_plus(DB_PASSWORD)}"
+        f"@{quote_plus(DB_HOST)}:{DB_PORT}/{quote_plus(DB_NAME)}"
     )
 
 # Create database engine and session factory
