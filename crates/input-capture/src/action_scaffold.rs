@@ -68,10 +68,12 @@ pub fn build_actions(
     fps: f64,
 ) -> Vec<Action> {
     // Validate fps to prevent division by zero and ensure reasonable frame interval
-    if fps <= 0.0 || !fps.is_finite() {
+    let fps = if fps <= 0.0 || !fps.is_finite() {
         tracing::warn!("Invalid fps: {}, using default 30.0", fps);
-        return Vec::new();
-    }
+        30.0
+    } else {
+        fps
+    };
     let frame_interval_ns = (1_000_000_000.0 / fps) as u64;
     // Ensure frame_interval_ns is at least 1 to prevent division by zero
     let frame_interval_ns = frame_interval_ns.max(1);
