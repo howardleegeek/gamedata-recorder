@@ -492,9 +492,6 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 @app.post("/api/v1/auth/login")
 async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     """Login with email and password."""
-    from sqlalchemy import select
-    from sqlalchemy.orm import selectinload
-
     # Normalize email to lowercase for consistent lookup
     normalized_email = req.email.lower()
 
