@@ -114,6 +114,14 @@ if WinExist("ahk_exe OWL Control.exe") {
         MsgBox("reset_position array must have at least 2 elements")
         ExitApp()
     }
+    if (reset_position[1] < 0 || reset_position[1] > 1920) {
+        MsgBox("reset_position X coordinate out of bounds: " . reset_position[1])
+        ExitApp()
+    }
+    if (reset_position[2] < 0 || reset_position[2] > 1200) {
+        MsgBox("reset_position Y coordinate out of bounds: " . reset_position[2])
+        ExitApp()
+    }
     MouseClick "left", reset_position[1], reset_position[2]   ; Resets tabs to top of UI
 
     if (stop_toggle == checked_true) {
