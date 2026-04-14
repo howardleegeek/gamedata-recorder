@@ -218,7 +218,8 @@ fn build_trajectory(
     terminator: TrajectoryTerminator,
 ) -> Trajectory {
     let duration_ms = end_ns.saturating_sub(start_ns) as f64 / 1_000_000.0;
-    let avg_speed = if duration_ms > 0.0 {
+    // Use a minimum threshold to prevent infinity from extreme values when duration is tiny
+    let avg_speed = if duration_ms > 0.001 {
         total_distance / duration_ms
     } else {
         0.0
