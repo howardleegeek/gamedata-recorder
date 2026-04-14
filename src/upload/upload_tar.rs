@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use backoff::{future::retry_notify, Error as BackoffError, ExponentialBackoff};
+use backoff::{Error as BackoffError, ExponentialBackoff, future::retry_notify};
 
 use futures::TryStreamExt as _;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
@@ -128,7 +128,13 @@ pub async fn run(
         )
     };
 
-    let file_size = std::fs::metadata(&tar_path).map(|m| m.len())?;
+    // Use spawn_blocking to avoid blocking the async runtime with filesystem I/O
+    let file_size = tokio::task::spawn_blocking({
+        let tar_path = tar_path.clone();
+        move || std::fs::metadata(&tar_path).map(|m| m.len())
+    })
+    .await
+    .map_err(|e| std::io::Error::other(e))??;
     if let Err(e) = unreliable_tx.send(UiUpdateUnreliable::UpdateUploadProgress(Some(
         Default::default(),
     ))) {
