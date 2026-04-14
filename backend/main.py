@@ -12,6 +12,8 @@ import hmac
 import hashlib
 import json
 import re
+import secrets
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List
@@ -122,8 +124,6 @@ def validate_startup_config():
     # Check API_SECRET
     if not API_SECRET:
         if ENVIRONMENT == "development":
-            import secrets
-
             temp_secret = secrets.token_hex(32)
             print(f"\n{'=' * 60}")
             print("⚠️  WARNING: API_SECRET not set!")
@@ -236,8 +236,6 @@ async def global_exception_handler(request: Request, exc: Exception):
             },
         )
     else:
-        import traceback
-
         return JSONResponse(
             status_code=500,
             content={
