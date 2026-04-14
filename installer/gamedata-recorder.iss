@@ -61,7 +61,7 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "--minimized"; Description: "Laun
 
 [UninstallRun]
 ; Kill the process before uninstall (only if running to avoid error)
-Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden; Check: IsAppRunning()
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden waituntilterminated; Check: IsAppRunning()
 
 [Code]
 // Check if the application is currently running
