@@ -364,11 +364,14 @@ impl KbmCapture {
                 &mut pcbsize,
                 header_size,
             );
-            if result == u32::MAX || result == 0 {
+            // Validate that GetRawInputData wrote the expected amount of data.
+            // If result differs from pcbsize, buffer may contain uninitialized memory,
+            // which would cause undefined behavior when accessing RAWINPUT fields.
+            if result == u32::MAX || result == 0 || result != pcbsize {
                 return Vec::new();
             }
 
-            // SAFETY: buffer is sized correctly per GetRawInputData query
+            // SAFETY: buffer is sized correctly and fully initialized by GetRawInputData
             let rawinput = &*(buffer.as_ptr() as *const RAWINPUT);
             match Input::RID_DEVICE_INFO_TYPE(rawinput.header.dwType) {
                 Input::RIM_TYPEMOUSE => {
