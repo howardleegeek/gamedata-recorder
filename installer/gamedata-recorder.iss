@@ -60,7 +60,9 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--minimized"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser; WorkingDir: "{app}"
 
 [UninstallRun]
-; Kill the process before uninstall (only if running to avoid error)
+; Graceful shutdown attempt first (no /F flag) - wait up to 5 seconds
+Filename: "{sys}\taskkill.exe"; Parameters: "/IM {#MyAppExeName}"; Flags: runhidden waituntilterminated; Check: IsAppRunning()
+; Force kill if still running after graceful attempt
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden waituntilterminated; Check: IsAppRunning()
 
 [Code]
