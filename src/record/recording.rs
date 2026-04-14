@@ -176,6 +176,11 @@ impl Recording {
     }
 
     pub(crate) fn update_fps(&mut self, fps: f64) {
+        // Guard against invalid FPS values from video recorder
+        if !fps.is_finite() {
+            tracing::warn!("Ignoring non-finite FPS value: {}", fps);
+            return;
+        }
         // True cumulative average (not exponential decay which biases toward recent samples)
         self.fps_sample_count += 1;
         self.average_fps = Some(match self.average_fps {
