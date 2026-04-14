@@ -388,11 +388,11 @@ class UploadInitRequest(BaseModel):
     total_size_bytes: int = Field(..., gt=0)
     chunk_size_bytes: Optional[int] = Field(33554432, gt=0)
     game_exe: Optional[str] = Field(None, max_length=255)
-    video_duration_seconds: Optional[float] = None
-    video_width: Optional[int] = None
-    video_height: Optional[int] = None
+    video_duration_seconds: Optional[float] = Field(None, ge=0)
+    video_width: Optional[int] = Field(None, ge=0)
+    video_height: Optional[int] = Field(None, ge=0)
     video_codec: Optional[str] = Field(None, max_length=50)
-    video_fps: Optional[float] = None
+    video_fps: Optional[float] = Field(None, ge=0)
     recorder_version: Optional[str] = Field(None, max_length=50)
     hardware_id: Optional[str] = Field(None, max_length=255)
     metadata: Optional[dict] = None
