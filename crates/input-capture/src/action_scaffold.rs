@@ -69,7 +69,8 @@ pub fn build_actions(
 ) -> Vec<Action> {
     // Guard against non-positive FPS to prevent divide-by-zero or invalid frame calculations
     let fps = fps.max(1.0);
-    let frame_interval_ns = (1_000_000_000.0 / fps) as u64;
+    // Guard against extremely high FPS that would cause frame_interval_ns to be 0
+    let frame_interval_ns = ((1_000_000_000.0 / fps) as u64).max(1);
     let mut actions = Vec::new();
     let mut action_index: u32 = 0;
     let mut cursor_x: i32 = 0;
