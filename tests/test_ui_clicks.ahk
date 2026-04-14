@@ -141,6 +141,12 @@ InitUIVars() {
         MsgBox("encoder_button Y coordinate out of bounds: " . encoder_button[2])
         ExitApp()
     }
+    if (encoder_button.Length >= 3) {
+        if (encoder_button[3] < 1 || encoder_button[3] > 100) {
+            MsgBox("encoder_button option count out of bounds: " . encoder_button[3])
+            ExitApp()
+        }
+    }
     settings_button := Array(456, 410)
     if (settings_button.Length < 2) {
         MsgBox("settings_button array must have at least 2 elements")
