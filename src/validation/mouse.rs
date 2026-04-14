@@ -95,8 +95,9 @@ fn get_stats(input: &super::ValidationInput) -> MouseStats {
                 continue;
             }
             let frame_index = (timestamp - input.start_time) / frame_duration;
-            // Prevent i32 overflow: skip events that would exceed valid frame range
-            if frame_index > i32::MAX as f64 {
+            // Prevent i32 overflow: skip events that would exceed valid frame range.
+            // Use safety margin (0.5) to account for rounding up in .round() call below.
+            if frame_index > (i32::MAX as f64 - 0.5) {
                 tracing::warn!("Mouse event timestamp too large, exceeds valid frame range");
                 continue;
             }
