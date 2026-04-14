@@ -126,6 +126,8 @@ impl ApiClient {
             upload_timestamp: &'a str,
         }
 
+        // Store timestamp in a variable to prevent dangling reference
+        let timestamp = chrono::Local::now().to_rfc3339();
         let response = self
             .client
             .post(format!(
@@ -156,7 +158,7 @@ impl ApiClient {
                 uploading_recorder_version: args.uploading_recorder_version,
 
                 uploader_hwid: args.hardware_id,
-                upload_timestamp: &chrono::Local::now().to_rfc3339(),
+                upload_timestamp: &timestamp,
             })
             .send()
             .await?;
