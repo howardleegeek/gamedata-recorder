@@ -677,7 +677,7 @@ pub fn view(
 
 fn upload_stats_view(ui: &mut Ui, recordings: &Recordings) {
     let cell_count = 5;
-    let available_width = ui.available_width() - (cell_count as f32 * 10.0);
+    let available_width = (ui.available_width() - (cell_count as f32 * 10.0)).max(0.0);
     let cell_width = available_width / cell_count as f32;
 
     // Calculate pending stats
