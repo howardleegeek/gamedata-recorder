@@ -492,6 +492,12 @@ impl RecorderState {
 
         // Listen for signals to pass onto the event stream
         self.was_hooked.store(false, Ordering::Relaxed);
+
+        // Get the Tokio runtime handle to use in the spawned thread.
+        // This ensures tokio::select! and tokio channels work correctly.
+        let runtime_handle = tokio::runtime::Handle::try_current()
+            .context("Failed to get Tokio runtime handle for signal monitoring thread")?;
+
         std::thread::spawn({
             let event_stream = request.event_stream;
             let was_hooked = self.was_hooked.clone();
@@ -520,9 +526,8 @@ impl RecorderState {
 
             move || {
                 let initial_time = Instant::now();
-                futures::executor::block_on(async {
-                    // Seems a bit dubious to use a tokio::select with
-                    // a tokio oneshot in a non-Tokio context, but it seems to work
+                // Use Tokio runtime handle to properly execute async code with tokio::select!
+                runtime_handle.block_on(async {
                     loop {
                         tokio::select! {
                             r = start_signal_rx.recv() => {
