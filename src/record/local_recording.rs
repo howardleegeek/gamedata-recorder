@@ -222,6 +222,9 @@ impl LocalRecordingPaused {
         use std::io::Write;
         writeln!(&mut file)?;
 
+        // Sync to disk to prevent data loss on system crash
+        file.sync_all()?;
+
         Ok(())
     }
 
