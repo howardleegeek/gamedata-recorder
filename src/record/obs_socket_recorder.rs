@@ -154,12 +154,18 @@ impl VideoRecorder for ObsSocketRecorder {
                 .wrap_err("Failed to create input")?;
         }
 
-        let _ = inputs
+        if let Err(e) = inputs
             .set_volume(InputId::Name("Mic/Aux"), Volume::Db(-100.0))
-            .await;
-        let _ = inputs
+            .await
+        {
+            tracing::warn!("Failed to mute Mic/Aux input: {e}");
+        }
+        if let Err(e) = inputs
             .set_volume(InputId::Name("Desktop Audio"), Volume::Db(-100.0))
-            .await;
+            .await
+        {
+            tracing::warn!("Failed to mute Desktop Audio input: {e}");
+        }
 
         for (category, name, value) in [
             ("SimpleOutput", "RecQuality", "Stream"),
