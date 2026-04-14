@@ -68,6 +68,7 @@ impl UnsupportedGames {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledGame {
     pub name: String,
     pub steam_app_id: u32,
