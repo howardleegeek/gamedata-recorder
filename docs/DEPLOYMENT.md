@@ -50,7 +50,7 @@ The installer:
 
 ## Backend Setup
 
-See `docs/api-spec.md` for the full API specification.
+See [api-spec.md](api-spec.md) for the full API specification.
 
 Minimum backend for MVP:
 1. **Auth endpoint**: Return a JWT token (can be hardcoded for testing)

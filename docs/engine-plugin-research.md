@@ -1,4 +1,4 @@
-# GameData Labs - Engine Metadata Extraction Plugin Research
+# GameData Labs — Engine Metadata Extraction Plugin Research
 
 ## Executive Summary
 
@@ -700,7 +700,7 @@ Games not built on Godot/Unity/Unreal have no universal injection path. Options:
 
 ### Plugin Core (Rust library, shared across engines)
 
-```
+```text
 gamedata-core/          # Rust crate
   src/
     lib.rs              # FFI exports + shared logic

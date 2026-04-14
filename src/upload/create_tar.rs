@@ -30,6 +30,44 @@ impl From<std::io::Error> for CreateTarError {
         CreateTarError::Io(e)
     }
 }
+/// RAII guard that cleans up a partially created tar file on drop.
+/// Disarmed when tar creation succeeds via `into_path()`.
+struct CreatingTarGuard {
+    path: Option<PathBuf>,
+}
+
+impl CreatingTarGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    /// Disarm the guard and return the path, preventing cleanup on drop.
+    fn into_path(mut self) -> PathBuf {
+        self.path.take().expect("path always exists before disarm")
+    }
+}
+
+impl Drop for CreatingTarGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            if path.is_file() {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::warn!(
+                        "CreatingTarGuard: failed to clean up partial tar at {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    tracing::info!(
+                        "CreatingTarGuard: cleaned up partial tar at {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
 pub async fn create_tar_file(
     recording_path: &Path,
     validation: &ValidationResult,
@@ -42,6 +80,9 @@ pub async fn create_tar_file(
             let uuid_str = uuid::Uuid::new_v4().simple().to_string();
             let tar_name = format!("{}.tar", uuid_str.get(0..16).unwrap_or(&uuid_str));
             let tar_path = recording_path.join(tar_name);
+
+            // Guard to clean up partial tar if creation fails
+            let guard = CreatingTarGuard::new(tar_path.clone());
 
             // Files to include in the tar archive
             let source_files = [
@@ -130,7 +171,8 @@ pub async fn create_tar_file(
                 }
             }
 
-            result
+            // Disarm the guard: tar creation succeeded, don't clean up
+            Ok(guard.into_path())
         }
     })
     .await?

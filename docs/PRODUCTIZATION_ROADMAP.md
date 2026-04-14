@@ -29,14 +29,12 @@
 **为什么**: JSON文件无法支撑并发，无事务支持  
 **工作量**: 2-3天
 
-```python
 # 迁移到PostgreSQL
 - [ ] 添加SQLAlchemy + asyncpg依赖
 - [ ] 创建数据模型（User, Upload, Earning）
 - [ ] 数据库迁移脚本（Alembic）
 - [ ] 数据迁移工具（JSON -> PostgreSQL）
 - [ ] 更新所有CRUD操作
-```
 
 **验收标准**:
 - 所有API测试通过
