@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use backoff::{Error as BackoffError, ExponentialBackoff, future::retry_notify};
+use backoff::{future::retry_notify, Error as BackoffError, ExponentialBackoff};
 
 use futures::TryStreamExt as _;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
@@ -399,12 +399,14 @@ pub async fn run(
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             if now >= expires_at {
+                let seconds_past_expiration =
+                    now.saturating_sub(expires_at).min(i64::MAX as u64) as i64;
                 tracing::error!(
                     "Upload session expired: upload_id={}, client_time={}, expires_at={}, diff={}s. If this is a fresh upload, the system clock may be incorrect.",
                     upload_id,
                     now,
                     expires_at,
-                    now as i64 - expires_at as i64
+                    seconds_past_expiration
                 );
                 return Err(UploadTarError::UploadSessionExpired {
                     upload_id,
@@ -412,7 +414,7 @@ pub async fn run(
                     expires_at,
                 });
             }
-            let seconds_left = expires_at as i64 - now as i64;
+            let seconds_left = expires_at.saturating_sub(now).min(i64::MAX as u64) as i64;
             if seconds_left < 60 && chunk_number % 10 == 0 {
                 tracing::warn!("Upload session expires in {} seconds!", seconds_left);
             }
