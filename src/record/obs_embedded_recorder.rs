@@ -537,24 +537,32 @@ impl RecorderState {
                                 if r.is_ok() {
                                     if last_application.as_ref().is_some_and(|a| a.0 == game_exe && a.1 .0 == hwnd.0) {
                                         tracing::warn!("Video started again for last game, assuming we're already hooked");
-                                        let _ = event_stream.send(InputEventType::HookStart);
+                                        if let Err(e) = event_stream.send(InputEventType::HookStart) {
+                                            tracing::warn!("Failed to send HookStart event: {}", e);
+                                        }
                                         was_hooked.store(true, Ordering::Relaxed);
                                     }
 
                                     tracing::info!("Video started at {}s", initial_time.elapsed().as_secs_f64());
-                                    let _ = event_stream.send(InputEventType::VideoStart);
+                                    if let Err(e) = event_stream.send(InputEventType::VideoStart) {
+                                        tracing::warn!("Failed to send VideoStart event: {}", e);
+                                    }
                                 }
                             }
                             r = stop_signal_rx.recv() => {
                                 if r.is_ok() {
                                     tracing::info!("Video ended at {}s", initial_time.elapsed().as_secs_f64());
-                                    let _ = event_stream.send(InputEventType::VideoEnd);
+                                    if let Err(e) = event_stream.send(InputEventType::VideoEnd) {
+                                        tracing::warn!("Failed to send VideoEnd event: {}", e);
+                                    }
                                 }
                             }
                             r = hook_signal_rx.recv() => {
                                 if r.is_ok() {
                                     tracing::info!("Game hooked at {}s", initial_time.elapsed().as_secs_f64());
-                                    let _ = event_stream.send(InputEventType::HookStart);
+                                    if let Err(e) = event_stream.send(InputEventType::HookStart) {
+                                        tracing::warn!("Failed to send HookStart event: {}", e);
+                                    }
                                     was_hooked.store(true, Ordering::Relaxed);
                                 }
                             }
