@@ -546,6 +546,8 @@ impl RecorderState {
                                 if r.is_ok() {
                                     tracing::info!("Video ended at {}s", initial_time.elapsed().as_secs_f64());
                                     let _ = event_stream.send(InputEventType::VideoEnd);
+                                    // Exit thread after recording stops to prevent resource leak
+                                    break;
                                 }
                             }
                             r = hook_signal_rx.recv() => {
