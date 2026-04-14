@@ -135,7 +135,7 @@ pub fn build_actions(
                 target_entity: None,
                 bounding_box: None,
             });
-            action_index += 1;
+            action_index = action_index.saturating_add(1);
         }
     }
 

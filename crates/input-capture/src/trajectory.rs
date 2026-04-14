@@ -101,7 +101,7 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                             event_count,
                             TrajectoryTerminator::Pause { gap_ms },
                         ));
-                        traj_index += 1;
+                        traj_index = traj_index.saturating_add(1);
                         current_path.clear();
                         total_distance = 0.0;
                         event_count = 0;
@@ -139,7 +139,7 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                         event_count,
                         TrajectoryTerminator::Click { button: *button },
                     ));
-                    traj_index += 1;
+                    traj_index = traj_index.saturating_add(1);
                 }
                 current_path.clear();
                 total_distance = 0.0;
@@ -159,7 +159,7 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                         event_count,
                         TrajectoryTerminator::KeyPress { key: *vkey },
                     ));
-                    traj_index += 1;
+                    traj_index = traj_index.saturating_add(1);
                 }
                 current_path.clear();
                 total_distance = 0.0;
@@ -178,7 +178,7 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                         event_count,
                         TrajectoryTerminator::Scroll { delta: *delta },
                     ));
-                    traj_index += 1;
+                    traj_index = traj_index.saturating_add(1);
                 }
                 current_path.clear();
                 total_distance = 0.0;
