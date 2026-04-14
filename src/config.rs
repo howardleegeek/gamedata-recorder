@@ -349,6 +349,16 @@ impl Config {
         let temp_path = config_path.with_extension("tmp");
         fs::write(&temp_path, serde_json::to_string_pretty(&self)?)
             .context("Failed to write temporary config file")?;
+
+        // Ensure data is flushed to disk before renaming to prevent data loss
+        // on system crash or power failure
+        let temp_file =
+            fs::File::open(&temp_path).context("Failed to open temporary file for sync")?;
+        temp_file
+            .sync_all()
+            .context("Failed to sync temporary file to disk")?;
+        drop(temp_file);
+
         fs::rename(&temp_path, &config_path)
             .context("Failed to rename temporary config file to final location")?;
 
