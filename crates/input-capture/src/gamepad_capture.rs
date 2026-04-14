@@ -344,12 +344,7 @@ macro_rules! generate_map_functions {
                     axis: $map_axis(axis),
                     value,
                 }),
-                EventType::ButtonRepeated(..)
-                | EventType::Connected
-                | EventType::Disconnected
-                | EventType::Dropped
-                | EventType::ForceFeedbackEffectCompleted
-                | _ => None,
+                _ => None,
             }
         }
 
