@@ -1,7 +1,7 @@
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 
-use crate::api::{check_for_response_success, ApiClient, ApiError, API_BASE_URL};
+use crate::api::{API_BASE_URL, ApiClient, ApiError, check_for_response_success};
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]
 #[allow(unused)]
@@ -69,6 +69,7 @@ pub struct AbortMultipartUploadResponse {
 
 impl ApiClient {
     const MAX_UPLOAD_ID_LENGTH: usize = 256;
+    const MAX_FILENAME_LENGTH: usize = 1024;
 
     fn validate_upload_id(upload_id: &str) -> Result<(), ApiError> {
         if upload_id.is_empty() {
@@ -79,6 +80,31 @@ impl ApiClient {
         if upload_id.len() > Self::MAX_UPLOAD_ID_LENGTH {
             return Err(ApiError::ApiKeyValidationFailure(
                 "Upload ID exceeds maximum length".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validates a filename to prevent path traversal attacks and invalid names.
+    fn validate_filename(filename: &str) -> Result<(), ApiError> {
+        if filename.is_empty() || filename.trim().is_empty() {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "Filename cannot be empty or whitespace".into(),
+            ));
+        }
+        if filename.len() > Self::MAX_FILENAME_LENGTH {
+            return Err(ApiError::ApiKeyValidationFailure(
+                format!(
+                    "Filename exceeds maximum length of {} characters",
+                    Self::MAX_FILENAME_LENGTH
+                )
+                .into(),
+            ));
+        }
+        // Prevent path traversal attacks
+        if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "Filename contains invalid characters (path traversal)".into(),
             ));
         }
         Ok(())
@@ -132,6 +158,9 @@ impl ApiClient {
                 "Total size must be greater than 0".into(),
             ));
         }
+
+        // Validate filename to prevent path traversal and invalid names
+        Self::validate_filename(args.filename)?;
 
         // Store timestamp in a variable to prevent dangling reference
         let timestamp = chrono::Local::now().to_rfc3339();
@@ -272,10 +301,11 @@ impl ApiClient {
             .send()
             .await?;
 
-        let response = check_for_response_success(response, "Upload multipart chunk request failed")
-            .await?
-            .json::<UploadMultipartChunkResponse>()
-            .await?;
+        let response =
+            check_for_response_success(response, "Upload multipart chunk request failed")
+                .await?
+                .json::<UploadMultipartChunkResponse>()
+                .await?;
 
         // Validate chunk_number matches what was requested to prevent data integrity issues
         if response.chunk_number != chunk_number {
