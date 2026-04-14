@@ -1,20 +1,19 @@
 use std::{
-    sync::{Arc, atomic::Ordering},
+    sync::{atomic::Ordering, Arc},
     time::{Duration, Instant},
 };
 
 use egui::{
-    Color32, Context, FontFamily, FontId, Image, ImageSource, Margin, RichText, Stroke, TextFormat,
-    TextWrapMode, Vec2, WidgetText, Window, containers::Frame, text::LayoutJob,
+    containers::Frame, text::LayoutJob, Color32, Context, FontFamily, FontId, Image, ImageSource,
+    Margin, RichText, Stroke, TextFormat, TextWrapMode, Vec2, WidgetText, Window,
 };
 use egui_overlay::EguiOverlay;
 use egui_render_three_d::ThreeDBackend as DefaultGfxBackend;
 use windows::Win32::{
     Foundation::HWND,
     UI::WindowsAndMessaging::{
-        FLASHW_STOP, FLASHWINFO, FlashWindowEx, GWL_EXSTYLE, GetWindowLongPtrW, SW_HIDE,
-        SW_SHOWDEFAULT, SetWindowLongPtrW, ShowWindow, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW,
+        FlashWindowEx, GetWindowLongPtrW, SetWindowLongPtrW, ShowWindow, FLASHWINFO, FLASHW_STOP,
+        GWL_EXSTYLE, SW_HIDE, SW_SHOWDEFAULT, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     },
 };
 
@@ -381,15 +380,21 @@ fn update_overlay_position_based_on_location(
             window.set_pos(OFFSET, OFFSET);
         }
         OverlayLocation::TopRight => {
-            window.set_pos(monitor_width - width - OFFSET, OFFSET);
+            window.set_pos(
+                monitor_width.saturating_sub(width).saturating_sub(OFFSET),
+                OFFSET,
+            );
         }
         OverlayLocation::BottomLeft => {
-            window.set_pos(OFFSET, monitor_height - height - OFFSET);
+            window.set_pos(
+                OFFSET,
+                monitor_height.saturating_sub(height).saturating_sub(OFFSET),
+            );
         }
         OverlayLocation::BottomRight => {
             window.set_pos(
-                monitor_width - width - OFFSET,
-                monitor_height - height - OFFSET,
+                monitor_width.saturating_sub(width).saturating_sub(OFFSET),
+                monitor_height.saturating_sub(height).saturating_sub(OFFSET),
             );
         }
     }
