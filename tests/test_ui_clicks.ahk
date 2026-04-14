@@ -98,6 +98,9 @@ if WinExist("ahk_exe OWL Control.exe") {
             MouseClick "left", coords[1], y
         }
     }
+} else {
+    MsgBox("OWL Control.exe window not found - ensure application is running")
+    ExitApp()
 }
 
 /*
