@@ -159,7 +159,7 @@ fn get_stats(input: &super::ValidationInput) -> KeyboardStats {
         apm: if input.duration_minutes >= MIN_DURATION_MINUTES {
             keyboard_events.len() as f64 / input.duration_minutes
         } else {
-            keyboard_events.len() as f64 / MIN_DURATION_MINUTES
+            keyboard_events.len() as f64 / effective_duration
         },
     }
 }
