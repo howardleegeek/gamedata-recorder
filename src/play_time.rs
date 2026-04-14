@@ -121,7 +121,11 @@ impl PlayTimeTracker {
 
     pub fn save(&self) -> Result<()> {
         let state = SerializedState::from(self);
-        std::fs::write(Self::file_path()?, serde_json::to_string_pretty(&state)?)?;
+        let file_path = Self::file_path()?;
+        // Atomic write: write to temp file then rename to prevent corruption on crash
+        let temp_path = file_path.with_extension("json.tmp");
+        std::fs::write(&temp_path, serde_json::to_string_pretty(&state)?)?;
+        std::fs::rename(&temp_path, &file_path)?;
         Ok(())
     }
 
@@ -136,7 +140,7 @@ impl PlayTimeTracker {
         let state: SerializedState =
             serde_json::from_str(&std::fs::read_to_string(Self::file_path()?)?)?;
         let mut tracker = Self {
-            total_active_duration: Duration::from_secs(state.total_active_secs),
+            total_active_duration: Duration::from_secs_f64(state.total_active_secs),
             current_session_start: None,
             last_activity_time: state.last_activity_time,
             last_break_end: state.last_break_end,
@@ -171,7 +175,7 @@ impl Drop for PlayTimeTracker {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SerializedState {
-    total_active_secs: u64,
+    total_active_secs: f64,
     last_activity_time: DateTime<Utc>,
     last_break_end: DateTime<Utc>,
 }
@@ -179,7 +183,7 @@ struct SerializedState {
 impl From<&PlayTimeTracker> for SerializedState {
     fn from(t: &PlayTimeTracker) -> Self {
         Self {
-            total_active_secs: t.total_active_duration.as_secs(),
+            total_active_secs: t.total_active_duration.as_secs_f64(),
             last_activity_time: t.last_activity_time,
             last_break_end: t.last_break_end,
         }
