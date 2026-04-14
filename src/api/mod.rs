@@ -158,7 +158,16 @@ async fn check_for_response_success(
         tracing::error!("API error response (HTTP {status}): {text}");
 
         // if 502 this will return None, then APIError must fallback to using just the text
-        let value = serde_json::from_str::<StructuredError>(&text).ok();
+        let value = match serde_json::from_str::<StructuredError>(&text) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to parse API error response as structured JSON: {}",
+                    e
+                );
+                None
+            }
+        };
 
         return Err(match value {
             Some(StructuredError::ServerInvalidation { detail }) => {
