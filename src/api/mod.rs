@@ -97,7 +97,7 @@ impl ApiClient {
         let client = &self.client;
 
         // Validate input
-        if api_key.is_empty() || api_key.trim().is_empty() {
+        if api_key.trim().is_empty() {
             return Err(ApiError::ApiKeyValidationFailure(
                 "API key cannot be empty".into(),
             ));
