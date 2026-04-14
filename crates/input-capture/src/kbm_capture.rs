@@ -395,7 +395,12 @@ impl KbmCapture {
                             );
 
                             let delta = last_absolute
-                                .map(|(last_x, last_y)| (screen_x - last_x, screen_y - last_y))
+                                .map(|(last_x, last_y)| {
+                                    (
+                                        screen_x.saturating_sub(last_x),
+                                        screen_y.saturating_sub(last_y),
+                                    )
+                                })
                                 .unwrap_or_default();
 
                             // Update stored absolute position
