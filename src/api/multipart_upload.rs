@@ -1,7 +1,7 @@
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 
-use crate::api::{API_BASE_URL, ApiClient, ApiError, check_for_response_success};
+use crate::api::{check_for_response_success, ApiClient, ApiError, API_BASE_URL};
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]
 #[allow(unused)]
@@ -88,7 +88,7 @@ impl ApiClient {
 
     /// Validates a filename to prevent path traversal attacks and invalid names.
     fn validate_filename(filename: &str) -> Result<(), ApiError> {
-        if filename.is_empty() || filename.trim().is_empty() {
+        if filename.trim().is_empty() {
             return Err(ApiError::ApiKeyValidationFailure(
                 "Filename cannot be empty or whitespace".into(),
             ));
