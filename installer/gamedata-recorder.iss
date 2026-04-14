@@ -73,7 +73,8 @@ begin
   // Query tasklist via cmd to handle PATH/WOW64 issues - returns 0 if found, 1 if not found
   // If tasklist itself fails to execute, assume process is not running to be safe
   // Use {sys} constant for cmd.exe to ensure it's found regardless of PATH
-  ExecSuccess := Exec(ExpandConstant('{sys}\cmd.exe'), ExpandConstant('/C "{sys}\tasklist.exe" /FI "IMAGENAME eq {#MyAppExeName}"'), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Also filter for "Running" status to avoid false positives from suspended/crashed processes
+  ExecSuccess := Exec(ExpandConstant('{sys}\cmd.exe'), ExpandConstant('/C "{sys}\tasklist.exe" /FI "IMAGENAME eq {#MyAppExeName}" /FI "STATUS eq Running" | findstr "Running"'), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if not ExecSuccess then
     Result := False
   else
