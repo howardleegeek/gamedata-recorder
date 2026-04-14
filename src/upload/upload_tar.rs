@@ -190,7 +190,9 @@ pub async fn run(
             // Abort server upload
             let api_client = self.api_client.clone();
             let api_token = self.api_token.clone();
-            tokio::spawn(async move {
+            // Spawn cleanup task; ignoring JoinHandle is intentional (fire-and-forget)
+            // but we explicitly acknowledge this to suppress warnings and document intent
+            let _cleanup_task = tokio::spawn(async move {
                 if let Err(e) = paused.abort_and_cleanup(&api_client, &api_token).await {
                     tracing::error!(
                         "Failed to abort and cleanup upload in drop handler: {:?}",
