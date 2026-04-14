@@ -5,8 +5,12 @@ from fastapi.testclient import TestClient
 
 def run_tests():
     """Run all API tests."""
-    client = TestClient(app)
+    with TestClient(app) as client:
+        _run_tests_with_client(client)
 
+
+def _run_tests_with_client(client):
+    """Run all API tests with the provided client."""
     # 1. Health
     r = client.get("/health")
     assert r.status_code == 200
