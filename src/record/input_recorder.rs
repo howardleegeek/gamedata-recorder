@@ -104,7 +104,10 @@ impl InputEventWriter {
                 inputs: input_capture.active_input(),
             },
         ))
-        .await
+        .await?;
+
+        // Sync file to disk to ensure end marker durability (crash safety)
+        self.file.sync_all().await.wrap_err("failed to sync input events file to disk")
     }
 
     async fn write_entry(&mut self, event: InputEvent) -> Result<()> {
