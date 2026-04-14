@@ -397,8 +397,7 @@ impl KbmCapture {
                         }
                     }
 
-                    let us_button_flags =
-                        unsafe { u32::from(mouse.Anonymous.Anonymous.usButtonFlags) };
+                    let us_button_flags = u32::from(mouse.Anonymous.Anonymous.usButtonFlags);
 
                     if us_button_flags & RI_MOUSE_LEFT_BUTTON_DOWN != 0 {
                         events.push(Event::MousePress {
@@ -472,7 +471,7 @@ impl KbmCapture {
                     }
 
                     if us_button_flags & RI_MOUSE_WHEEL != 0 {
-                        let scroll = unsafe { mouse.Anonymous.Anonymous.usButtonData as i16 };
+                        let scroll = mouse.Anonymous.Anonymous.usButtonData as i16;
                         events.push(Event::MouseScroll {
                             scroll_amount: scroll,
                         });
@@ -481,7 +480,7 @@ impl KbmCapture {
                     events
                 }
                 Input::RIM_TYPEKEYBOARD => {
-                    let keyboard = unsafe { rawinput.data.keyboard };
+                    let keyboard = rawinput.data.keyboard;
                     let key = keyboard.VKey;
                     let flags = u32::from(keyboard.Flags);
                     let press_state = if flags & RI_KEY_BREAK != 0 {
