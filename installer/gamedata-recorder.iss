@@ -70,18 +70,21 @@ begin
   // Query tasklist via cmd to handle PATH/WOW64 issues - returns 0 if found, 1 if not found
   // If tasklist itself fails to execute, assume process is not running to be safe
   // Use {sys} constant for cmd.exe to ensure it's found regardless of PATH
-  ExecSuccess := Exec(ExpandConstant('{sys}\cmd.exe'), '/C tasklist /FI "IMAGENAME eq {#MyAppExeName}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  ExecSuccess := Exec(ExpandConstant('{sys}\cmd.exe'), ExpandConstant('/C "{sys}\tasklist.exe" /FI "IMAGENAME eq {#MyAppExeName}"'), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if not ExecSuccess then
     Result := False
   else
     Result := (ResultCode = 0);
 end;
 
-// Show a simple "Install complete! GameData Recorder will run in your system tray." message
-procedure CurStepChanged(CurStep: TSetupStep);
+// Prevent install/upgrade if app is already running to avoid file-in-use errors
+function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  if CurStep = ssPostInstall then
+  if IsAppRunning() then
   begin
-    // Nothing extra needed - the [Run] section handles auto-launch
+    Result := 'GameData Recorder is running. Please close it before installing.';
+  end else
+  begin
+    Result := '';
   end;
 end;
