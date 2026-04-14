@@ -49,8 +49,10 @@ impl UnsupportedGames {
 
     /// Do not use this unless you're sure you don't need a more up-to-date version.
     pub fn load_from_embedded() -> Self {
-        Self::load_from_str(include_str!("unsupported_games.json"))
-            .expect("Failed to load unsupported games from embedded data")
+        Self::load_from_str(include_str!("unsupported_games.json")).unwrap_or_else(|e| {
+            tracing::error!("Failed to parse embedded unsupported games: {}", e);
+            Self { games: vec![] }
+        })
     }
 
     pub fn get(&self, game_exe_without_ext: &str) -> Option<&UnsupportedGame> {
