@@ -178,6 +178,11 @@ fn validate_files(
         .collect::<Result<Vec<_>, _>>()
         .with_context(|| format!("Error parsing CSV file at {csv_path:?}"))?;
 
+    // Validate that we have at least some events to process
+    if events.is_empty() {
+        eyre::bail!("No input events found in recording");
+    }
+
     let start_time = events
         .iter()
         .find(|event| matches!(event.event, InputEventType::Start { .. }))
