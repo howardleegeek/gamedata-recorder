@@ -198,10 +198,6 @@ pub fn initialize_thread(
                     continue;
                 };
 
-                // Handle poisoned locks gracefully: if another thread panicked while
-                // holding the lock, log the error and break rather than crashing.
-                let gamepad_name = sanitize_gamepad_name(gamepad.name(), id.into());
-
                 // Only update metadata and captured set on first encounter to reduce
                 // lock contention - gamepad info rarely changes after connection
                 let needs_registration = {
@@ -216,10 +212,11 @@ pub fn initialize_thread(
                     };
                     let is_new = !gamepads_guard.contains_key(&gamepad_id);
                     if is_new {
+                        let gamepad_name = sanitize_gamepad_name(gamepad.name(), id.into());
                         gamepads_guard.insert(
                             gamepad_id,
                             GamepadMetadata {
-                                name: gamepad_name.clone(),
+                                name: gamepad_name,
                                 vendor_id: gamepad.vendor_id(),
                                 product_id: gamepad.product_id(),
                             },
@@ -230,6 +227,7 @@ pub fn initialize_thread(
                 };
 
                 if needs_registration {
+                    let gamepad_name = sanitize_gamepad_name(gamepad.name(), id.into());
                     let mut captured_guard = match already_captured_by_xinput.write() {
                         Ok(guard) => guard,
                         Err(e) => {
