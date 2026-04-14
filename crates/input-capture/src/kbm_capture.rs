@@ -110,9 +110,7 @@ impl KbmCapture {
                 hwndTarget: hwnd,
             });
 
-            let device_count = size_of::<RAWINPUTDEVICE>()
-                .try_into()
-                .wrap_err("size of RAWINPUTDEVICE should fit in u32")?;
+            let device_count = raw_input_devices.len() as u32;
             RegisterRawInputDevices(&raw_input_devices, device_count)
                 .wrap_err("failed to register raw input devices")?;
 
