@@ -52,11 +52,17 @@ pub struct KbmCapture {
 impl Drop for KbmCapture {
     fn drop(&mut self) {
         unsafe {
-            if let Err(e) = DestroyWindow(self.hwnd) {
-                tracing::error!("Failed to destroy window during cleanup: {:?}", e);
-            }
-            if let Err(e) = UnregisterClassA(self.class_name, Some(self.h_instance)) {
-                tracing::error!("Failed to unregister window class during cleanup: {:?}", e);
+            // Destroy window first; only unregister class if window was successfully destroyed.
+            // UnregisterClassA fails with ERROR_CLASS_HAS_WINDOWS if any windows still exist.
+            match DestroyWindow(self.hwnd) {
+                Ok(_) => {
+                    if let Err(e) = UnregisterClassA(self.class_name, Some(self.h_instance)) {
+                        tracing::error!("Failed to unregister window class during cleanup: {:?}", e);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to destroy window during cleanup: {:?}", e);
+                }
             }
         }
     }
