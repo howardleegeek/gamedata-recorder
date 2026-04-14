@@ -380,7 +380,14 @@ impl Config {
         };
 
         tracing::debug!("Reading config file");
-        let contents = fs::read_to_string(&config_path).context("Failed to read config file")?;
+        let contents = match fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!("Config file disappeared during load, using defaults");
+                return Ok(Self::default());
+            }
+            Err(e) => return Err(e).context("Failed to read config file")?,
+        };
 
         // Treat whitespace-only files as missing configs (return defaults)
         // This handles edge case where file exists but has no actual content
