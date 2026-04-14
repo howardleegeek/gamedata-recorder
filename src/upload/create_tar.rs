@@ -56,7 +56,7 @@ pub async fn create_tar_file(
                 match std::fs::metadata(path) {
                     Ok(meta) => {
                         let size = meta.len();
-                        total_source_size += size;
+                        total_source_size = total_source_size.saturating_add(size);
                         tracing::info!(
                             "Tar source file: {} = {} bytes ({:.2} MB)",
                             label,
