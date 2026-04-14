@@ -282,15 +282,15 @@ fn recorder_thread_impl(
             RecorderMessage::StartRecording { request, result_tx } => {
                 let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
-                result_tx
-                    .send(state.start_recording(request, shutdown_rx))
-                    .ok();
+                if let Err(e) = result_tx.send(state.start_recording(request, shutdown_rx)) {
+                    tracing::error!("Failed to send start_recording result: {e:?}");
+                }
                 last_shutdown_tx = Some(shutdown_tx);
             }
             RecorderMessage::StopRecording { result_tx } => {
-                result_tx
-                    .send(state.stop_recording(last_shutdown_tx.take()))
-                    .ok();
+                if let Err(e) = result_tx.send(state.stop_recording(last_shutdown_tx.take())) {
+                    tracing::error!("Failed to send stop_recording result: {e:?}");
+                }
             }
             RecorderMessage::Poll => {
                 if let Err(e) = state.poll() {
@@ -298,7 +298,9 @@ fn recorder_thread_impl(
                 }
             }
             RecorderMessage::CheckHookTimeout { result_tx } => {
-                result_tx.send(state.check_hook_timeout()).ok();
+                if let Err(e) = result_tx.send(state.check_hook_timeout()) {
+                    tracing::error!("Failed to send check_hook_timeout result: {e:?}");
+                }
             }
         }
     }
@@ -622,7 +624,9 @@ impl RecorderState {
         // Send shutdown signal BEFORE checking hook status, to ensure the signal thread
         // exits cleanly even when the recording was never hooked (avoids thread leak).
         if let Some(shutdown_tx) = last_shutdown_tx {
-            shutdown_tx.send(()).ok();
+            if let Err(e) = shutdown_tx.send(()) {
+                tracing::warn!("Failed to send shutdown signal (receiver dropped): {e:?}");
+            }
         }
 
         // Join the signal monitoring thread to ensure proper resource cleanup
