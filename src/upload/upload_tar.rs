@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use backoff::{future::retry_notify, Error as BackoffError, ExponentialBackoff};
+use backoff::{Error as BackoffError, ExponentialBackoff, future::retry_notify};
 
 use futures::TryStreamExt as _;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
@@ -126,11 +126,11 @@ pub async fn run(
     };
 
     let file_size = std::fs::metadata(&tar_path).map(|m| m.len())?;
-    unreliable_tx
-        .send(UiUpdateUnreliable::UpdateUploadProgress(Some(
-            Default::default(),
-        )))
-        .ok();
+    if let Err(e) = unreliable_tx.send(UiUpdateUnreliable::UpdateUploadProgress(Some(
+        Default::default(),
+    ))) {
+        tracing::warn!("Failed to send initial upload progress reset: {}", e);
+    }
 
     let start_chunk = paused.upload_progress().next_chunk_number();
 
