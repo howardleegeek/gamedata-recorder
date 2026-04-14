@@ -31,6 +31,16 @@ impl From<GamepadStats> for GamepadOutputStats {
 
 pub(super) fn validate(input: &super::ValidationInput) -> (GamepadOutputStats, Vec<String>) {
     let mut invalid_reasons = vec![];
+
+    // Validate duration is non-negative to prevent invalid APM calculations
+    if input.duration_minutes < 0.0 {
+        invalid_reasons.push(format!(
+            "Gamepad validation failed: negative duration {}",
+            input.duration_minutes
+        ));
+        return (GamepadOutputStats::from(GamepadStats::default()), invalid_reasons);
+    }
+
     let stats = get_stats(input);
 
     // Only invalidate if BOTH button and axis activity are too low
@@ -75,6 +85,7 @@ pub(super) fn validate(input: &super::ValidationInput) -> (GamepadOutputStats, V
     (GamepadOutputStats::from(stats), invalid_reasons)
 }
 
+#[derive(Default)]
 struct GamepadStats {
     pub button_apm: f64,
     pub unique_buttons: u64,
