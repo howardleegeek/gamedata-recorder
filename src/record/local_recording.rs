@@ -138,7 +138,7 @@ impl UploadProgressState {
 
     /// Get the total number of bytes uploaded so far
     pub fn uploaded_bytes(&self) -> u64 {
-        self.chunk_etags.len() as u64 * self.chunk_size_bytes
+        (self.chunk_etags.len() as u64).saturating_mul(self.chunk_size_bytes)
     }
 
     /// Cleans up the tar file associated with this upload progress.
