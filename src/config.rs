@@ -5,6 +5,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::os::unix::fs::PermissionsExt;
 use std::{collections::HashMap, fs, path::PathBuf};
 
+/// Maximum allowed length for API key to prevent DoS from malicious config files
+const MAX_API_KEY_LENGTH: usize = 2048;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 // camel case renames are legacy from old existing configs, we want it to be backwards-compatible with previous owl releases that used electron
 #[serde(rename_all = "camelCase")]
@@ -185,6 +188,25 @@ where
     Ok(path)
 }
 
+/// Validates API key length to prevent DoS from malicious config files with
+/// extremely large strings that could cause memory exhaustion.
+fn validate_api_key_length<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    let key = String::deserialize(deserializer)?;
+
+    if key.len() > MAX_API_KEY_LENGTH {
+        return Err(Error::custom(format!(
+            "API key exceeds maximum length of {} characters",
+            MAX_API_KEY_LENGTH
+        )));
+    }
+
+    Ok(key)
+}
+
 // For some reason, previous electron configs saved hasConsented as a string instead of a boolean? So now we need a custom deserializer
 // to take that into account for backwards compatibility
 fn deserialize_string_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -206,7 +228,7 @@ where
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Credentials {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "validate_api_key_length")]
     pub api_key: String,
     #[serde(default, deserialize_with = "deserialize_string_bool")]
     pub has_consented: bool,
