@@ -271,12 +271,20 @@ impl ApiClient {
             .send()
             .await?;
 
-        Ok(
-            check_for_response_success(response, "Complete upload request failed")
-                .await?
-                .json()
-                .await?,
-        )
+        let response = check_for_response_success(response, "Complete upload request failed")
+            .await?
+            .json::<CompleteMultipartUploadResponse>()
+            .await?;
+
+        if !response.success {
+            return Err(ApiError::ApiFailure {
+                context: "Complete upload request failed".into(),
+                error: response.message.clone(),
+                status: None,
+            });
+        }
+
+        Ok(response)
     }
 
     pub async fn abort_multipart_upload(
