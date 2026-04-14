@@ -30,10 +30,15 @@ pub(super) fn validate(input: &super::ValidationInput) -> (MouseOutputStats, Vec
     let mut invalid_reasons = vec![];
     let stats = get_stats(input);
 
-    if stats.overall_max < 0.05 {
+    // Validate stats are finite before comparison to prevent NaN/Infinity from bypassing checks
+    if !stats.overall_max.is_finite() {
+        invalid_reasons.push(format!(
+            "Mouse max movement is invalid: {}",
+            stats.overall_max
+        ));
+    } else if stats.overall_max < 0.05 {
         invalid_reasons.push(format!("Mouse movement too small: {}", stats.overall_max));
-    }
-    if stats.overall_max > 10_000.0 {
+    } else if stats.overall_max > 10_000.0 {
         invalid_reasons.push(format!("Mouse movement too large: {}", stats.overall_max));
     }
 
