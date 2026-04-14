@@ -137,7 +137,8 @@ impl KbmCapture {
                     break; // WM_QUIT received, exit cleanly
                 }
                 if result.0 == -1 {
-                    bail!("GetMessageA failed");
+                    let err = windows::Win32::Foundation::GetLastError();
+                    bail!("GetMessageA failed: {err:?}");
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageA(&msg);
