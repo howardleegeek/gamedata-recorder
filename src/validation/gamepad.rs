@@ -31,17 +31,54 @@ impl From<GamepadStats> for GamepadOutputStats {
 
 pub(super) fn validate(input: &super::ValidationInput) -> (GamepadOutputStats, Vec<String>) {
     let mut invalid_reasons = vec![];
+
+    // Validate duration is positive and finite to prevent invalid APM calculations
+    if input.duration_minutes <= 0.0 || !input.duration_minutes.is_finite() {
+        invalid_reasons.push(format!(
+            "Gamepad validation failed: invalid duration {}",
+            input.duration_minutes
+        ));
+        return (
+            GamepadOutputStats::from(GamepadStats::default()),
+            invalid_reasons,
+        );
+    }
+
     let stats = get_stats(input);
 
     // Only invalidate if BOTH button and axis activity are too low
     // This allows axis-only runs and button-only runs to be valid
-    if stats.button_apm < 2.0 && stats.axis_movement < 0.01 {
+    // Validate stats are finite before comparison to prevent NaN from bypassing checks
+    let button_apm_invalid = !stats.button_apm.is_finite();
+    let axis_movement_invalid = !stats.axis_movement.is_finite();
+    let max_axis_invalid = !stats.max_axis_movement.is_finite();
+
+    if button_apm_invalid || axis_movement_invalid {
+        if button_apm_invalid {
+            invalid_reasons.push(format!(
+                "Gamepad button APM is invalid: {}",
+                stats.button_apm
+            ));
+        }
+        if axis_movement_invalid {
+            invalid_reasons.push(format!(
+                "Gamepad axis movement is invalid: {}",
+                stats.axis_movement
+            ));
+        }
+    } else if stats.button_apm < 2.0 && stats.axis_movement < 0.01 {
         invalid_reasons.push(format!(
             "Gamepad activity too low: button APM {} and axis movement {}",
             stats.button_apm, stats.axis_movement
         ));
     }
-    if stats.max_axis_movement > 2.0 {
+
+    if max_axis_invalid {
+        invalid_reasons.push(format!(
+            "Gamepad max axis movement is invalid: {}",
+            stats.max_axis_movement
+        ));
+    } else if stats.max_axis_movement > 2.0 {
         invalid_reasons.push(format!(
             "Gamepad axis movement too high: {}",
             stats.max_axis_movement
@@ -51,6 +88,7 @@ pub(super) fn validate(input: &super::ValidationInput) -> (GamepadOutputStats, V
     (GamepadOutputStats::from(stats), invalid_reasons)
 }
 
+#[derive(Default)]
 struct GamepadStats {
     pub button_apm: f64,
     pub unique_buttons: u64,

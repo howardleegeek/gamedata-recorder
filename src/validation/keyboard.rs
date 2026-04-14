@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{output_types::InputEventType, system::keycode::name_to_virtual_keycode};
 use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct KeyboardOutputStats {
     wasd_apm: f64,
     unique_keys: u64,
@@ -23,15 +23,36 @@ impl From<KeyboardStats> for KeyboardOutputStats {
 
 pub(super) fn validate(input: &super::ValidationInput) -> (KeyboardOutputStats, Vec<String>) {
     let mut invalid_reasons = vec![];
+
+    // Validate duration is positive and finite to prevent invalid APM calculations
+    if input.duration_minutes <= 0.0 || !input.duration_minutes.is_finite() {
+        invalid_reasons.push(format!(
+            "Keyboard validation failed: invalid duration {}",
+            input.duration_minutes
+        ));
+        return (KeyboardOutputStats::default(), invalid_reasons);
+    }
+
     let stats = get_stats(input);
 
-    if stats.wasd_apm < 5.0 {
+    // Validate stats are finite before comparison to prevent NaN from bypassing checks
+    if !stats.wasd_apm.is_finite() {
+        invalid_reasons.push(format!(
+            "WASD actions per minute is invalid: {}",
+            stats.wasd_apm
+        ));
+    } else if stats.wasd_apm < 5.0 {
         invalid_reasons.push(format!(
             "WASD actions per minute too low: {}",
             stats.wasd_apm
         ));
     }
-    if stats.apm < 5.0 {
+    if !stats.apm.is_finite() {
+        invalid_reasons.push(format!(
+            "Keyboard actions per minute is invalid: {}",
+            stats.apm
+        ));
+    } else if stats.apm < 5.0 {
         invalid_reasons.push(format!(
             "Keyboard actions per minute too low: {}",
             stats.apm
@@ -48,6 +69,10 @@ struct KeyboardStats {
     pub total_keyboard_events: u64,
     pub apm: f64,
 }
+// Minimum duration threshold to prevent unrealistic APM calculations
+// on extremely short recordings that could cause misleading validation results
+const MIN_DURATION_MINUTES: f64 = 0.1; // 6 seconds minimum
+
 fn get_stats(input: &super::ValidationInput) -> KeyboardStats {
     // Get WASD keycodes
     let wasd_codes: Vec<u16> = ["W", "A", "S", "D"]
@@ -79,10 +104,12 @@ fn get_stats(input: &super::ValidationInput) -> KeyboardStats {
             })
             .count();
 
-        wasd_apm = if input.duration_minutes > 0.0 {
+        let effective_duration = input.duration_minutes.max(MIN_DURATION_MINUTES);
+
+        wasd_apm = if input.duration_minutes >= MIN_DURATION_MINUTES {
             wasd_presses as f64 / input.duration_minutes
         } else {
-            0.0
+            wasd_presses as f64 / MIN_DURATION_MINUTES
         };
 
         // Get unique keys from pressed events
@@ -132,15 +159,17 @@ fn get_stats(input: &super::ValidationInput) -> KeyboardStats {
         }
     }
 
+    let effective_duration = input.duration_minutes.max(MIN_DURATION_MINUTES);
+
     KeyboardStats {
         wasd_apm,
         unique_keys,
         button_diversity: diversity,
         total_keyboard_events: keyboard_events.len() as u64,
-        apm: if input.duration_minutes > 0.0 {
+        apm: if input.duration_minutes >= MIN_DURATION_MINUTES {
             keyboard_events.len() as f64 / input.duration_minutes
         } else {
-            0.0
+            keyboard_events.len() as f64 / effective_duration
         },
     }
 }

@@ -199,6 +199,22 @@ pub fn initialize_thread(
                 captured_guard.insert(gamepad_name);
                 drop(captured_guard);
 
+                // Handle disconnection to prevent memory leaks during long sessions
+                if matches!(event, gilrs_xinput::EventType::Disconnected) {
+                    let gamepad_id = GamepadId::XInput(id.into());
+                    if let Ok(mut guard) = gamepads.write() {
+                        guard.remove(&gamepad_id);
+                    }
+                    if let Ok(mut guard) = already_captured_by_xinput.write() {
+                        guard.remove(&gamepad_name);
+                    }
+                    continue;
+                }
+
+                let Some(event) = map_event_xinput(GamepadId::XInput(id.into()), event) else {
+                    continue;
+                };
+
                 let mut active_guard = match active_gamepads.lock() {
                     Ok(guard) => guard,
                     Err(e) => {
@@ -234,6 +250,7 @@ pub fn initialize_thread(
             // Examine new events
             while let Some(gilrs_wgi::Event { id, event, .. }) = gilrs.next_event_blocking(None) {
                 let gamepad = gilrs.gamepad(id);
+                let gamepad_name = gamepad.name().to_string();
 
                 // Handle poisoned locks gracefully: if another thread panicked while
                 // holding the lock, log the error and break rather than crashing.
@@ -247,7 +264,7 @@ pub fn initialize_thread(
                 gamepads_guard.insert(
                     GamepadId::WGI(id.into()),
                     GamepadMetadata {
-                        name: gamepad.name().to_string(),
+                        name: gamepad_name.clone(),
                         vendor_id: gamepad.vendor_id(),
                         product_id: gamepad.product_id(),
                     },
@@ -261,11 +278,19 @@ pub fn initialize_thread(
                         break;
                     }
                 };
-                // No allocation: Arc<str> allows lookup by &str directly
-                let is_captured = captured_guard.contains(gamepad.name());
+                let is_captured = captured_guard.contains(&gamepad_name);
                 drop(captured_guard);
 
                 if is_captured {
+                    continue;
+                }
+
+                // Handle disconnection to prevent memory leaks during long sessions
+                if matches!(event, gilrs_wgi::EventType::Disconnected) {
+                    let gamepad_id = GamepadId::WGI(id.into());
+                    if let Ok(mut guard) = gamepads.write() {
+                        guard.remove(&gamepad_id);
+                    }
                     continue;
                 }
 

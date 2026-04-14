@@ -11,7 +11,7 @@
 
 use std::io::Write;
 
-use input_capture::{Event, PressState, timestamp::HighPrecisionTimer, vkey_names::vkey_to_name};
+use input_capture::{timestamp::HighPrecisionTimer, vkey_names::vkey_to_name, Event, PressState};
 
 #[derive(Debug)]
 struct Args {
@@ -252,14 +252,15 @@ async fn run_logger<W: OutputWriter>(
 
         // Flush periodically to ensure data is written
         // Flush on all input events (keyboard, mouse buttons, scroll) for crash durability
-        // CRITICAL: Flush on both press AND release to prevent state inconsistency
-        // if a crash occurs between press and release (e.g., press recorded, release lost)
         let should_flush = matches!(
             event,
-            Event::KeyPress { .. }
-                | Event::MousePress { .. }
-                | Event::MouseScroll { .. }
-                | Event::GamepadButtonPress { .. }
+            Event::KeyPress {
+                press_state: PressState::Pressed,
+                ..
+            } | Event::MousePress {
+                press_state: PressState::Pressed,
+                ..
+            } | Event::MouseScroll { .. }
         );
         if should_flush {
             let _ = out.flush_output();
