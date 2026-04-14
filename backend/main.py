@@ -9,15 +9,13 @@ import uuid
 import time
 import hmac
 import hashlib
-import json
 import re
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional, List
 from contextlib import asynccontextmanager
 
 import boto3
-from fastapi import FastAPI, HTTPException, Header, Depends, Request, status
+from fastapi import FastAPI, HTTPException, Header, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
