@@ -70,8 +70,9 @@ impl PlayTimeTracker {
         if self.last_save_time.elapsed() >= constants::PLAY_TIME_SAVE_INTERVAL {
             if let Err(e) = self.save() {
                 tracing::warn!("Failed to save play time state: {e}");
+            } else {
+                self.last_save_time = Instant::now();
             }
-            self.last_save_time = Instant::now();
         }
     }
 
