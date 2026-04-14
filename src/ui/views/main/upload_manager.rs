@@ -880,7 +880,7 @@ fn recordings_view(
 
                     ui.add_enabled_ui(current_page < total_pages, |ui| {
                         if ui.button("Next").clicked() {
-                            let new_offset = recordings.offset + recordings.limit;
+                            let new_offset = recordings.offset.saturating_add(recordings.limit);
                             app_state
                                 .async_request_tx
                                 .blocking_send(AsyncRequest::LoadUploadList {
