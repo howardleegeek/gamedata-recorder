@@ -44,7 +44,7 @@ Name: "startup"; Description: "Start automatically when Windows starts"; GroupDe
 [Files]
 Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion uninsrestartdelete
 ; OBS DLLs required by libobs
-Source: "..\target\release\*.dll"; DestDir: "{app}"; Flags: ignoreversion uninsrestartdelete
+Source: "..\target\release\*.dll"; DestDir: "{app}"; Flags: ignoreversion uninsrestartdelete skipifsourcedoesntexist
 ; Config is created automatically by the app with defaults if it doesn't exist
 
 [Icons]
