@@ -142,8 +142,14 @@ impl FpsLogger {
         }
 
         let path = session_dir.join(constants::filename::recording::FPS_LOG);
+        let temp_path = path.with_extension("tmp");
         let json = serde_json::to_string_pretty(&self.entries)?;
-        tokio::fs::write(&path, json).await?;
+
+        // Atomic write: write to temp, sync, then rename for crash durability
+        tokio::fs::write(&temp_path, json).await?;
+        tokio::fs::File::open(&temp_path).await?.sync_all().await?;
+        tokio::fs::rename(&temp_path, &path).await?;
+
         tracing::info!(
             "FPS log saved: {} entries to {:?}",
             self.entries.len(),
