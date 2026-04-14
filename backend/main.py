@@ -60,7 +60,7 @@ API_SECRET = os.getenv("API_SECRET")
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     DB_USER = os.getenv("DB_USER", "gamedata")
-    DB_PASSWORD = os.getenv("DB_PASSWORD", "gamedata")
+    DB_PASSWORD = os.getenv("DB_PASSWORD")
     DB_HOST = os.getenv("DB_HOST", "localhost")
     DB_PORT = os.getenv("DB_PORT", "5432")
     DB_NAME = os.getenv("DB_NAME", "gamedata")
@@ -137,6 +137,10 @@ def validate_startup_config():
             errors.append("API_SECRET environment variable is required in production")
     elif len(API_SECRET) < 32:
         errors.append("API_SECRET must be at least 32 characters long")
+
+    # Check database password
+    if not DB_PASSWORD:
+        errors.append("DB_PASSWORD environment variable is required")
 
     # Check CORS in production
     if ENVIRONMENT == "production":
