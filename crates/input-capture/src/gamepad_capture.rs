@@ -136,6 +136,16 @@ impl GamepadThreads {
     }
 }
 
+/// Sanitize gamepad name to ensure it's never empty.
+/// Empty names can cause deduplication issues and aren't useful for debugging.
+fn sanitize_gamepad_name(name: &str, id: usize) -> String {
+    if name.trim().is_empty() {
+        format!("Unknown Gamepad {}", id)
+    } else {
+        name.to_string()
+    }
+}
+
 pub fn initialize_thread(
     input_tx: mpsc::Sender<Event>,
     active_gamepads: Arc<Mutex<ActiveGamepads>>,
@@ -184,56 +194,79 @@ pub fn initialize_thread(
                     continue;
                 };
                 let gamepad = gilrs.gamepad(id);
-                let gamepad_name = gamepad.name().to_string();
+                let gamepad_id = GamepadId::XInput(id.into());
+                let gamepad_name = sanitize_gamepad_name(gamepad.name(), id.into());
 
-                // Handle poisoned locks gracefully: if another thread panicked while
-                // holding the lock, log the error and break rather than crashing.
-                let mut gamepads_guard = match gamepads.write() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        tracing::error!("Gamepads RwLock poisoned (xinput), stopping capture: {e}");
-                        break;
-                    }
-                };
-                gamepads_guard.insert(
-                    GamepadId::XInput(id.into()),
-                    GamepadMetadata {
-                        name: gamepad_name.clone(),
-                        vendor_id: gamepad.vendor_id(),
-                        product_id: gamepad.product_id(),
-                    },
-                );
-                drop(gamepads_guard);
+                // Handle disconnection events to clean up stale state
+                if matches!(
+                    event,
+                    gilrs_xinput::EventType::Disconnected | gilrs_xinput::EventType::Dropped
+                ) {
+                    let mut active_guard = match active_gamepads.lock() {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            tracing::error!(
+                                "Active gamepads lock poisoned (xinput), stopping capture: {e}"
+                            );
+                            break;
+                        }
+                    };
+                    active_guard.devices.remove(&gamepad_id);
+                    drop(active_guard);
 
-                let Some(event) = map_event_xinput(GamepadId::XInput(id.into()), event) else {
-                    continue;
-                };
-
-                let mut captured_guard = match already_captured_by_xinput.write() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        tracing::error!("Captured lock poisoned (xinput), stopping capture: {e}");
-                        break;
-                    }
-                };
-                captured_guard.insert(gamepad_name);
-                drop(captured_guard);
-
-                // Handle disconnection to prevent memory leaks during long sessions
-                if matches!(event, gilrs_xinput::EventType::Disconnected) {
-                    let gamepad_id = GamepadId::XInput(id.into());
-                    if let Ok(mut guard) = gamepads.write() {
-                        guard.remove(&gamepad_id);
-                    }
-                    if let Ok(mut guard) = already_captured_by_xinput.write() {
-                        guard.remove(&gamepad_name);
+                    // Also clean up stale metadata to prevent memory growth
+                    if let Ok(mut gamepads_guard) = gamepads.write() {
+                        gamepads_guard.remove(&gamepad_id);
                     }
                     continue;
                 }
 
-                let Some(event) = map_event_xinput(GamepadId::XInput(id.into()), event) else {
+                // Map the event first to ensure we only mark gamepads as captured
+                // if they produce useful events (not Connected/Disconnected/Dropped etc.)
+                let Some(event) = map_event_xinput(gamepad_id, event) else {
                     continue;
                 };
+
+                // Only update metadata and captured set on first encounter to reduce
+                // lock contention - gamepad info rarely changes after connection
+                let needs_registration = {
+                    let mut gamepads_guard = match gamepads.write() {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            tracing::error!(
+                                "Gamepads RwLock poisoned (xinput), stopping capture: {e}"
+                            );
+                            break;
+                        }
+                    };
+                    let is_new = !gamepads_guard.contains_key(&gamepad_id);
+                    if is_new {
+                        gamepads_guard.insert(
+                            gamepad_id,
+                            GamepadMetadata {
+                                name: gamepad_name,
+                                vendor_id: gamepad.vendor_id(),
+                                product_id: gamepad.product_id(),
+                            },
+                        );
+                    }
+                    drop(gamepads_guard);
+                    is_new
+                };
+
+                if needs_registration {
+                    let mut captured_guard = match already_captured_by_xinput.write() {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            tracing::error!(
+                                "Captured lock poisoned (xinput), stopping capture: {e}"
+                            );
+                            break;
+                        }
+                    };
+                    captured_guard.insert(gamepad_name);
+                    drop(captured_guard);
+                }
 
                 let mut active_guard = match active_gamepads.lock() {
                     Ok(guard) => guard,
@@ -280,51 +313,80 @@ pub fn initialize_thread(
                     continue;
                 };
                 let gamepad = gilrs.gamepad(id);
-                let gamepad_name = gamepad.name().to_string();
+                let gamepad_id = GamepadId::WGI(id.into());
 
-                // Handle poisoned locks gracefully: if another thread panicked while
-                // holding the lock, log the error and break rather than crashing.
-                let mut gamepads_guard = match gamepads.write() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        tracing::error!("Gamepads RwLock poisoned (wgi), stopping capture: {e}");
-                        break;
-                    }
-                };
-                gamepads_guard.insert(
-                    GamepadId::WGI(id.into()),
-                    GamepadMetadata {
-                        name: gamepad_name.clone(),
-                        vendor_id: gamepad.vendor_id(),
-                        product_id: gamepad.product_id(),
-                    },
-                );
-                drop(gamepads_guard);
+                // Handle disconnection events to clean up stale state
+                if matches!(
+                    event,
+                    gilrs_wgi::EventType::Disconnected | gilrs_wgi::EventType::Dropped
+                ) {
+                    let mut active_guard = match active_gamepads.lock() {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            tracing::error!(
+                                "Active gamepads lock poisoned (wgi), stopping capture: {e}"
+                            );
+                            break;
+                        }
+                    };
+                    active_guard.devices.remove(&gamepad_id);
+                    drop(active_guard);
 
-                let captured_guard = match already_captured_by_xinput.read() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        tracing::error!("Captured lock poisoned (wgi), stopping capture: {e}");
-                        break;
-                    }
-                };
-                let is_captured = captured_guard.contains(&gamepad_name);
-                drop(captured_guard);
-
-                if is_captured {
-                    continue;
-                }
-
-                // Handle disconnection to prevent memory leaks during long sessions
-                if matches!(event, gilrs_wgi::EventType::Disconnected) {
-                    let gamepad_id = GamepadId::WGI(id.into());
-                    if let Ok(mut guard) = gamepads.write() {
-                        guard.remove(&gamepad_id);
+                    // Also clean up stale metadata to prevent memory growth
+                    if let Ok(mut gamepads_guard) = gamepads.write() {
+                        gamepads_guard.remove(&gamepad_id);
                     }
                     continue;
                 }
 
-                let Some(event) = map_event_wgi(GamepadId::WGI(id.into()), event) else {
+                let gamepad_name = sanitize_gamepad_name(gamepad.name(), id.into());
+
+                // Only update metadata on first encounter to reduce lock contention
+                // - gamepad info rarely changes after connection
+                let is_new = {
+                    let mut gamepads_guard = match gamepads.write() {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            tracing::error!(
+                                "Gamepads RwLock poisoned (wgi), stopping capture: {e}"
+                            );
+                            break;
+                        }
+                    };
+                    let needs_insert = !gamepads_guard.contains_key(&gamepad_id);
+                    if needs_insert {
+                        gamepads_guard.insert(
+                            gamepad_id,
+                            GamepadMetadata {
+                                name: gamepad_name.clone(),
+                                vendor_id: gamepad.vendor_id(),
+                                product_id: gamepad.product_id(),
+                            },
+                        );
+                    }
+                    drop(gamepads_guard);
+                    needs_insert
+                };
+
+                // Skip processing if this gamepad is already captured by xinput
+                // or if it's a known gamepad that was previously captured
+                if !is_new {
+                    let captured_guard = match already_captured_by_xinput.read() {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            tracing::error!("Captured lock poisoned (wgi), stopping capture: {e}");
+                            break;
+                        }
+                    };
+                    let is_captured = captured_guard.contains(&gamepad_name);
+                    drop(captured_guard);
+
+                    if is_captured {
+                        continue;
+                    }
+                }
+
+                let Some(event) = map_event_wgi(gamepad_id, event) else {
                     continue;
                 };
 

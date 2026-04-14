@@ -4,7 +4,6 @@ version = "0.0.0"
 edition = "2024"
 
 [features]
-default = []
 compression = ["dep:zstd"]
 
 [dependencies]
