@@ -225,7 +225,7 @@ mod tests {
     fn test_wall_time_format() {
         let timer = HighPrecisionTimer::new();
         let time_str = timer.wall_time_str();
-        // Format should be HH:MM:SS.mmm (15 chars)
+        // Format should be HH:MM:SS.mmm (12 chars)
         assert_eq!(
             time_str.len(),
             12,
