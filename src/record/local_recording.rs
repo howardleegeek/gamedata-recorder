@@ -4,7 +4,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use color_eyre::{eyre, Result};
+use color_eyre::{Result, eyre};
 use egui_wgpu::wgpu;
 use serde::{Deserialize, Serialize};
 
@@ -136,6 +136,8 @@ impl UploadProgressState {
         }
 
         writer.flush()?;
+        // Sync file to disk to ensure durability (crash safety)
+        writer.get_ref().sync_all()?;
         Ok(())
     }
 
