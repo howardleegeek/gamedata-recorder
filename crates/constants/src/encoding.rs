@@ -44,9 +44,7 @@ impl VideoEncoderType {
     pub fn is_hevc(&self) -> bool {
         matches!(
             self,
-            VideoEncoderType::NvEncHevc
-                | VideoEncoderType::AmfHevc
-                | VideoEncoderType::QsvHevc
+            VideoEncoderType::NvEncHevc | VideoEncoderType::AmfHevc | VideoEncoderType::QsvHevc
         )
     }
 
@@ -64,6 +62,20 @@ impl VideoEncoderType {
 /// Preset options for different encoder types
 /// https://github.com/obsproject/obs-studio/blob/5ec3af3f6d6465122dc2b0abff9661cbe64b406b/plugins/obs-x264/obs-x264.c
 pub const X264_PRESETS: &[&str] = &["fast", "faster", "veryfast"];
+
+/// x264 tune options — control tradeoffs for specific types of source material
+/// https://github.com/obsproject/obs-studio/blob/5ec3af3f6d6465122dc2b0abff9661cbe64b406b/plugins/obs-x264/obs-x264.c#L233-L248
+pub const X264_TUNE_OPTIONS: &[&str] = &[
+    "", // empty/default
+    "film",
+    "animation",
+    "grain",
+    "stillimage",
+    "psnr",
+    "ssim",
+    "fastdecode",
+    "zerolatency",
+];
 
 /// https://github.com/obsproject/obs-studio/blob/0b1229632063a13dfd26cf1cd9dd43431d8c68f6/plugins/obs-nvenc/nvenc-properties.c#L145
 pub const NVENC_PRESETS: &[&str] = &["p7", "p6", "p5", "p4", "p3", "p2", "p1"];

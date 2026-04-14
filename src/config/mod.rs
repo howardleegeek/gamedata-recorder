@@ -474,6 +474,26 @@ where
     Ok(preset)
 }
 
+/// Validates that the x264 tune value is one of the valid options from
+/// X264_TUNE_OPTIONS. Returns an error if the tune value is not in the allowed list.
+fn validate_x264_tune<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    let tune = String::deserialize(deserializer)?;
+
+    if !constants::encoding::X264_TUNE_OPTIONS.contains(&tune.as_str()) {
+        return Err(Error::custom(format!(
+            "Invalid x264 tune '{}'. Valid options are: {:?}",
+            tune,
+            constants::encoding::X264_TUNE_OPTIONS
+        )));
+    }
+
+    Ok(tune)
+}
+
 /// Validates that the NVENC preset2 value is one of the valid options from
 /// NVENC_PRESETS. Returns an error if the preset is not in the allowed list.
 fn validate_nvenc_preset2<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -560,6 +580,7 @@ where
 pub struct ObsX264Settings {
     #[serde(deserialize_with = "validate_x264_preset")]
     pub preset: String,
+    #[serde(deserialize_with = "validate_x264_tune")]
     pub tune: String,
 }
 impl Default for ObsX264Settings {
