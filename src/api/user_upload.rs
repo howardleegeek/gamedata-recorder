@@ -1,8 +1,14 @@
 use chrono::{DateTime, Utc};
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use regex::Regex;
 use serde::Deserialize;
+use std::sync::LazyLock;
 
-use crate::api::{check_for_response_success, ApiClient, ApiError, API_BASE_URL};
+use crate::api::{API_BASE_URL, ApiClient, ApiError, check_for_response_success};
+
+/// Regex for validating user_id contains only safe characters (alphanumeric, hyphen, underscore)
+/// This prevents injection attacks and ensures the ID can be safely used in URLs
+static USER_ID_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap());
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -70,6 +76,14 @@ impl ApiClient {
         if user_id.len() > Self::MAX_USER_ID_LENGTH {
             return Err(ApiError::ApiKeyValidationFailure(
                 "User ID exceeds maximum length".into(),
+            ));
+        }
+        // Validate user_id contains only safe alphanumeric characters, hyphens, and underscores
+        // This prevents injection attacks and ensures proper URL encoding behavior
+        if !USER_ID_REGEX.is_match(user_id) {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "User ID contains invalid characters (allowed: alphanumeric, hyphen, underscore)"
+                    .into(),
             ));
         }
         Ok(())
