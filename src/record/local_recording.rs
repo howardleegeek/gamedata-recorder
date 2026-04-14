@@ -637,7 +637,7 @@ fn folder_size(path: &Path) -> Result<u64, std::io::Error> {
     for entry in path.read_dir()? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() && path.extension().unwrap_or_default() != "tar" {
+        if path.is_file() && path.extension().and_then(|e| e.to_str()) != Some("tar") {
             size += path.metadata()?.len();
         }
     }
