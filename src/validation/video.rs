@@ -14,6 +14,11 @@ pub fn validate(video_path: &Path, metadata: &Metadata) -> Vec<String> {
     if duration > MAX_FOOTAGE.mul_f32(1.5) {
         invalid_reasons.push(format!("Video length {} too long.", metadata.duration));
     }
+    // Prevent division by zero in subsequent calculations
+    if metadata.duration == 0.0 {
+        invalid_reasons.push("Video duration is zero, cannot validate bitrate".to_string());
+        return invalid_reasons;
+    }
 
     let size_bytes = match std::fs::metadata(video_path).map(|m| m.len()) {
         Ok(size_bytes) => size_bytes,
