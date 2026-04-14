@@ -89,6 +89,9 @@ impl Recorder {
         // pouring through the OBS source code and couldn't find anything of
         // note with regards to how it chooses the adapter; I might have to
         // reach out to an OBS developer if this becomes an issue again.
+        if app_state.adapter_infos.is_empty() {
+            bail!("No GPU adapters found - cannot initialize video recorder");
+        }
         let adapter_index = app_state
             .adapter_infos
             .iter()
