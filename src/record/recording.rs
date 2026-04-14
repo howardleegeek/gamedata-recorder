@@ -266,8 +266,8 @@ pub fn get_recording_base_resolution(hwnd: HWND) -> Result<(u32, u32)> {
         unsafe {
             let mut rect = RECT::default();
             GetClientRect(hwnd, &mut rect).ok()?;
-            let width = rect.right - rect.left;
-            let height = rect.bottom - rect.top;
+            let width = rect.right.saturating_sub(rect.left);
+            let height = rect.bottom.saturating_sub(rect.top);
             Some((width as u32, height as u32))
         }
     }
