@@ -107,10 +107,31 @@ impl FpsLogger {
         });
     }
 
-    /// Get the current real-time FPS (frames in the last completed second).
+    /// Get the current real-time FPS (frames in the last completed second,
+    /// or the current in-progress second if no completed seconds yet).
     #[allow(dead_code)]
     pub fn current_fps(&self) -> Option<f64> {
-        self.entries.last().map(|e| e.fps as f64)
+        // Return completed second if available
+        if let Some(entry) = self.entries.last() {
+            return Some(entry.fps as f64);
+        }
+        // Otherwise calculate from current in-progress second
+        // frame_times stores N intervals = N+1 frames, but if no intervals yet,
+        // we still have 1 frame (the first frame of the second)
+        let current_frames = if self.current_second_frame_times.is_empty() {
+            if self.last_frame_time.is_some() {
+                1 // First frame arrived, no interval recorded yet
+            } else {
+                0 // No frames at all
+            }
+        } else {
+            self.current_second_frame_times.len() + 1
+        };
+        if current_frames > 0 {
+            Some(current_frames as f64)
+        } else {
+            None
+        }
     }
 
     /// Finalize and write fps_log.json to the session directory.
