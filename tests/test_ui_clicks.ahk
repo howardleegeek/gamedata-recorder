@@ -71,7 +71,7 @@ if WinExist("ahk_exe OWL Control.exe") {
 
     if (stop_toggle == checked_true) {
         y := stop_button[2] + option_offset
-        MouseClick "left", 223, y
+        MouseClick "left", stop_button[1], y
     }
 
     if (collapse_toggled == collapse_true)
