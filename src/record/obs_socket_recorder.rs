@@ -95,10 +95,7 @@ impl VideoRecorder for ObsSocketRecorder {
         let all_profiles = profiles.list().await.wrap_err("Failed to get profiles")?;
 
         // Create and activate OWL profile
-        if !all_profiles
-            .profiles
-            .contains(&OWL_PROFILE_NAME.to_string())
-        {
+        if !all_profiles.profiles.iter().any(|p| p == OWL_PROFILE_NAME) {
             profiles
                 .create(OWL_PROFILE_NAME)
                 .await
@@ -174,13 +171,11 @@ impl VideoRecorder for ObsSocketRecorder {
             tracing::warn!("Failed to mute Desktop Audio input: {e}");
         }
 
+        // Pre-convert constant to string once instead of in every loop iteration
+        let vbr_str = constants::encoding::BITRATE.to_string();
         for (category, name, value) in [
             ("SimpleOutput", "RecQuality", "Stream"),
-            (
-                "SimpleOutput",
-                "VBitrate",
-                &constants::encoding::BITRATE.to_string(),
-            ),
+            ("SimpleOutput", "VBitrate", &vbr_str),
             ("Output", "Mode", "Simple"),
             ("SimpleOutput", "RecFormat2", "mp4"),
         ] {
