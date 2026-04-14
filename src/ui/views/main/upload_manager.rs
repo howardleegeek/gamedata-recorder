@@ -440,7 +440,7 @@ pub fn view(
         ui.label(format!(
             "Speed: {:.1} MB/s • ETA: {}",
             progress.speed_mbps,
-            util::format_seconds(progress.eta_seconds as u64),
+            util::format_seconds(progress.eta_seconds.max(0.0) as u64),
         ));
 
         // Show queued recordings count if any
@@ -719,7 +719,7 @@ fn upload_stats_view(ui: &mut Ui, recordings: &Recordings) {
         Layout::top_down(Align::Center),
         |ui| {
             let val = if let Some(stats) = &recordings.statistics {
-                util::format_seconds(stats.total_video_time.seconds as u64)
+                util::format_seconds(stats.total_video_time.seconds.max(0.0) as u64)
             } else if recordings.uploads_available() {
                 "0s".to_string()
             } else {
@@ -772,7 +772,7 @@ fn upload_stats_view(ui: &mut Ui, recordings: &Recordings) {
                 "Pending Uploads",
                 &format!(
                     "{} / {} files / {}",
-                    util::format_seconds(unuploaded_duration as u64),
+                    util::format_seconds(unuploaded_duration.max(0.0) as u64),
                     unuploaded_count,
                     util::format_bytes(unuploaded_size)
                 ),
