@@ -151,7 +151,7 @@ fn main() {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap();
+        .expect("Failed to build tokio runtime for input logger");
 
     rt.block_on(async {
         // Setup output writer based on arguments
