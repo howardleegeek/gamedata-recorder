@@ -79,8 +79,8 @@ pub fn build_actions(
     for event in events {
         // Track cursor position
         if let super::trajectory::RawEventKind::MouseMove { dx, dy } = &event.kind {
-            cursor_x += dx;
-            cursor_y += dy;
+            cursor_x = cursor_x.saturating_add(*dx);
+            cursor_y = cursor_y.saturating_add(*dy);
             continue;
         }
 
