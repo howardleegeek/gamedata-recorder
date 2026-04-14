@@ -238,6 +238,20 @@ impl Credentials {
         self.api_key = String::new();
         self.has_consented = false;
     }
+
+    /// Sets the API key with validation to prevent DoS from maliciously large strings.
+    /// Returns true if the key was set successfully, false if it exceeds maximum length.
+    pub fn set_api_key(&mut self, key: String) -> bool {
+        if key.len() > MAX_API_KEY_LENGTH {
+            tracing::warn!(
+                "API key exceeds maximum length of {} characters, rejecting",
+                MAX_API_KEY_LENGTH
+            );
+            return false;
+        }
+        self.api_key = key;
+        true
+    }
 }
 
 /// The directory in which all persistent config data should be stored.

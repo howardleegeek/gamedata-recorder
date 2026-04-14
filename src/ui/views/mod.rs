@@ -345,7 +345,13 @@ impl App {
     }
 
     fn go_to_consent(&mut self) {
-        self.local_credentials.api_key = self.login_api_key.clone();
+        // Use validated setter to prevent DoS from maliciously large API keys
+        if !self
+            .local_credentials
+            .set_api_key(self.login_api_key.clone())
+        {
+            tracing::error!("Failed to set API key: exceeds maximum length");
+        }
         self.local_credentials.has_consented = false;
         self.has_scrolled_to_bottom_of_consent = false;
     }
