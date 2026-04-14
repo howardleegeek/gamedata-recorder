@@ -105,7 +105,7 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                 cursor_y = cursor_y.saturating_add(*dy);
                 let dist = ((*dx as f64).powi(2) + (*dy as f64).powi(2)).sqrt();
                 total_distance += dist;
-                event_count += 1;
+                event_count = event_count.saturating_add(1);
 
                 if current_start_ns.is_none() {
                     current_start_ns = Some(event.timestamp_ns);
