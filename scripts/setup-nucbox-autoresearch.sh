@@ -35,6 +35,7 @@ cat > ~/.config/opencode/auth.json <<'EOF'
   }
 }
 EOF
+chmod 600 ~/.config/opencode/auth.json
 
 # 5. Clone gamedata-recorder
 cd ~
