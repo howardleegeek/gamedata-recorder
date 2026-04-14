@@ -102,6 +102,10 @@ if WinExist("ahk_exe OWL Control.exe") {
         open_button, move_button, website_button, FAQ_button, collapse_button]
 
     for coords in buttons {
+        if (coords.Length < 2) {
+            MsgBox("Button coordinates array must have at least 2 elements")
+            ExitApp()
+        }
         if (coords.Length = 3) {
             repeat := coords[3]
             loop repeat {
