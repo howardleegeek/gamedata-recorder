@@ -227,12 +227,14 @@ fn format_event(t: &str, event: &Event) -> String {
                 PressState::Pressed => "DOWN",
                 PressState::Released => "UP",
             };
+            // Windows VK constants: VK_LBUTTON=1, VK_RBUTTON=2, VK_CANCEL=3,
+            // VK_MBUTTON=4, VK_XBUTTON1=5, VK_XBUTTON2=6
             let btn = match key {
                 1 => "LEFT",
                 2 => "RIGHT",
-                3 => "MIDDLE",
-                4 => "X1",
-                5 => "X2",
+                4 => "MIDDLE",
+                5 => "X1",
+                6 => "X2",
                 _ => "?",
             };
             format!("{}  MOUSE_BTN    {} {}", t, btn, state)
