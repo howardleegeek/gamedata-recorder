@@ -144,7 +144,9 @@ impl Recording {
 
         // GetWindowTextLengthW returns 0 for both empty titles AND on error.
         // Clear last error first, then check GetLastError() to distinguish.
-        unsafe { windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::ERROR_SUCCESS) };
+        unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::ERROR_SUCCESS)
+        };
         let title_len = unsafe { GetWindowTextLengthW(self.hwnd) };
         if title_len > 0 {
             let mut buf = vec![0u16; (title_len + 1) as usize];
@@ -160,7 +162,11 @@ impl Recording {
             // Check if 0 means error or truly empty title
             let last_error = unsafe { windows::Win32::Foundation::GetLastError() };
             if last_error.0 != 0 {
-                tracing::warn!("GetWindowTextLengthW failed for hwnd {:?}: error {}", self.hwnd, last_error.0);
+                tracing::warn!(
+                    "GetWindowTextLengthW failed for hwnd {:?}: error {}",
+                    self.hwnd,
+                    last_error.0
+                );
             }
         }
         None
@@ -176,6 +182,11 @@ impl Recording {
     }
 
     pub(crate) fn update_fps(&mut self, fps: f64) {
+        // Validate FPS is a finite positive number
+        if !fps.is_finite() || fps <= 0.0 {
+            tracing::warn!("Ignoring invalid FPS value: {}", fps);
+            return;
+        }
         // True cumulative average (not exponential decay which biases toward recent samples)
         self.fps_sample_count += 1;
         self.average_fps = Some(match self.average_fps {
