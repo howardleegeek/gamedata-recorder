@@ -129,7 +129,10 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                 pressed: true,
             } => {
                 // Click terminates the current trajectory
-                if let Some(start) = current_start_ns {
+                // Only create trajectory if there was actual movement (non-empty path)
+                if let Some(start) = current_start_ns
+                    && !current_path.is_empty()
+                {
                     trajectories.push(build_trajectory(
                         traj_index,
                         start,
@@ -149,7 +152,10 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
 
             RawEventKind::KeyDown { vkey, .. } => {
                 // Key press terminates trajectory
-                if let Some(start) = current_start_ns {
+                // Only create trajectory if there was actual movement (non-empty path)
+                if let Some(start) = current_start_ns
+                    && !current_path.is_empty()
+                {
                     trajectories.push(build_trajectory(
                         traj_index,
                         start,
@@ -168,7 +174,10 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
             }
 
             RawEventKind::Scroll { delta } => {
-                if let Some(start) = current_start_ns {
+                // Only create trajectory if there was actual movement (non-empty path)
+                if let Some(start) = current_start_ns
+                    && !current_path.is_empty()
+                {
                     trajectories.push(build_trajectory(
                         traj_index,
                         start,
