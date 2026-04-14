@@ -39,10 +39,9 @@ pub async fn create_tar_file(
         let validation = validation.clone();
         move || {
             // Create tar file inside the recording folder
-            let tar_path = recording_path.join(format!(
-                "{}.tar",
-                &uuid::Uuid::new_v4().simple().to_string()[0..16]
-            ));
+            let uuid_str = uuid::Uuid::new_v4().simple().to_string();
+            let tar_name = format!("{}.tar", uuid_str.get(0..16).unwrap_or(&uuid_str));
+            let tar_path = recording_path.join(tar_name);
 
             // Files to include in the tar archive
             let source_files = [
