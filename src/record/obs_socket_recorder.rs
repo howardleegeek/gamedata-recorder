@@ -319,14 +319,21 @@ impl Drop for ObsSocketRecorder {
     fn drop(&mut self) {
         tracing::info!("Shutting down OBS socket recorder");
         let client = self.client.take();
-        tokio::spawn(async move {
-            if let Some(client) = &client {
-                // Log, but do not explode if it fails
-                if let Err(e) = client.recording().stop().await {
-                    tracing::error!("Failed to stop recording: {e}");
+        // Use block_on to ensure recording is stopped before drop completes.
+        // This prevents race conditions where the recording continues after
+        // the recorder is dropped, causing OBS to record indefinitely.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.block_on(async move {
+                if let Some(client) = &client {
+                    // Log, but do not explode if it fails
+                    if let Err(e) = client.recording().stop().await {
+                        tracing::error!("Failed to stop recording: {e}");
+                    }
                 }
-            }
-        });
+            });
+        } else {
+            tracing::warn!("No tokio runtime available, cannot stop OBS recording synchronously");
+        }
     }
 }
 
