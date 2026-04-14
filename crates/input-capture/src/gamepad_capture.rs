@@ -184,6 +184,10 @@ pub fn initialize_thread(
                 );
                 drop(gamepads_guard);
 
+                let Some(event) = map_event_xinput(GamepadId::XInput(id.into()), event) else {
+                    continue;
+                };
+
                 let mut captured_guard = match already_captured_by_xinput.write() {
                     Ok(guard) => guard,
                     Err(e) => {
@@ -193,10 +197,6 @@ pub fn initialize_thread(
                 };
                 captured_guard.insert(Arc::from(gamepad.name()));
                 drop(captured_guard);
-
-                let Some(event) = map_event_xinput(GamepadId::XInput(id.into()), event) else {
-                    continue;
-                };
 
                 let mut active_guard = match active_gamepads.lock() {
                     Ok(guard) => guard,
