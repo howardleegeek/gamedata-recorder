@@ -42,8 +42,7 @@ Name: "startup"; Description: "Start automatically when Windows starts"; GroupDe
 Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 ; OBS DLLs required by libobs
 Source: "..\target\release\*.dll"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
-; Default config
-Source: "..\config.default.toml"; DestDir: "{app}"; DestName: "config.toml"; Flags: onlyifdoesntexist
+; Config is created automatically by the app with defaults if it doesn't exist
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
