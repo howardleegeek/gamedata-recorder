@@ -80,7 +80,6 @@ InitUIVars() {
 
 if WinExist("ahk_exe OWL Control.exe") {
     WinActivate "ahk_exe OWL Control.exe"  ; Explicitly activate before waiting
-    WinMinimize "A"
     InitInputSettings()
     if (!WinWaitActive("ahk_exe OWL Control.exe", , 5)) {  ; 5 second timeout to prevent indefinite hang
         MsgBox("Failed to activate OWL Control window within 5 seconds")
@@ -154,6 +153,7 @@ if WinExist("ahk_exe OWL Control.exe") {
             MouseClick "left", x, y
         }
     }
+    WinMinimize "A"  ; Minimize window after all UI operations complete
 } else {
     MsgBox("OWL Control.exe window not found - ensure application is running")
     ExitApp()
