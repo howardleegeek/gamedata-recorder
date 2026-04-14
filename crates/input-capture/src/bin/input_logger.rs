@@ -153,25 +153,47 @@ fn main() {
 
     let timer = HighPrecisionTimer::new();
 
-    let (_capture, mut rx) =
-        input_capture::InputCapture::new().expect("Failed to initialize input capture");
+    let (_capture, mut rx) = match input_capture::InputCapture::new() {
+        Ok(capture_rx) => capture_rx,
+        Err(e) => {
+            tracing::error!("Failed to initialize input capture: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     // Block on the tokio channel using a simple runtime
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("Failed to build tokio runtime for input logger");
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::error!("Failed to build tokio runtime for input logger: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     rt.block_on(async {
         // Setup output writer based on arguments
         let result: Result<(), Box<dyn std::error::Error>> = match &args.output {
             Some(path) => {
-                let file = std::fs::File::create(path).expect("Failed to create output file");
+                let file = match std::fs::File::create(path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::error!("Failed to create output file '{}': {}", path, e);
+                        std::process::exit(1);
+                    }
+                };
 
                 #[cfg(feature = "compression")]
                 if args.compress {
-                    let encoder = zstd::stream::write::Encoder::new(file, args.level)
-                        .expect("Failed to create zstd encoder");
+                    let encoder = match zstd::stream::write::Encoder::new(file, args.level) {
+                        Ok(enc) => enc,
+                        Err(e) => {
+                            tracing::error!("Failed to create zstd encoder: {}", e);
+                            std::process::exit(1);
+                        }
+                    };
                     let mut writer = ZstdWriter { encoder };
                     let res = run_logger(&timer, &mut rx, &mut writer).await;
                     // Finalize the zstd encoder to ensure complete compressed output
