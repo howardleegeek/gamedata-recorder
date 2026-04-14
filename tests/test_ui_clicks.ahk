@@ -30,6 +30,10 @@ InitUIVars() {
     ;   Keyboard Shortcuts
     hotkey_button := Array(412, 186)
     hotkey_stop := Array(412, 216)
+    if (hotkey_stop.Length < 2) {
+        MsgBox("hotkey_stop array must have at least 2 elements")
+        ExitApp()
+    }
     stop_button := Array(225, 223)
     if (stop_button.Length < 2) {
         MsgBox("stop_button array must have at least 2 elements")
