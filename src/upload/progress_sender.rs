@@ -105,14 +105,7 @@ impl ProgressSender {
                     },
                     file_progress: self.file_progress.clone(),
                 },
-                percent: if self.file_size > 0 {
-                    ((self.bytes_uploaded as f64 / self.file_size as f64) * 100.0).min(100.0)
-                } else {
-                    0.0
-                },
-                file_progress: self.file_progress.clone(),
-            },
-        ))) {
+            ))) {
             tracing::warn!("Failed to send upload progress update: {}", e);
         }
     }
