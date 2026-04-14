@@ -2,6 +2,7 @@ use std::path::Path;
 
 use color_eyre::Result;
 use serde::Serialize;
+use tokio::io::AsyncWriteExt as _;
 
 /// Per-second FPS statistics entry (buyer spec requirement).
 #[derive(Debug, Serialize)]
@@ -109,7 +110,9 @@ impl FpsLogger {
 
         let path = session_dir.join(constants::filename::recording::FPS_LOG);
         let json = serde_json::to_string_pretty(&self.entries)?;
-        tokio::fs::write(&path, json).await?;
+        let mut file = tokio::fs::File::create(&path).await?;
+        file.write_all(json.as_bytes()).await?;
+        file.sync_all().await?;
         tracing::info!(
             "FPS log saved: {} entries to {:?}",
             self.entries.len(),
