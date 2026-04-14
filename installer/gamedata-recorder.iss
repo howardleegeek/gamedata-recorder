@@ -63,7 +63,7 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: no
 ; Graceful shutdown attempt first (no /F flag) - wait up to 5 seconds
 Filename: "{sys}\taskkill.exe"; Parameters: "/IM {#MyAppExeName}"; Flags: runhidden waituntilterminated; Check: IsAppRunning()
 ; Brief delay to allow graceful termination to complete (ping trick avoids blocking)
-Filename: "{sys}\cmd.exe"; Parameters: "/C ping 127.0.0.1 -n 2 >nul"; Flags: runhidden waituntilterminated
+Filename: "{sys}\cmd.exe"; Parameters: "/C ping 127.0.0.1 -n 2 >nul"; Flags: runhidden waituntilterminated; Check: IsAppRunning()
 ; Force kill if still running after graceful attempt
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden waituntilterminated; Check: IsAppRunning()
 
