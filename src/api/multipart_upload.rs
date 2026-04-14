@@ -70,6 +70,7 @@ pub struct AbortMultipartUploadResponse {
 impl ApiClient {
     const MAX_UPLOAD_ID_LENGTH: usize = 256;
     const MAX_FILENAME_LENGTH: usize = 1024;
+    const MAX_HARDWARE_ID_LENGTH: usize = 256;
 
     fn validate_upload_id(upload_id: &str) -> Result<(), ApiError> {
         if upload_id.is_empty() {
@@ -105,6 +106,25 @@ impl ApiClient {
         if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
             return Err(ApiError::ApiKeyValidationFailure(
                 "Filename contains invalid characters (path traversal)".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validates hardware ID to prevent empty or overly long values.
+    fn validate_hardware_id(hardware_id: &str) -> Result<(), ApiError> {
+        if hardware_id.is_empty() || hardware_id.trim().is_empty() {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "Hardware ID cannot be empty or whitespace".into(),
+            ));
+        }
+        if hardware_id.len() > Self::MAX_HARDWARE_ID_LENGTH {
+            return Err(ApiError::ApiKeyValidationFailure(
+                format!(
+                    "Hardware ID exceeds maximum length of {} characters",
+                    Self::MAX_HARDWARE_ID_LENGTH
+                )
+                .into(),
             ));
         }
         Ok(())
@@ -161,6 +181,9 @@ impl ApiClient {
 
         // Validate filename to prevent path traversal and invalid names
         Self::validate_filename(args.filename)?;
+
+        // Validate hardware_id to prevent empty or invalid values
+        Self::validate_hardware_id(args.hardware_id)?;
 
         // Validate video_duration_seconds if provided to prevent invalid data
         if let Some(duration) = args.video_duration_seconds {
