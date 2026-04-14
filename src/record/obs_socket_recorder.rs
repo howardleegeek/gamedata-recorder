@@ -158,13 +158,11 @@ impl VideoRecorder for ObsSocketRecorder {
             .set_volume(InputId::Name("Desktop Audio"), Volume::Db(-100.0))
             .await;
 
+        // Pre-convert constant to string once instead of in every loop iteration
+        let vbr_str = constants::encoding::BITRATE.to_string();
         for (category, name, value) in [
             ("SimpleOutput", "RecQuality", "Stream"),
-            (
-                "SimpleOutput",
-                "VBitrate",
-                &constants::encoding::BITRATE.to_string(),
-            ),
+            ("SimpleOutput", "VBitrate", &vbr_str),
             ("Output", "Mode", "Simple"),
             ("SimpleOutput", "RecFormat2", "mp4"),
         ] {
