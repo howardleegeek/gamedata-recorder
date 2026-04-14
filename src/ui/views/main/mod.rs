@@ -436,7 +436,7 @@ fn overlay_settings_section(
         add_settings_text(ui, Label::new("Overlay Opacity:"));
         ui.scope(|ui| {
             // one day egui will make sliders respect their width properly
-            ui.spacing_mut().slider_width = ui.available_width() - 50.0;
+            ui.spacing_mut().slider_width = (ui.available_width() - 50.0).max(0.0);
             u8_percentage_slider(ui, &mut local_preferences.overlay_opacity);
         });
     });
