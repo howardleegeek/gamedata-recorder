@@ -514,8 +514,11 @@ fn convert_absolute_to_screen_coords(x: i32, y: i32, is_virtual_desktop: bool) -
 
     // Convert from normalized coordinates (0-65535) to screen coordinates
     // Using MulDiv equivalent: (x * (right - left)) / 65535 + left
-    let screen_x = (x * (right - left)) / 65535 + left;
-    let screen_y = (y * (bottom - top)) / 65535 + top;
+    // Use i64 for intermediate calculations to prevent integer overflow
+    let width = (right - left) as i64;
+    let height = (bottom - top) as i64;
+    let screen_x = (((x as i64 * width) / 65535) + left as i64) as i32;
+    let screen_y = (((y as i64 * height) / 65535) + top as i64) as i32;
 
     (screen_x, screen_y)
 }
