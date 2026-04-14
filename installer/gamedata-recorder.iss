@@ -25,6 +25,9 @@ PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 ; Modern UI
 WizardStyle=modern
+; 64-bit architecture support - app is x86_64
+ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x86 x64
 ; Auto-run after install
 SetupIconFile=..\build-resources\owl-logo.ico
 ; Uninstall entry icon in Add/Remove Programs
