@@ -57,6 +57,9 @@ if ! command -v cargo &>/dev/null; then
     curl --proto '=https' --tlsv1.2 -sSfL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
     source "$HOME/.cargo/env"
     rustup component add rustfmt clippy
+else
+    # Ensure rustfmt and clippy are available even if rust was pre-installed
+    rustup component add rustfmt clippy 2>/dev/null || true
 fi
 
 # 7. Verify
