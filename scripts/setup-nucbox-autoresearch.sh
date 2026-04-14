@@ -13,9 +13,11 @@ fi
 
 echo "=== GameData Recorder autoresearch setup on nucbox-wsl-1 ==="
 
-# 1. System deps
-sudo apt-get update -qq
-sudo apt-get install -y -qq \
+# 1. System deps (with timeout to prevent indefinite hangs)
+export DEBIAN_FRONTEND=noninteractive
+APT_OPTIONS="-o Acquire::Timeout=60 -o Acquire::Retries=3"
+sudo apt-get update -qq $APT_OPTIONS
+sudo apt-get install -y -qq $APT_OPTIONS \
     git curl jq python3 python3-pip python3-venv \
     build-essential pkg-config libssl-dev \
     ripgrep procps
