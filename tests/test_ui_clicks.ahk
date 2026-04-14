@@ -82,6 +82,10 @@ if WinExist("ahk_exe OWL Control.exe") {
         ExitApp()
     }
     InitUIVars()  ; Initialize UI vars AFTER window is confirmed active (PixelGetColor calls need visible window)
+    if (reset_position.Length < 2) {
+        MsgBox("reset_position array must have at least 2 elements")
+        ExitApp()
+    }
     MouseClick "left", reset_position[1], reset_position[2]   ; Resets tabs to top of UI
 
     if (stop_toggle == checked_true) {
