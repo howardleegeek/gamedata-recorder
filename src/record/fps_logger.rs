@@ -47,10 +47,22 @@ impl FpsLogger {
         let now = std::time::Instant::now();
         let elapsed_seconds = now.duration_since(self.start_instant).as_secs();
 
-        // If we've moved to a new second, finalize the previous one
-        while self.current_second < elapsed_seconds {
+        // If we've moved to a new second, finalize the previous one.
+        // Cap at 2 seconds of catch-up to prevent performance issues after
+        // system sleep/clock jumps - we don't need per-second FPS data for
+        // time when no frames were being captured.
+        const MAX_CATCH_UP_SECONDS: u64 = 2;
+        while self.current_second < elapsed_seconds
+            && elapsed_seconds - self.current_second <= MAX_CATCH_UP_SECONDS
+        {
             self.finalize_current_second();
             self.current_second += 1;
+            self.current_second_frame_times.clear();
+        }
+        // Jump to current second if we skipped more than MAX_CATCH_UP_SECONDS
+        // (discarding empty entries for time when no recording was active)
+        if self.current_second < elapsed_seconds {
+            self.current_second = elapsed_seconds;
             self.current_second_frame_times.clear();
         }
 
