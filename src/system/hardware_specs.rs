@@ -79,7 +79,7 @@ pub fn get_hardware_specs(gpus: Vec<GpuSpecs>) -> Result<HardwareSpecs> {
         // Convert to f64 with minimal precision loss. Divide by 1024 first to reduce the value
         // magnitude, preventing precision loss for large u64 values (>2^53 bytes ~ 9PB).
         // Then convert to f64 and complete the division to get GB.
-        total_memory_gb: (sys.total_memory() / 1024) as f64 / (1024.0 * 1024.0),
+        total_memory_gb: sys.total_memory() as f64 / (1024.0 * 1024.0 * 1024.0),
     };
 
     Ok(HardwareSpecs {
