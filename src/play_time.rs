@@ -124,8 +124,21 @@ impl PlayTimeTracker {
         let file_path = Self::file_path()?;
         // Atomic write: write to temp file then rename to prevent corruption on crash
         let temp_path = file_path.with_extension("json.tmp");
-        std::fs::write(&temp_path, serde_json::to_string_pretty(&state)?)?;
+        {
+            let mut temp_file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&temp_path)?;
+            serde_json::to_writer_pretty(&mut temp_file, &state)?;
+            temp_file.sync_all()?;
+        }
         std::fs::rename(&temp_path, &file_path)?;
+        // Sync directory to ensure rename is persisted
+        if let Some(parent) = file_path.parent() {
+            let dir = std::fs::File::open(parent)?;
+            dir.sync_all()?;
+        }
         Ok(())
     }
 
