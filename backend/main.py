@@ -660,6 +660,63 @@ async def upload_init(
     }
 
 
+@app.post("/api/v1/upload/chunk")
+async def upload_chunk(
+    upload_id: str,
+    chunk_number: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get presigned URL for a specific chunk upload."""
+    # Validate chunk_number
+    if chunk_number < 1:
+        raise HTTPException(status_code=400, detail="chunk_number must be >= 1")
+    if chunk_number > 10000:
+        raise HTTPException(status_code=400, detail="chunk_number exceeds maximum")
+
+    # Find upload
+    result = await db.execute(
+        select(Upload).where(
+            and_(Upload.id == upload_id, Upload.user_id == current_user.id)
+        )
+    )
+    upload = result.scalar_one_or_none()
+
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    if upload.status != UploadStatus.IN_PROGRESS:
+        raise HTTPException(
+            status_code=400, detail=f"Upload is already {upload.status.value}"
+        )
+
+    # Generate S3 presigned URL if configured
+    upload_url = None
+    if AWS_ACCESS_KEY and AWS_SECRET_KEY and upload.s3_upload_id:
+        try:
+            s3 = boto3.client(
+                "s3",
+                region_name=S3_REGION,
+                aws_access_key_id=AWS_ACCESS_KEY,
+                aws_secret_access_key=AWS_SECRET_KEY,
+            )
+            upload_url = s3.generate_presigned_url(
+                "upload_part",
+                Params={
+                    "Bucket": S3_BUCKET,
+                    "Key": upload.s3_key,
+                    "UploadId": upload.s3_upload_id,
+                    "PartNumber": chunk_number,
+                },
+                ExpiresIn=3600,
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate chunk URL: {e}")
+            raise HTTPException(status_code=500, detail="Failed to generate upload URL")
+
+    return {"upload_url": upload_url, "chunk_number": chunk_number}
+
+
 @app.post("/api/v1/upload/complete")
 async def upload_complete(
     req: UploadCompleteRequest,
