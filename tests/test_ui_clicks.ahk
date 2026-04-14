@@ -62,8 +62,8 @@ InitUIVars() {
     return
 }
 
-WinMinimize "A"
 if WinExist("ahk_exe OWL Control.exe") {
+    WinMinimize "A"
     InitInputSettings()
     InitUIVars()
     if (!WinWaitActive("ahk_exe OWL Control.exe", , 5)) {  ; 5 second timeout to prevent indefinite hang
