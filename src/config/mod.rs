@@ -271,8 +271,11 @@ where
     use serde::de::Error;
     let key = String::deserialize(deserializer)?;
 
+    // Trim whitespace to handle edge cases where hotkey is whitespace-only
+    let key = key.trim();
+
     if key.is_empty() {
-        return Err(Error::custom("Hotkey cannot be empty"));
+        return Err(Error::custom("Hotkey cannot be empty or whitespace-only"));
     }
 
     if key.len() > MAX_HOTKEY_LENGTH {
@@ -282,7 +285,7 @@ where
         )));
     }
 
-    Ok(key)
+    Ok(key.to_string())
 }
 
 // For some reason, previous electron configs saved hasConsented as a string instead of a boolean? So now we need a custom deserializer
