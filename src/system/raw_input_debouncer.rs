@@ -83,6 +83,8 @@ impl<K: Eq + Hash> AnalogDebouncer<K> {
     /// Returns whether or not a sufficient amount of time has passed since the last change.
     pub(crate) fn debounce(&mut self, key: K) -> bool {
         const MAX_ANALOGUE_SAMPLING_MICROSECONDS: u64 = (1_000_000.0 / (FPS as f32 * 2.0)) as u64;
+        // Cleanup threshold: 10x the sampling period to avoid memory growth during long sessions
+        const CLEANUP_THRESHOLD_MICROSECONDS: u64 = MAX_ANALOGUE_SAMPLING_MICROSECONDS * 10;
 
         let now = std::time::Instant::now();
         let Some(last_change) = self.last_change.get(&key) else {
@@ -96,6 +98,19 @@ impl<K: Eq + Hash> AnalogDebouncer<K> {
         } else {
             false
         }
+    }
+
+    /// Removes stale entries to prevent unbounded memory growth during long recording sessions.
+    /// Should be called periodically (e.g., every few seconds) from the event processing loop.
+    #[allow(dead_code)]
+    pub(crate) fn cleanup_stale_entries(&mut self) {
+        const MAX_ANALOGUE_SAMPLING_MICROSECONDS: u64 = (1_000_000.0 / (FPS as f32 * 2.0)) as u64;
+        const CLEANUP_THRESHOLD_MICROSECONDS: u64 = MAX_ANALOGUE_SAMPLING_MICROSECONDS * 10;
+
+        let now = std::time::Instant::now();
+        let threshold = Duration::from_micros(CLEANUP_THRESHOLD_MICROSECONDS);
+        self.last_change
+            .retain(|_, last_change| now - *last_change <= threshold);
     }
 }
 
