@@ -264,8 +264,7 @@ async fn validate_recording_paused(
     // we've seen upload speeds of 0.3MB/s, which would take 11 minutes to upload 200MB. 15 minutes is safer.
     const MIN_TIME_REMAINING_SECONDS: i64 = 15 * 60; // 15 minutes
     let seconds_left = state.seconds_until_expiration();
-    if !(state.seconds_until_expiration() > MIN_TIME_REMAINING_SECONDS && state.tar_path.is_file())
-    {
+    if !(seconds_left > MIN_TIME_REMAINING_SECONDS && state.tar_path.is_file()) {
         // if tar file does not exist, we want to restart upload as there is no guarantee the
         // recreated tar file will be the same
         if !state.tar_path.is_file() {
