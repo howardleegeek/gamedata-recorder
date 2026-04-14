@@ -87,6 +87,7 @@ impl HighPrecisionTimer {
                     return self.start_instant.elapsed().as_millis() as u64;
                 }
             }
+            // Use saturating_sub to prevent underflow if QPC goes backwards (rare hardware quirk)
             let elapsed = current.saturating_sub(self.start_counter);
             ((elapsed as u128 * 1000) / self.frequency as u128) as u64
         }
@@ -110,6 +111,7 @@ impl HighPrecisionTimer {
                     return self.start_instant.elapsed().as_micros() as u64;
                 }
             }
+            // Use saturating_sub to prevent underflow if QPC goes backwards (rare hardware quirk)
             let elapsed = current.saturating_sub(self.start_counter);
             ((elapsed as u128 * 1_000_000) / self.frequency as u128) as u64
         }
@@ -134,6 +136,7 @@ impl HighPrecisionTimer {
                     return self.start_instant.elapsed().as_nanos() as u64;
                 }
             }
+            // Use saturating_sub to prevent underflow if QPC goes backwards (rare hardware quirk)
             let elapsed = current.saturating_sub(self.start_counter);
             ((elapsed as u128 * 1_000_000_000) / self.frequency as u128) as u64
         }

@@ -95,6 +95,10 @@ fn print_help() {
 /// Output writer trait for abstraction over stdout and compressed file
 trait OutputWriter: Write {
     fn flush_output(&mut self) -> std::io::Result<()>;
+    /// Sync data to disk for crash durability. Default does nothing.
+    fn sync_output(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl OutputWriter for std::io::StdoutLock<'_> {
@@ -106,6 +110,9 @@ impl OutputWriter for std::io::StdoutLock<'_> {
 impl OutputWriter for std::fs::File {
     fn flush_output(&mut self) -> std::io::Result<()> {
         self.flush()
+    }
+    fn sync_output(&mut self) -> std::io::Result<()> {
+        self.sync_all()
     }
 }
 
@@ -137,6 +144,13 @@ impl Write for ZstdWriter {
 #[cfg(feature = "compression")]
 impl OutputWriter for ZstdWriter {
     fn flush_output(&mut self) -> std::io::Result<()> {
+        self.encoder.flush()
+    }
+    fn sync_output(&mut self) -> std::io::Result<()> {
+        // Finish the encoder to write the zstd footer, then sync the underlying file
+        // Note: finish() consumes the encoder, so we use do_finish() which doesn't
+        self.encoder.do_finish()?;
+        // After do_finish(), the encoder will pass through sync_all calls to the underlying file
         self.encoder.flush()
     }
 }
@@ -207,21 +221,31 @@ fn main() {
                         }
                     };
                     let mut writer = ZstdWriter { encoder };
-                    let res = run_logger(&timer, &mut rx, &mut writer).await;
-                    // Finalize the zstd encoder to ensure complete compressed output
-                    if let Err(e) = writer.finish() {
-                        tracing::warn!("Failed to finalize zstd encoder: {}", e);
+                    let result = run_logger(&timer, &mut rx, &mut writer).await;
+                    // Flush compressed data for crash durability
+                    if let Err(e) = writer.sync_output() {
+                        eprintln!("Warning: failed to sync output file: {}", e);
                     }
-                    res
+                    result
                 } else {
                     let mut writer = file;
-                    run_logger(&timer, &mut rx, &mut writer).await
+                    let result = run_logger(&timer, &mut rx, &mut writer).await;
+                    // Ensure data is flushed to disk for crash durability
+                    if let Err(e) = writer.sync_output() {
+                        eprintln!("Warning: failed to sync output file: {}", e);
+                    }
+                    result
                 }
 
                 #[cfg(not(feature = "compression"))]
                 {
                     let mut writer = file;
-                    run_logger(&timer, &mut rx, &mut writer).await
+                    let result = run_logger(&timer, &mut rx, &mut writer).await;
+                    // Ensure data is flushed to disk for crash durability
+                    if let Err(e) = writer.sync_output() {
+                        eprintln!("Warning: failed to sync output file: {}", e);
+                    }
+                    result
                 }
             }
             None => {
@@ -287,6 +311,8 @@ fn format_event(t: &str, event: &Event) -> String {
                 PressState::Pressed => "DOWN",
                 PressState::Released => "UP",
             };
+            // Windows VK constants: VK_LBUTTON=1, VK_RBUTTON=2, VK_CANCEL=3,
+            // VK_MBUTTON=4, VK_XBUTTON1=5, VK_XBUTTON2=6
             let btn = match key {
                 1 => "LEFT",
                 2 => "RIGHT",

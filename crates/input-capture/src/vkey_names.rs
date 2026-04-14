@@ -74,7 +74,7 @@ pub fn vkey_to_name(vkey: u16) -> &'static str {
         0x69 => "NUM9",
         0x6A => "NUM*",
         0x6B => "NUM+",
-        0x6C => "NUMENTER",
+        0x6C => "NUM,",
         0x6D => "NUM-",
         0x6E => "NUM.",
         0x6F => "NUM/",

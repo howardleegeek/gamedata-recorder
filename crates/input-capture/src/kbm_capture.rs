@@ -118,7 +118,8 @@ impl KbmCapture {
                 hwndTarget: hwnd,
             });
 
-            RegisterRawInputDevices(&raw_input_devices, size_of::<RAWINPUTDEVICE>() as u32)
+            let device_count = raw_input_devices.len() as u32;
+            RegisterRawInputDevices(&raw_input_devices, device_count)
                 .wrap_err("failed to register raw input devices")?;
 
             Ok(Self {
@@ -223,23 +224,28 @@ impl KbmCapture {
                     let mouse = rawinput.data.mouse;
                     let us_flags = mouse.usFlags.0;
 
-                    // Handle mouse movement
-                    if mouse.lLastX != 0 || mouse.lLastY != 0 {
-                        let (delta_x, delta_y) = if (us_flags & MOUSE_MOVE_ABSOLUTE.0) != 0 {
-                            let is_virtual_desktop = (us_flags & MOUSE_VIRTUAL_DESKTOP.0) != 0;
-                            let (screen_x, screen_y) = convert_absolute_to_screen_coords(
-                                mouse.lLastX,
-                                mouse.lLastY,
-                                is_virtual_desktop,
-                            );
-                            let delta = last_absolute
-                                .map(|(last_x, last_y)| (screen_x - last_x, screen_y - last_y))
-                                .unwrap_or_default();
-                            *last_absolute = Some((screen_x, screen_y));
-                            delta
-                        } else {
-                            (mouse.lLastX, mouse.lLastY)
-                        };
+                // Handle mouse movement
+                if mouse.lLastX != 0 || mouse.lLastY != 0 {
+                    let (delta_x, delta_y) = if (us_flags & MOUSE_MOVE_ABSOLUTE.0) != 0 {
+                        let is_virtual_desktop = (us_flags & MOUSE_VIRTUAL_DESKTOP.0) != 0;
+                        let (screen_x, screen_y) = convert_absolute_to_screen_coords(
+                            mouse.lLastX,
+                            mouse.lLastY,
+                            is_virtual_desktop,
+                        );
+                        let delta = last_absolute
+                            .map(|(last_x, last_y)| {
+                                (
+                                    screen_x.saturating_sub(last_x),
+                                    screen_y.saturating_sub(last_y),
+                                )
+                            })
+                            .unwrap_or_default();
+                        *last_absolute = Some((screen_x, screen_y));
+                        delta
+                    } else {
+                        (mouse.lLastX, mouse.lLastY)
+                    };
 
                         if delta_x != 0 || delta_y != 0 {
                             events.push(Event::MouseMove([delta_x, delta_y]));
@@ -407,7 +413,12 @@ impl KbmCapture {
                             );
 
                             let delta = last_absolute
-                                .map(|(last_x, last_y)| (screen_x - last_x, screen_y - last_y))
+                                .map(|(last_x, last_y)| {
+                                    (
+                                        screen_x.saturating_sub(last_x),
+                                        screen_y.saturating_sub(last_y),
+                                    )
+                                })
                                 .unwrap_or_default();
 
                             // Update stored absolute position
@@ -539,11 +550,17 @@ impl KbmCapture {
 fn convert_absolute_to_screen_coords(x: i32, y: i32, is_virtual_desktop: bool) -> (i32, i32) {
     let (left, top, right, bottom) = unsafe {
         if is_virtual_desktop {
+            let left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            // SM_CXVIRTUALSCREEN/SM_CYVIRTUALSCREEN return width/height, not coordinates
+            // Calculate right/bottom by adding width/height to left/top
             (
-                GetSystemMetrics(SM_XVIRTUALSCREEN),
-                GetSystemMetrics(SM_YVIRTUALSCREEN),
-                GetSystemMetrics(SM_CXVIRTUALSCREEN),
-                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+                left,
+                top,
+                left.saturating_add(width),
+                top.saturating_add(height),
             )
         } else {
             (

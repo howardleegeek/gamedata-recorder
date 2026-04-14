@@ -4,6 +4,7 @@ version = "0.0.0"
 edition = "2024"
 
 [features]
+default = []
 compression = ["dep:zstd"]
 
 [dependencies]
@@ -22,6 +23,7 @@ windows = { workspace = true, features = [
 color-eyre.workspace = true
 serde.workspace = true
 tokio.workspace = true
+zstd = { version = "0.13", optional = true }
 
 # See gamepad_capture.rs for more details as to why we import gilrs twice. We use a git dependency
 # here to allow cargo to import the same package twice. Disgusting.
