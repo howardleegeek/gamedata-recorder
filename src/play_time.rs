@@ -85,6 +85,7 @@ impl PlayTimeTracker {
                 self.total_active_duration = self
                     .total_active_duration
                     .saturating_sub(constants::MAX_IDLE_DURATION);
+                self.last_break_end = Utc::now();
             }
             self.pause_session();
         }
