@@ -271,12 +271,30 @@ impl ApiClient {
             })
             .send()
             .await?;
-        Ok(
-            check_for_response_success(response, "Upload multipart chunk request failed")
-                .await?
-                .json()
-                .await?,
-        )
+
+        let response = check_for_response_success(response, "Upload multipart chunk request failed")
+            .await?
+            .json::<UploadMultipartChunkResponse>()
+            .await?;
+
+        // Validate chunk_number matches what was requested to prevent data integrity issues
+        if response.chunk_number != chunk_number {
+            return Err(ApiError::ServerInvalidation(format!(
+                "Server returned wrong chunk_number: expected {}, got {}",
+                chunk_number, response.chunk_number
+            )));
+        }
+
+        // Validate expires_at to prevent integer overflow when cast to i64 in downstream code
+        if response.expires_at > i64::MAX as u64 {
+            return Err(ApiError::ServerInvalidation(format!(
+                "Server returned expires_at too large: {} (max: {})",
+                response.expires_at,
+                i64::MAX as u64
+            )));
+        }
+
+        Ok(response)
     }
 
     pub async fn complete_multipart_upload(
