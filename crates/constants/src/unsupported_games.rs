@@ -61,6 +61,7 @@ impl UnsupportedGames {
                     || (game_exe_without_ext.len()
                         >= b.len().saturating_add("epicgamesstore".len())
                         && game_exe_without_ext.is_char_boundary(b.len())
+                        && game_exe_without_ext.is_char_boundary(b.len() + "epicgamesstore".len())
                         && game_exe_without_ext[..b.len()].eq_ignore_ascii_case(b)
                         && game_exe_without_ext[b.len()..b.len() + "epicgamesstore".len()]
                             .eq_ignore_ascii_case("epicgamesstore"))
