@@ -15,7 +15,7 @@ use obws::{
         scenes::SceneId,
     },
 };
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{ERROR_SUCCESS, HWND, SetLastError};
 
 use crate::{
     config::EncoderSettings,
@@ -337,7 +337,8 @@ fn get_obs_window_encoding(hwnd: HWND, game_exe: &str) -> String {
 
     // Get window title
     // Note: GetWindowTextLengthW returns 0 for both empty titles AND on error.
-    // We check GetLastError() to distinguish between these cases.
+    // We clear last error first, then check GetLastError() to distinguish between these cases.
+    unsafe { SetLastError(ERROR_SUCCESS) };
     let title_len = unsafe { GetWindowTextLengthW(hwnd) };
     let mut title = String::new();
     if title_len > 0 {
