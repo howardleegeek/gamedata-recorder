@@ -196,13 +196,18 @@ async fn run_logger<W: OutputWriter>(
         let _ = writeln!(out, "{}", line);
 
         // Flush periodically to ensure data is written
-        if matches!(
+        // Flush on all input events (keyboard, mouse buttons, scroll) for crash durability
+        let should_flush = matches!(
             event,
             Event::KeyPress {
                 press_state: PressState::Pressed,
                 ..
-            }
-        ) {
+            } | Event::MousePress {
+                press_state: PressState::Pressed,
+                ..
+            } | Event::MouseScroll { .. }
+        );
+        if should_flush {
             let _ = out.flush_output();
         }
     }
