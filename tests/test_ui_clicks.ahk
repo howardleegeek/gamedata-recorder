@@ -26,6 +26,10 @@ InitUIVars() {
 
     ;   Account
     logout_button := Array(696, 98)
+    if (logout_button.Length < 2) {
+        MsgBox("logout_button array must have at least 2 elements")
+        ExitApp()
+    }
 
     ;   Keyboard Shortcuts
     hotkey_button := Array(412, 186)
