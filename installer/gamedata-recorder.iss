@@ -92,16 +92,3 @@ begin
     Result := '';
   end;
 end;
-
-// Prevent uninstall if app is running to avoid file-in-use errors during uninstall
-procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-begin
-  if CurUninstallStep = usApps then
-  begin
-    if IsAppRunning() then
-    begin
-      MsgBox('GameData Recorder is running. Please close it before uninstalling.', mbError, MB_OK);
-      Abort;
-    end;
-  end;
-end;
