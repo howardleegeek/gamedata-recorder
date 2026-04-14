@@ -299,6 +299,11 @@ pub fn initialize_thread(
                     };
                     active_guard.devices.remove(&gamepad_id);
                     drop(active_guard);
+
+                    // Also clean up stale metadata to prevent memory growth
+                    if let Ok(mut gamepads_guard) = gamepads.write() {
+                        gamepads_guard.remove(&gamepad_id);
+                    }
                     continue;
                 }
 
