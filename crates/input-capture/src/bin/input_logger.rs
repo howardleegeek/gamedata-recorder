@@ -196,13 +196,13 @@ async fn run_logger<W: OutputWriter>(
         let _ = writeln!(out, "{}", line);
 
         // Flush periodically to ensure data is written
-        if matches!(
+        // Flush on all key/mouse button events (not just key presses) to prevent
+        // data loss during long periods of mouse-only activity or on crash
+        let should_flush = matches!(
             event,
-            Event::KeyPress {
-                press_state: PressState::Pressed,
-                ..
-            }
-        ) {
+            Event::KeyPress { .. } | Event::MousePress { .. } | Event::MouseScroll { .. }
+        );
+        if should_flush {
             let _ = out.flush_output();
         }
     }
