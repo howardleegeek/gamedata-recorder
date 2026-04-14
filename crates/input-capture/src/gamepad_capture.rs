@@ -171,17 +171,36 @@ pub fn initialize_thread(
             while let Some(gilrs_xinput::Event { id, event, .. }) = gilrs.next_event_blocking(None)
             {
                 let gamepad = gilrs.gamepad(id);
+                let gamepad_id = GamepadId::XInput(id.into());
+
+                // Handle disconnection events to clean up stale state
+                if matches!(
+                    event,
+                    gilrs_xinput::EventType::Disconnected | gilrs_xinput::EventType::Dropped
+                ) {
+                    let mut active_guard = match active_gamepads.lock() {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            tracing::error!(
+                                "Active gamepads lock poisoned (xinput), stopping capture: {e}"
+                            );
+                            break;
+                        }
+                    };
+                    active_guard.devices.remove(&gamepad_id);
+                    drop(active_guard);
+                    continue;
+                }
 
                 // Map the event first to ensure we only mark gamepads as captured
                 // if they produce useful events (not Connected/Disconnected/Dropped etc.)
-                let Some(event) = map_event_xinput(GamepadId::XInput(id.into()), event) else {
+                let Some(event) = map_event_xinput(gamepad_id, event) else {
                     continue;
                 };
 
                 // Handle poisoned locks gracefully: if another thread panicked while
                 // holding the lock, log the error and break rather than crashing.
                 let gamepad_name = sanitize_gamepad_name(gamepad.name(), id.into());
-                let gamepad_id = GamepadId::XInput(id.into());
 
                 // Only update metadata and captured set on first encounter to reduce
                 // lock contention - gamepad info rarely changes after connection
