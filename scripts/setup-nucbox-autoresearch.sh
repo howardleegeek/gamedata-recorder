@@ -43,7 +43,9 @@ if [ ! -d gamedata-recorder ]; then
     git clone https://github.com/howardleegeek/gamedata-recorder.git
 fi
 cd gamedata-recorder
-git pull
+if ! git pull 2>/dev/null; then
+    echo "Warning: git pull failed, continuing with local version"
+fi
 
 # 6. Install Rust toolchain (for cargo fmt/clippy on linter side)
 if ! command -v cargo &>/dev/null; then
