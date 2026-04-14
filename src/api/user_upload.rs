@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::Deserialize;
 
-use crate::api::{API_BASE_URL, ApiClient, ApiError, check_for_response_success};
+use crate::api::{check_for_response_success, ApiClient, ApiError, API_BASE_URL};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -55,6 +55,22 @@ pub struct UserUpload {
 }
 
 impl ApiClient {
+    const MAX_USER_ID_LENGTH: usize = 256;
+
+    fn validate_user_id(user_id: &str) -> Result<(), ApiError> {
+        if user_id.is_empty() {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "User ID cannot be empty".into(),
+            ));
+        }
+        if user_id.len() > Self::MAX_USER_ID_LENGTH {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "User ID exceeds maximum length".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn get_user_upload_statistics(
         &self,
         api_key: &str,
@@ -70,6 +86,7 @@ impl ApiClient {
             statistics: UserUploadStatistics,
         }
 
+        Self::validate_user_id(user_id)?;
         let encoded_user_id = utf8_percent_encode(user_id, NON_ALPHANUMERIC).to_string();
         let mut url = format!(
             "{}/tracker/v2/uploads/user/{encoded_user_id}/stats",
@@ -126,6 +143,7 @@ impl ApiClient {
             offset: u32,
         }
 
+        Self::validate_user_id(user_id)?;
         let encoded_user_id = utf8_percent_encode(user_id, NON_ALPHANUMERIC).to_string();
         let mut url = format!(
             "{}/tracker/v2/uploads/user/{encoded_user_id}/list?limit={limit}&offset={offset}",
@@ -166,6 +184,7 @@ impl ApiClient {
         limit: u32,
         offset: u32,
     ) -> Result<UserUploads, ApiError> {
+        Self::validate_user_id(user_id)?;
         let statistics = self
             .get_user_upload_statistics(api_key, user_id, None, None)
             .await?;

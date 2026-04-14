@@ -1,7 +1,7 @@
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 
-use crate::api::{API_BASE_URL, ApiClient, ApiError, check_for_response_success};
+use crate::api::{check_for_response_success, ApiClient, ApiError, API_BASE_URL};
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]
 #[allow(unused)]
@@ -68,6 +68,22 @@ pub struct AbortMultipartUploadResponse {
 }
 
 impl ApiClient {
+    const MAX_UPLOAD_ID_LENGTH: usize = 256;
+
+    fn validate_upload_id(upload_id: &str) -> Result<(), ApiError> {
+        if upload_id.is_empty() {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "Upload ID cannot be empty".into(),
+            ));
+        }
+        if upload_id.len() > Self::MAX_UPLOAD_ID_LENGTH {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "Upload ID exceeds maximum length".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn init_multipart_upload<'a>(
         &self,
         api_key: &str,
@@ -160,6 +176,8 @@ impl ApiClient {
         chunk_number: u64,
         chunk_hash: &str,
     ) -> Result<UploadMultipartChunkResponse, ApiError> {
+        Self::validate_upload_id(upload_id)?;
+
         // Validate chunk_hash format - should be non-empty, reasonable length, and valid hex
         if chunk_hash.is_empty() {
             return Err(ApiError::ApiKeyValidationFailure(
@@ -213,6 +231,8 @@ impl ApiClient {
         upload_id: &str,
         chunk_etags: &[CompleteMultipartUploadChunk],
     ) -> Result<CompleteMultipartUploadResponse, ApiError> {
+        Self::validate_upload_id(upload_id)?;
+
         #[derive(Serialize, Debug)]
         struct CompleteMultipartUploadRequest<'a> {
             upload_id: &'a str,
@@ -247,6 +267,7 @@ impl ApiClient {
         api_key: &str,
         upload_id: &str,
     ) -> Result<AbortMultipartUploadResponse, ApiError> {
+        Self::validate_upload_id(upload_id)?;
         let encoded_upload_id = utf8_percent_encode(upload_id, NON_ALPHANUMERIC).to_string();
         let response = self
             .client
