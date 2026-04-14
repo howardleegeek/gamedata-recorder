@@ -1,7 +1,7 @@
-/// based on https://github.com/kaphula/winit-egui-wgpu-template/blob/master/src/egui_tools.rs
-use egui_wgpu::ScreenDescriptor;
 use egui_wgpu::wgpu;
 use egui_wgpu::wgpu::SurfaceError;
+/// based on https://github.com/kaphula/winit-egui-wgpu-template/blob/master/src/egui_tools.rs
+use egui_wgpu::ScreenDescriptor;
 use egui_winit::State as EguiWinitState;
 use winit::window::Window;
 
@@ -63,7 +63,11 @@ impl WgpuState {
             // if u use AutoNoVsync instead it will fix tearing behaviour when resizing, but at cost of significantly higher CPU usage
             present_mode: wgpu::PresentMode::AutoVsync,
             desired_maximum_frame_latency: 2,
-            alpha_mode: swapchain_capabilities.alpha_modes[0],
+            alpha_mode: swapchain_capabilities
+                .alpha_modes
+                .first()
+                .copied()
+                .unwrap_or(wgpu::CompositeAlphaMode::Auto),
             view_formats: vec![],
         };
 
