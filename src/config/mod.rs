@@ -214,7 +214,7 @@ where
     }
 
     // Reject paths that are whitespace-only (can't be meaningfully used)
-    if path.to_str().map(|s| s.trim().is_empty()).unwrap_or(false) {
+    if path.to_str().map_or(false, |s| s.trim().is_empty()) {
         return Err(Error::custom(
             "Recording location cannot be whitespace-only",
         ));
