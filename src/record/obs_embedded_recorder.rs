@@ -319,6 +319,8 @@ struct RecorderState {
     video_encoders: HashMap<VideoEncoderType, Arc<ObsVideoEncoder>>,
     // Audio encoder (created once upfront, reused always)
     audio_encoder: Arc<ObsAudioEncoder>,
+    /// Handle to the signal monitoring thread for proper cleanup
+    signal_thread_handle: Option<std::thread::JoinHandle<()>>,
 
     // This needs to be last as it needs to be dropped last
     obs_context: ObsContext,
@@ -400,6 +402,7 @@ impl RecorderState {
                 recording_start_time: None,
                 video_encoders: HashMap::new(),
                 audio_encoder,
+                signal_thread_handle: None,
                 obs_context,
             },
             available_encoders,
@@ -492,7 +495,7 @@ impl RecorderState {
 
         // Listen for signals to pass onto the event stream
         self.was_hooked.store(false, Ordering::Relaxed);
-        std::thread::spawn({
+        let signal_thread = std::thread::spawn({
             let event_stream = request.event_stream;
             let was_hooked = self.was_hooked.clone();
 
@@ -559,6 +562,7 @@ impl RecorderState {
                 tracing::info!("Game hook monitoring thread closed");
             }
         });
+        self.signal_thread_handle = Some(signal_thread);
 
         // Update our last encoder settings
         self.last_encoder_settings = video_encoder_settings
@@ -616,6 +620,13 @@ impl RecorderState {
         // exits cleanly even when the recording was never hooked (avoids thread leak).
         if let Some(shutdown_tx) = last_shutdown_tx {
             shutdown_tx.send(()).ok();
+        }
+
+        // Join the signal monitoring thread to ensure proper resource cleanup
+        if let Some(handle) = self.signal_thread_handle.take() {
+            if let Err(e) = handle.join() {
+                tracing::warn!("Signal monitoring thread panicked: {:?}", e);
+            }
         }
 
         if !self.was_hooked.load(Ordering::Relaxed) {
