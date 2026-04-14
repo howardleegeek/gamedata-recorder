@@ -48,10 +48,13 @@ impl FpsLogger {
         let now = std::time::Instant::now();
         let elapsed_seconds = now.duration_since(self.start_instant).as_secs();
 
-        // If we've moved to a new second, finalize the previous one
+        // If we've moved to a new second, finalize all intervening seconds
+        // including empty ones (0 fps) to prevent gaps in the FPS log
         while self.current_second < elapsed_seconds {
             self.finalize_current_second();
             self.current_second += 1;
+            // Clear frame times after finalizing - new second starts empty
+            // (will be populated below if this is the current elapsed second)
             self.current_second_frame_times.clear();
         }
 
@@ -103,9 +106,18 @@ impl FpsLogger {
 
     /// Finalize and write fps_log.json to the session directory.
     pub async fn save(mut self, session_dir: &Path) -> Result<()> {
-        // Finalize any remaining data in the current second
-        if !self.current_second_frame_times.is_empty() {
+        // Calculate total elapsed seconds of the recording
+        let elapsed_seconds = std::time::Instant::now()
+            .duration_since(self.start_instant)
+            .as_secs();
+
+        // Finalize all seconds up to the recording end time, including empty ones.
+        // This ensures seconds with 0 frames (loading screens, game freezes) are
+        // recorded as 0 FPS rather than being omitted from the log.
+        while self.current_second <= elapsed_seconds {
             self.finalize_current_second();
+            self.current_second += 1;
+            self.current_second_frame_times.clear();
         }
 
         let path = session_dir.join(constants::filename::recording::FPS_LOG);
