@@ -3,7 +3,10 @@ use constants::encoding::VideoEncoderType;
 use serde::{Deserialize, Deserializer, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{collections::HashMap, fs, io::Write, path::PathBuf};
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 /// Maximum allowed length for API key to prevent DoS from malicious config files
 const MAX_API_KEY_LENGTH: usize = 2048;
@@ -435,17 +438,37 @@ impl Config {
         // cause us to write to arbitrary locations via predictable paths.
         let temp_filename = format!(".tmp.{}.json", std::process::id());
         let temp_path = config_path.with_file_name(&temp_filename);
-        fs::write(&temp_path, serde_json::to_string_pretty(&self)?)
-            .context("Failed to write temporary config file")?;
 
-        // Ensure data is flushed to disk before renaming to prevent data loss
-        // on system crash or power failure
-        let temp_file =
-            fs::File::open(&temp_path).context("Failed to open temporary file for sync")?;
-        temp_file
-            .sync_all()
-            .context("Failed to sync temporary file to disk")?;
-        drop(temp_file);
+        // Create temp file with restrictive permissions (0o600) on Unix to prevent
+        // other users from reading API keys. On non-Unix, use standard creation.
+        let serialized = serde_json::to_string_pretty(&self)?;
+        #[cfg(unix)]
+        {
+            use std::fs::OpenOptions;
+            let mut temp_file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp_path)
+                .context("Failed to create temporary config file")?;
+            temp_file
+                .write_all(serialized.as_bytes())
+                .context("Failed to write temporary config file")?;
+            temp_file
+                .sync_all()
+                .context("Failed to sync temporary file to disk")?;
+        }
+        #[cfg(not(unix))]
+        {
+            fs::write(&temp_path, serialized).context("Failed to write temporary config file")?;
+            // Ensure data is flushed to disk before renaming to prevent data loss
+            // on system crash or power failure
+            let temp_file =
+                fs::File::open(&temp_path).context("Failed to open temporary file for sync")?;
+            temp_file
+                .sync_all()
+                .context("Failed to sync temporary file to disk")?;
+        }
 
         fs::rename(&temp_path, &config_path)
             .context("Failed to rename temporary config file to final location")?;
