@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use backoff::{future::retry_notify, Error as BackoffError, ExponentialBackoff};
+use backoff::{Error as BackoffError, ExponentialBackoff, future::retry_notify};
 
 use futures::TryStreamExt as _;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
@@ -278,14 +278,15 @@ pub async fn run(
                     let chunk_data = buffer[..chunk_size].to_vec();
 
                     // Offload Hashing to blocking thread
-                    let hash_result = tokio::task::spawn_blocking({
-                        let data = chunk_data.clone();
-                        move || sha256::digest(&data)
+                    // Move chunk_data into closure and return it with hash to avoid cloning large buffer
+                    let hash_result = tokio::task::spawn_blocking(move || {
+                        let hash = sha256::digest(&chunk_data);
+                        (hash, chunk_data)
                     })
                     .await;
 
-                    let chunk_hash = match hash_result {
-                        Ok(hash) => hash,
+                    let (chunk_hash, chunk_data) = match hash_result {
+                        Ok((hash, data)) => (hash, data),
                         Err(join_err) => {
                             return Err(UploadTarError::from(std::io::Error::other(join_err)));
                         }
