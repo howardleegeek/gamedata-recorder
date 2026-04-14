@@ -46,7 +46,7 @@ git pull
 
 # 6. Install Rust toolchain (for cargo fmt/clippy on linter side)
 if ! command -v cargo &>/dev/null; then
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+    curl --proto '=https' --tlsv1.2 -sSfL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
     source "$HOME/.cargo/env"
     rustup component add rustfmt clippy
 fi
