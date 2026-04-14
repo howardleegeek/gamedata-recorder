@@ -89,7 +89,13 @@ fn get_stats(input: &super::ValidationInput) -> MouseStats {
             if timestamp < input.start_time {
                 continue;
             }
-            let frame = ((timestamp - input.start_time) / frame_duration) as i32;
+            let frame_index = (timestamp - input.start_time) / frame_duration;
+            // Prevent i32 overflow: skip events that would exceed valid frame range
+            if frame_index > i32::MAX as f64 {
+                tracing::warn!("Mouse event timestamp too large, exceeds valid frame range");
+                continue;
+            }
+            let frame = frame_index as i32;
             let entry = frame_data.entry(frame).or_default();
             entry.dx += dx as f64;
             entry.dy += dy as f64;
