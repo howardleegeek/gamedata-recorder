@@ -394,7 +394,12 @@ pub async fn run(
             // Check for error from previous stages
             let (chunk_data, upload_url, chunk_number) = match msg {
                 Ok(val) => val,
-                Err(e) => return Err(e),
+                Err(e) => {
+                    // Abort producer and signer tasks to prevent resource leak on error exit
+                    producer_handle.abort();
+                    signer_handle.abort();
+                    return Err(e);
+                }
             };
 
             // Check if upload session is about to expire
@@ -538,6 +543,9 @@ pub async fn run(
                         tracing::error!("Failed to save upload progress on pause: {:?}", e);
                     }
                 }
+                // Abort producer and signer tasks to prevent resource leak on early exit
+                producer_handle.abort();
+                signer_handle.abort();
                 // Disarm by taking the paused recording - keeps server/session state for resume
                 if let Some(paused) = guard.take_paused() {
                     return Ok(UploadTarOutput::Paused(LocalRecording::Paused(paused)));
