@@ -342,25 +342,39 @@ impl KbmCapture {
     ) -> Vec<Event> {
         unsafe {
             let hrawinput = HRAWINPUT(lparam.0 as *mut _);
-            let mut rawinput = RAWINPUT::default();
-            let mut pcbsize = size_of_val(&rawinput) as u32;
-            let header_size = match size_of::<RAWINPUTHEADER>().try_into() {
-                Ok(size) => size,
-                Err(e) => {
-                    tracing::error!("size of RAWINPUTHEADER should fit in u32: {e}");
-                    return Vec::new();
-                }
-            };
+
+            // Query required buffer size first (Windows API best practice)
+            let mut pcbsize = 0u32;
+            let size_result = GetRawInputData(
+                hrawinput,
+                RID_INPUT,
+                None,
+                &mut pcbsize,
+                size_of::<RAWINPUTHEADER>() as u32,
+            );
+            if size_result == u32::MAX || pcbsize == 0 {
+                let err = windows::Win32::Foundation::GetLastError();
+                tracing::warn!("GetRawInputData size query failed: {err:?}");
+                return Vec::new();
+            }
+
+            // Allocate buffer with required size
+            let mut buffer = vec![0u8; pcbsize as usize];
             let result = GetRawInputData(
                 hrawinput,
                 RID_INPUT,
-                Some(&mut rawinput as *mut _ as *mut _),
+                Some(buffer.as_mut_ptr() as *mut _),
                 &mut pcbsize,
-                header_size,
+                size_of::<RAWINPUTHEADER>() as u32,
             );
             if result == u32::MAX {
+                let err = windows::Win32::Foundation::GetLastError();
+                tracing::warn!("GetRawInputData failed to read data: {err:?}");
                 return Vec::new();
             }
+
+            // SAFETY: GetRawInputData succeeded, buffer contains valid RAWINPUT data
+            let rawinput = &*(buffer.as_ptr() as *const RAWINPUT);
 
             match Input::RID_DEVICE_INFO_TYPE(rawinput.header.dwType) {
                 Input::RIM_TYPEMOUSE => {
