@@ -66,7 +66,10 @@ WinMinimize "A"
 if WinExist("ahk_exe OWL Control.exe") {
     InitInputSettings()
     InitUIVars()
-    WinWaitActive("ahk_exe OWL Control.exe", , 5)  ; 5 second timeout to prevent indefinite hang
+    if (!WinWaitActive("ahk_exe OWL Control.exe", , 5)) {  ; 5 second timeout to prevent indefinite hang
+        MsgBox("Failed to activate OWL Control window within 5 seconds")
+        ExitApp()
+    }
     MouseClick "left", reset_position[1], reset_position[2]   ; Resets tabs to top of UI
 
     if (stop_toggle == checked_true) {
