@@ -160,6 +160,23 @@ impl ApiClient {
         chunk_number: u64,
         chunk_hash: &str,
     ) -> Result<UploadMultipartChunkResponse, ApiError> {
+        // Validate chunk_hash format - should be non-empty, reasonable length, and valid hex
+        if chunk_hash.is_empty() {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "Chunk hash cannot be empty".into(),
+            ));
+        }
+        if chunk_hash.len() > 128 {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "Chunk hash exceeds maximum length of 128 characters".into(),
+            ));
+        }
+        if !chunk_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "Chunk hash must contain only hexadecimal characters (0-9, a-f, A-F)".into(),
+            ));
+        }
+
         #[derive(Serialize, Debug)]
         struct UploadMultipartChunkRequest<'a> {
             upload_id: &'a str,
