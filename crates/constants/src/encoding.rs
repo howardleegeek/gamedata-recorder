@@ -128,7 +128,7 @@ pub const HEVC_VIDEO_PROFILE: &str = "main";
 pub const H264_VIDEO_PROFILE: &str = "high";
 
 /// Bitrate (kbps) — buyer spec: 8-12 Mbps for 1080p30 HEVC
-pub const BITRATE: i64 = 10_000;
+pub const BITRATE: u64 = 10_000;
 
 /// Rate control
 pub const RATE_CONTROL: &str = "CBR";
