@@ -84,6 +84,8 @@ end;
 // Prevent install/upgrade if app is already running to avoid file-in-use errors
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
+  // Initialize to False - no restart needed for this check
+  NeedsRestart := False;
   if IsAppRunning() then
   begin
     Result := 'GameData Recorder is running. Please close it before installing.';
