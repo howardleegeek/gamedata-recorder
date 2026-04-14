@@ -334,21 +334,36 @@ impl KbmCapture {
     ) -> Vec<Event> {
         unsafe {
             let hrawinput = HRAWINPUT(lparam.0 as *mut _);
-            let mut rawinput = RAWINPUT::default();
-            let mut pcbsize = size_of_val(&rawinput) as u32;
-            let result = GetRawInputData(
-                hrawinput,
-                RID_INPUT,
-                Some(&mut rawinput as *mut _ as *mut _),
-                &mut pcbsize,
-                size_of::<RAWINPUTHEADER>()
-                    .try_into()
-                    .expect("size of HRAWINPUT should fit in u32"),
-            );
-            if result == u32::MAX {
+
+            // Get required buffer size first - RAWINPUT is variable-length
+            let mut pcbsize = 0u32;
+            let header_size = size_of::<RAWINPUTHEADER>()
+                .try_into()
+                .expect("size of HRAWINPUT should fit in u32");
+
+            if GetRawInputData(hrawinput, RID_INPUT, None, &mut pcbsize, header_size) == u32::MAX {
                 return Vec::new();
             }
 
+            if pcbsize == 0 {
+                return Vec::new();
+            }
+
+            // Allocate properly sized buffer - RAWINPUT data size varies by device type
+            let mut buffer: Vec<u8> = vec![0; pcbsize as usize];
+            let result = GetRawInputData(
+                hrawinput,
+                RID_INPUT,
+                Some(buffer.as_mut_ptr() as *mut _),
+                &mut pcbsize,
+                header_size,
+            );
+            if result == u32::MAX || result == 0 {
+                return Vec::new();
+            }
+
+            // SAFETY: buffer is sized correctly per GetRawInputData query
+            let rawinput = &*(buffer.as_ptr() as *const RAWINPUT);
             match Input::RID_DEVICE_INFO_TYPE(rawinput.header.dwType) {
                 Input::RIM_TYPEMOUSE => {
                     let mut events = Vec::new();
