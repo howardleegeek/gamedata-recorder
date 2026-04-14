@@ -193,10 +193,18 @@ impl HighPrecisionTimer {
     /// Useful for detecting timing anomalies.
     #[cfg(target_os = "windows")]
     pub fn time_drift_ms(&self) -> i32 {
-        let current_msg_time = unsafe { GetMessageTime() };
+        // Capture both timestamps atomically to prevent measurement jitter
+        let mut current_qpc = 0i64;
+        let current_msg_time = unsafe {
+            // Query QPC first, then GetMessageTime immediately after
+            // to minimize time delta between the two measurements
+            let _ = QueryPerformanceCounter(&mut current_qpc);
+            GetMessageTime()
+        };
         // Use i64 for calculation to prevent overflow when elapsed_ms exceeds i32::MAX (~24.8 days)
-        let elapsed = self.elapsed_ms() as i64;
-        let expected_msg_time = self.msg_time_offset_ms as i64 + elapsed;
+        let elapsed_ticks = current_qpc - self.start_counter;
+        let elapsed_ms = ((elapsed_ticks as u128 * 1000) / self.frequency as u128) as i64;
+        let expected_msg_time = self.msg_time_offset_ms as i64 + elapsed_ms;
         let drift = current_msg_time as i64 - expected_msg_time;
         // Clamp to i32 range to avoid overflow on return
         drift.clamp(i32::MIN as i64, i32::MAX as i64) as i32
