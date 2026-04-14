@@ -162,6 +162,15 @@ impl ApiClient {
         // Validate filename to prevent path traversal and invalid names
         Self::validate_filename(args.filename)?;
 
+        // Validate video_duration_seconds if provided to prevent invalid data
+        if let Some(duration) = args.video_duration_seconds {
+            if duration.is_nan() || duration.is_infinite() || duration < 0.0 {
+                return Err(ApiError::ApiKeyValidationFailure(
+                    "Video duration must be a finite non-negative number".into(),
+                ));
+            }
+        }
+
         // Store timestamp in a variable to prevent dangling reference
         let timestamp = chrono::Local::now().to_rfc3339();
         let response = self
