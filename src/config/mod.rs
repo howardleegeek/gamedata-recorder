@@ -263,12 +263,17 @@ where
 
 /// Validates hotkey string length to prevent DoS from malicious config files with
 /// extremely large strings that could cause memory exhaustion.
+/// Also rejects empty strings since they cannot function as hotkeys.
 fn validate_hotkey_length<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,
 {
     use serde::de::Error;
     let key = String::deserialize(deserializer)?;
+
+    if key.is_empty() {
+        return Err(Error::custom("Hotkey cannot be empty"));
+    }
 
     if key.len() > MAX_HOTKEY_LENGTH {
         return Err(Error::custom(format!(
