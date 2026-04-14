@@ -501,11 +501,16 @@ impl KbmCapture {
                         PressState::Pressed
                     };
                     if press_state == PressState::Pressed {
-                        self.active_keys().keyboard.insert(key);
+                        // Only emit event if key wasn't already pressed (filters autorepeat)
+                        if self.active_keys().keyboard.insert(key) {
+                            vec![Event::KeyPress { key, press_state }]
+                        } else {
+                            vec![] // Key was already pressed (autorepeat), don't record duplicate
+                        }
                     } else {
                         self.active_keys().keyboard.remove(&key);
+                        vec![Event::KeyPress { key, press_state }]
                     }
-                    vec![Event::KeyPress { key, press_state }]
                 }
                 _ => vec![],
             }
