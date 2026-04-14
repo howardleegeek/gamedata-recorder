@@ -33,6 +33,15 @@ pub struct ValidationResult {
 
 /// Validates the given recording folder, creating a [`constants::filename::recording::INVALID`] file if validation fails.
 pub fn validate_folder(path: &Path) -> eyre::Result<ValidationResult> {
+    // Validate path to prevent directory traversal attacks
+    // Reject paths that contain components which could escape the intended directory
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        eyre::bail!("Invalid path: contains parent directory references");
+    }
+
     match validate_folder_impl(path) {
         Ok(result) => Ok(result),
         Err(e) => {
