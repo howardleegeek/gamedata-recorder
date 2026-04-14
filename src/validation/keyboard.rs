@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{output_types::InputEventType, system::keycode::name_to_virtual_keycode};
 use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct KeyboardOutputStats {
     wasd_apm: f64,
     unique_keys: u64,
@@ -23,6 +23,16 @@ impl From<KeyboardStats> for KeyboardOutputStats {
 
 pub(super) fn validate(input: &super::ValidationInput) -> (KeyboardOutputStats, Vec<String>) {
     let mut invalid_reasons = vec![];
+
+    // Validate duration is positive and finite to prevent invalid APM calculations
+    if input.duration_minutes <= 0.0 || !input.duration_minutes.is_finite() {
+        invalid_reasons.push(format!(
+            "Keyboard validation failed: invalid duration {}",
+            input.duration_minutes
+        ));
+        return (KeyboardOutputStats::default(), invalid_reasons);
+    }
+
     let stats = get_stats(input);
 
     // Validate stats are finite before comparison to prevent NaN from bypassing checks
