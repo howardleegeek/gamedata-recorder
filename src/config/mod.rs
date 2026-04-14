@@ -450,6 +450,12 @@ impl Config {
         // Create temp file with restrictive permissions (0o600) on Unix to prevent
         // other users from reading API keys. On non-Unix, use standard creation.
         let serialized = serde_json::to_string_pretty(&self)?;
+        // Remove stale temp file if it exists from a previous crashed run.
+        // On Unix, create_new(true) would fail if the file already exists.
+        if temp_path.exists() {
+            let _ = fs::remove_file(&temp_path);
+        }
+
         #[cfg(unix)]
         {
             use std::fs::OpenOptions;
@@ -478,8 +484,11 @@ impl Config {
                 .context("Failed to sync temporary file to disk")?;
         }
 
-        fs::rename(&temp_path, &config_path)
-            .context("Failed to rename temporary config file to final location")?;
+        if let Err(e) = fs::rename(&temp_path, &config_path) {
+            // Clean up temp file on rename failure to prevent stale file accumulation
+            let _ = fs::remove_file(&temp_path);
+            return Err(e).context("Failed to rename temporary config file to final location")?;
+        }
 
         // Sync the parent directory to ensure the rename operation is persisted.
         // Without this, a crash immediately after rename could lose the file
