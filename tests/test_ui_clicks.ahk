@@ -95,7 +95,12 @@ if WinExist("ahk_exe OWL Control.exe") {
             MsgBox("Calculated Y coordinate out of bounds: " . y)
             ExitApp()
         }
-        MouseClick "left", stop_button[1], y
+        x := stop_button[1]
+        if (x < 0 || x > 1920) {
+            MsgBox("Calculated X coordinate out of bounds: " . x)
+            ExitApp()
+        }
+        MouseClick "left", x, y
     }
 
     if (collapse_toggled == collapse_true)
@@ -111,6 +116,11 @@ if WinExist("ahk_exe OWL Control.exe") {
             MsgBox("Button coordinates array must have at least 2 elements")
             ExitApp()
         }
+        x := coords[1]
+        if (x < 0 || x > 1920) {
+            MsgBox("Calculated X coordinate out of bounds: " . x)
+            ExitApp()
+        }
         if (coords.Length = 3) {
             repeat := coords[3]
             if (repeat < 1 || repeat > 100) {
@@ -118,13 +128,18 @@ if WinExist("ahk_exe OWL Control.exe") {
                 ExitApp()
             }
             loop repeat {
-                MouseClick "left", coords[1], coords[2]
+                y := coords[2]
+                if (y < 0 || y > 1200) {
+                    MsgBox("Calculated Y coordinate out of bounds in loop: " . y)
+                    ExitApp()
+                }
+                MouseClick "left", x, y
                 y := (coords[2] + (A_Index) * option_offset) - collapse_offset
                 if (y < 0 || y > 1200) {
                     MsgBox("Calculated Y coordinate out of bounds in loop: " . y)
                     ExitApp()
                 }
-                MouseClick "left", coords[1], y
+                MouseClick "left", x, y
             }
         } else {
             y := coords[2] - collapse_offset
@@ -132,7 +147,7 @@ if WinExist("ahk_exe OWL Control.exe") {
                 MsgBox("Calculated Y coordinate out of bounds: " . y)
                 ExitApp()
             }
-            MouseClick "left", coords[1], y
+            MouseClick "left", x, y
         }
     }
 } else {
