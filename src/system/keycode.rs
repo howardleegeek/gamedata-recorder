@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::LazyLock};
+use std::sync::LazyLock;
 
 // https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes
 //
@@ -167,13 +167,11 @@ pub(crate) fn virtual_keycode_to_name(keycode: u16) -> Option<&'static str> {
     VIRTUAL_KEYCODE_TO_NAME.get(&keycode).copied()
 }
 
-static NAME_TO_VIRTUAL_KEYCODE: LazyLock<HashMap<String, u16>> = LazyLock::new(|| {
+pub(crate) fn name_to_virtual_keycode(key: &str) -> Option<u16> {
+    // Avoid allocation by doing case-insensitive comparison directly.
+    // All key names are ASCII, so we can use eq_ignore_ascii_case.
     VIRTUAL_KEYCODE_TO_NAME_ARRAY
         .iter()
-        .map(|(code, key)| (key.to_lowercase(), *code))
-        .collect()
-});
-
-pub(crate) fn name_to_virtual_keycode(key: &str) -> Option<u16> {
-    NAME_TO_VIRTUAL_KEYCODE.get(&key.to_lowercase()).copied()
+        .find(|(_, name)| name.eq_ignore_ascii_case(key))
+        .map(|(code, _)| *code)
 }
