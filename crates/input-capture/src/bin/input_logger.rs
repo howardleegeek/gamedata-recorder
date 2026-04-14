@@ -11,7 +11,7 @@
 
 use std::io::Write;
 
-use input_capture::{timestamp::HighPrecisionTimer, vkey_names::vkey_to_name, Event, PressState};
+use input_capture::{Event, PressState, timestamp::HighPrecisionTimer, vkey_names::vkey_to_name};
 
 #[derive(Debug)]
 struct Args {
@@ -285,9 +285,9 @@ fn format_event(t: &str, event: &Event) -> String {
             let btn = match key {
                 1 => "LEFT",
                 2 => "RIGHT",
-                3 => "MIDDLE",
-                4 => "X1",
-                5 => "X2",
+                4 => "MIDDLE",
+                5 => "X1",
+                6 => "X2",
                 _ => "?",
             };
             format!("{}  MOUSE_BTN    {} {}", t, btn, state)
