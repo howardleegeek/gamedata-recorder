@@ -92,7 +92,7 @@ if WinExist("ahk_exe OWL Control.exe") {
             }
         } else {
             y := coords[2] - collapse_offset
-            MouseClick "left", coords[1], coords[2]
+            MouseClick "left", coords[1], y
         }
     }
 }
