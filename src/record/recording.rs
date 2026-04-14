@@ -7,6 +7,7 @@ use color_eyre::{Result, eyre::ContextCompat};
 use egui_wgpu::wgpu;
 use game_process::{Pid, windows::Win32::Foundation::HWND};
 use input_capture::InputCapture;
+use tokio::io::AsyncWriteExt as _;
 
 use crate::{
     config::{EncoderSettings, GameConfig},
@@ -219,15 +220,21 @@ impl Recording {
 
         if let Err(e) = result {
             tracing::error!("Error while stopping recording, invalidating recording: {e}");
-            // Best-effort write — may fail on disk full, which is acceptable
-            if let Err(write_err) = tokio::fs::write(
-                self.recording_location
-                    .join(constants::filename::recording::INVALID),
-                e.to_string(),
-            )
-            .await
-            {
-                tracing::error!("Failed to write INVALID marker (disk full?): {write_err}");
+            // Write INVALID marker with crash durability (sync to disk)
+            let invalid_path = self
+                .recording_location
+                .join(constants::filename::recording::INVALID);
+            match tokio::fs::File::create(&invalid_path).await {
+                Ok(mut file) => {
+                    if let Err(write_err) = file.write_all(e.to_string().as_bytes()).await {
+                        tracing::error!("Failed to write INVALID marker (disk full?): {write_err}");
+                    } else if let Err(sync_err) = file.sync_all().await {
+                        tracing::error!("Failed to sync INVALID marker: {sync_err}");
+                    }
+                }
+                Err(create_err) => {
+                    tracing::error!("Failed to create INVALID marker file: {create_err}");
+                }
             }
             return Ok(());
         }
