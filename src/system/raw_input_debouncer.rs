@@ -87,16 +87,20 @@ impl<K: Eq + Hash> AnalogDebouncer<K> {
     /// Returns whether or not a sufficient amount of time has passed since the last change.
     pub(crate) fn debounce(&mut self, key: K) -> bool {
         let now = std::time::Instant::now();
-        let Some(last_change) = self.last_change.get(&key) else {
-            self.last_change.insert(key, now);
-            return true;
-        };
-
-        if now - *last_change > Duration::from_micros(MAX_ANALOGUE_SAMPLING_MICROSECONDS) {
-            self.last_change.insert(key, now);
-            true
-        } else {
-            false
+        use std::collections::hash_map::Entry;
+        match self.last_change.entry(key) {
+            Entry::Occupied(mut entry) => {
+                if now - *entry.get() > Duration::from_micros(MAX_ANALOGUE_SAMPLING_MICROSECONDS) {
+                    entry.insert(now);
+                    true
+                } else {
+                    false
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(now);
+                true
+            }
         }
     }
 }
