@@ -103,7 +103,9 @@ impl<K: Eq + Hash> AnalogDebouncer<K> {
         use std::collections::hash_map::Entry;
         match self.last_change.entry(key) {
             Entry::Occupied(mut entry) => {
-                if now - *entry.get() > Duration::from_micros(MAX_ANALOGUE_SAMPLING_MICROSECONDS) {
+                if now.saturating_duration_since(*entry.get())
+                    > Duration::from_micros(MAX_ANALOGUE_SAMPLING_MICROSECONDS)
+                {
                     entry.insert(now);
                     true
                 } else {
