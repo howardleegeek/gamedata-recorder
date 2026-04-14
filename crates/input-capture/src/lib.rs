@@ -132,14 +132,18 @@ impl InputCapture {
         let active_keys = match self.active_keys.lock() {
             Ok(guard) => guard,
             Err(e) => {
-                tracing::error!("ActiveKeys mutex poisoned, returning empty keyboard/mouse state: {e}");
+                tracing::error!(
+                    "ActiveKeys mutex poisoned, returning empty keyboard/mouse state: {e}"
+                );
                 return ActiveInput::default();
             }
         };
         let active_gamepad = match self.active_gamepad.lock() {
             Ok(guard) => guard,
             Err(e) => {
-                tracing::error!("ActiveGamepads mutex poisoned, returning empty gamepad state: {e}");
+                tracing::error!(
+                    "ActiveGamepads mutex poisoned, returning empty gamepad state: {e}"
+                );
                 return ActiveInput {
                     keyboard: active_keys.keyboard.clone(),
                     mouse: active_keys.mouse.clone(),
@@ -163,5 +167,13 @@ impl InputCapture {
                 HashMap::new()
             }
         }
+    }
+}
+
+impl Drop for InputCapture {
+    fn drop(&mut self) {
+        // Signal gamepad threads to shut down gracefully
+        tracing::debug!("InputCapture dropping, signaling gamepad threads to shutdown");
+        self._gamepad_threads.shutdown();
     }
 }
