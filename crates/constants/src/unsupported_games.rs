@@ -1,7 +1,8 @@
-use std::fmt;
+use core::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// Reason why a game is not supported for recording
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnsupportedReason {
     EnoughData,
@@ -21,6 +22,7 @@ impl fmt::Display for UnsupportedReason {
     }
 }
 
+/// A game that is not supported for recording with the reason
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct UnsupportedGame {
     pub name: String,
@@ -28,43 +30,89 @@ pub struct UnsupportedGame {
     pub reason: UnsupportedReason,
 }
 
+/// Collection of unsupported games with lookup functionality
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsupportedGames {
     pub games: Vec<UnsupportedGame>,
 }
 
+/// Maximum JSON input size for unsupported games list (10MB)
+const MAX_GAMES_JSON_SIZE: usize = 10 * 1024 * 1024;
+
 impl UnsupportedGames {
     pub fn load_from_str(s: &str) -> serde_json::Result<Self> {
+        if s.len() > MAX_GAMES_JSON_SIZE {
+            return Err(serde::de::Error::custom(
+                "Input exceeds maximum allowed size for games JSON",
+            ));
+        }
         let games: Vec<UnsupportedGame> = serde_json::from_str(s)?;
         Ok(Self { games })
     }
 
     /// Do not use this unless you're sure you don't need a more up-to-date version.
     pub fn load_from_embedded() -> Self {
-        Self::load_from_str(include_str!("unsupported_games.json"))
-            .expect("Failed to load unsupported games from embedded data")
+        Self::load_from_str(include_str!("unsupported_games.json")).unwrap_or_else(|e| {
+            tracing::error!("Failed to parse embedded unsupported games: {}", e);
+            Self { games: vec![] }
+        })
     }
 
     pub fn get(&self, game_exe_without_ext: &str) -> Option<&UnsupportedGame> {
-        let game_exe_without_ext = game_exe_without_ext.to_lowercase();
         self.games.iter().find(|g| {
             g.binaries.iter().any(|b| {
-                let b_lower = b.to_lowercase();
-                // Exact match or exe has a suffix (e.g., _dx12, -win64-shipping), or epic games store variant
-                game_exe_without_ext == b_lower
-                    || game_exe_without_ext.starts_with(&format!("{b_lower}_"))
-                    || game_exe_without_ext.starts_with(&format!("{b_lower}-"))
-                    || game_exe_without_ext.starts_with(&format!("{b_lower}epicgamesstore"))
+                // Case-insensitive comparison without allocation
+                game_exe_without_ext.eq_ignore_ascii_case(b)
+                    || (game_exe_without_ext.len() > b.len()
+                        && game_exe_without_ext.is_char_boundary(b.len())
+                        && game_exe_without_ext
+                            .get(..b.len())
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b))
+                        && game_exe_without_ext
+                            .get(b.len()..)
+                            .is_some_and(|suffix| suffix.starts_with('_')))
+                    || (game_exe_without_ext.len() > b.len()
+                        && game_exe_without_ext.is_char_boundary(b.len())
+                        && game_exe_without_ext
+                            .get(..b.len())
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b))
+                        && game_exe_without_ext
+                            .get(b.len()..)
+                            .is_some_and(|suffix| suffix.starts_with('-')))
+                    || (game_exe_without_ext.len()
+                        == b.len().saturating_add("epicgamesstore".len())
+                        && game_exe_without_ext.is_char_boundary(b.len())
+                        && game_exe_without_ext
+                            .is_char_boundary(b.len().saturating_add("epicgamesstore".len()))
+                        && game_exe_without_ext
+                            .get(..b.len())
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b))
+                        && game_exe_without_ext
+                            .get(b.len()..)
+                            .is_some_and(|suffix| suffix.eq_ignore_ascii_case("epicgamesstore")))
             })
         })
     }
 }
 
+/// A detected installed Steam game with its metadata
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstalledGame {
     pub name: String,
     pub steam_app_id: u32,
 }
 
+/// Maximum number of installed games to detect (prevents memory exhaustion from huge libraries)
+const MAX_INSTALLED_GAMES: usize = 10_000;
+
+/// Maximum length for a game name (prevents memory exhaustion from malicious/broken app names)
+const MAX_GAME_NAME_LEN: usize = 1024;
+
+/// Detect installed Steam games on the system
+///
+/// Returns a vector of detected games with limits applied:
+/// - Maximum of 10,000 games (prevents memory exhaustion)
+/// - Game names limited to 1024 characters
 pub fn detect_installed_games() -> Vec<InstalledGame> {
     let Ok(steam_dir) = steamlocate::SteamDir::locate() else {
         tracing::warn!("Steam installation not found");
@@ -84,14 +132,31 @@ pub fn detect_installed_games() -> Vec<InstalledGame> {
         };
         for app in library.apps() {
             let Ok(app) = app else {
-                tracing::warn!("Failed to read app");
+                tracing::warn!("Failed to read Steam app from library");
                 continue;
             };
-            if let Some(name) = &app.name {
+            if installed.len() >= MAX_INSTALLED_GAMES {
+                tracing::warn!(
+                    "Reached maximum limit of {} installed games, stopping detection",
+                    MAX_INSTALLED_GAMES
+                );
+                return installed;
+            }
+            if let Some(name) = app.name {
+                if name.len() > MAX_GAME_NAME_LEN {
+                    tracing::warn!(
+                        app_id = app.app_id,
+                        name_len = name.len(),
+                        "Skipping Steam app with excessively long name"
+                    );
+                    continue;
+                }
                 installed.push(InstalledGame {
-                    name: name.clone(),
+                    name,
                     steam_app_id: app.app_id,
                 });
+            } else {
+                tracing::debug!(app_id = app.app_id, "Skipping Steam app with missing name");
             }
         }
     }

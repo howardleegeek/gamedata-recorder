@@ -147,9 +147,9 @@ impl KbmCapture {
                     break; // WM_QUIT received
                 }
                 if result.0 == -1 {
-                    // Log error but continue - don't stop capture on transient Windows errors
-                    tracing::error!("GetMessageA failed, continuing capture");
-                    continue;
+                    use windows::Win32::Foundation::GetLastError;
+                    let error = GetLastError();
+                    bail!("GetMessageA failed: {error:?}");
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageA(&msg);
@@ -363,22 +363,16 @@ impl KbmCapture {
                 }
             };
 
-            // Query required buffer size first - critical for HID devices with variable data
+            // Query required buffer size first - some devices send larger data
             let mut pcbsize: u32 = 0;
             let size_result =
                 GetRawInputData(hrawinput, RID_INPUT, None, &mut pcbsize, header_size);
-            if size_result == u32::MAX || pcbsize == 0 {
-                use windows::Win32::Foundation::GetLastError;
-                let error = GetLastError();
-                tracing::warn!(
-                    "GetRawInputData size query failed: {:?}, dropping input event",
-                    error
-                );
+            if size_result == u32::MAX {
                 return Vec::new();
             }
 
-            // Allocate buffer of required size and fetch data
-            let mut buffer = vec![0u8; pcbsize as usize];
+            // Allocate buffer with required size (handles oversized input data)
+            let mut buffer: Vec<u8> = vec![0; pcbsize as usize];
             let result = GetRawInputData(
                 hrawinput,
                 RID_INPUT,
@@ -393,11 +387,7 @@ impl KbmCapture {
                 return Vec::new();
             }
 
-            // SAFETY: We trust the RAWINPUT data from Windows. The buffer is sized correctly
-            // from the first call. Union field access is required because RAWINPUT.data is a
-            // union of mouse/keyboard/hid. The dwType field tells us which union variant is valid.
             let rawinput = &*(buffer.as_ptr() as *const RAWINPUT);
-
             match Input::RID_DEVICE_INFO_TYPE(rawinput.header.dwType) {
                 Input::RIM_TYPEMOUSE => {
                     let mut events = Vec::new();
@@ -526,11 +516,16 @@ impl KbmCapture {
                         PressState::Pressed
                     };
                     if press_state == PressState::Pressed {
-                        self.active_keys().keyboard.insert(key);
+                        // Only emit event if key wasn't already pressed (filters autorepeat)
+                        if self.active_keys().keyboard.insert(key) {
+                            vec![Event::KeyPress { key, press_state }]
+                        } else {
+                            vec![] // Key was already pressed (autorepeat), don't record duplicate
+                        }
                     } else {
                         self.active_keys().keyboard.remove(&key);
+                        vec![Event::KeyPress { key, press_state }]
                     }
-                    vec![Event::KeyPress { key, press_state }]
                 }
                 _ => vec![],
             }

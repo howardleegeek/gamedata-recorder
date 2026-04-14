@@ -1,4 +1,4 @@
-use std::time::Duration;
+use core::time::Duration;
 
 pub mod encoding;
 pub mod unsupported_games;
@@ -255,7 +255,6 @@ pub const GAME_WHITELIST: &[&str] = &[
     "helldivers2",
     // Wuthering Waves
     "wutheringwaves",
-    "client-win64-shipping",
     // Black Myth: Wukong
     "b1-win64-shipping",
     // Grand Theft Auto: San Andreas
@@ -361,9 +360,9 @@ pub mod filename {
 
 // This may not be necessary in a future Rust: <https://github.com/rust-lang/rust/issues/120301>
 const fn duration_from_mins(minutes: u64) -> Duration {
-    Duration::from_secs(minutes * 60)
+    Duration::from_secs(minutes.saturating_mul(60))
 }
 
 const fn duration_from_hours(hours: u64) -> Duration {
-    duration_from_mins(hours * 60)
+    duration_from_mins(hours.saturating_mul(60))
 }
