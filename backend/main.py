@@ -386,7 +386,7 @@ class UploadInitRequest(BaseModel):
 
     filename: str = Field(..., max_length=255)
     total_size_bytes: int = Field(..., gt=0)
-    chunk_size_bytes: Optional[int] = Field(33554432, gt=0)
+    chunk_size_bytes: Optional[int] = Field(33554432, gt=0, le=1073741824)  # Max 1GB per chunk
     game_exe: Optional[str] = Field(None, max_length=255)
     video_duration_seconds: Optional[float] = Field(None, ge=0)
     video_width: Optional[int] = Field(None, ge=0)
