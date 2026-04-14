@@ -44,9 +44,7 @@ impl VideoEncoderType {
     pub fn is_hevc(&self) -> bool {
         matches!(
             self,
-            VideoEncoderType::NvEncHevc
-                | VideoEncoderType::AmfHevc
-                | VideoEncoderType::QsvHevc
+            VideoEncoderType::NvEncHevc | VideoEncoderType::AmfHevc | VideoEncoderType::QsvHevc
         )
     }
 
@@ -101,5 +99,3 @@ pub const PSYCHO_AQ: bool = true;
 
 /// Lookahead
 pub const LOOKAHEAD: bool = true;
-
-pub const VIDEO_PROFILE: &str = "high";
