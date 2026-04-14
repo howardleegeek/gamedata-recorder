@@ -95,6 +95,12 @@ InitUIVars() {
         MsgBox("location_button Y coordinate out of bounds: " . location_button[2])
         ExitApp()
     }
+    if (location_button.Length >= 3) {
+        if (location_button[3] < 1 || location_button[3] > 100) {
+            MsgBox("location_button option count out of bounds: " . location_button[3])
+            ExitApp()
+        }
+    }
     opacity_button := Array(702, 353)
     if (opacity_button.Length < 2) {
         MsgBox("opacity_button array must have at least 2 elements")
