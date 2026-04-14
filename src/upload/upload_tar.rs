@@ -242,11 +242,12 @@ pub async fn run(
                 }
 
                 // Validate chunk size to prevent memory exhaustion from malicious server responses
-                if chunk_size_bytes > MAX_CHUNK_SIZE_BYTES {
+                // and ensure chunk_size_bytes > 0 for correct resume position calculation
+                if chunk_size_bytes == 0 || chunk_size_bytes > MAX_CHUNK_SIZE_BYTES {
                     return Err(UploadTarError::Io(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!(
-                            "Chunk size {} exceeds maximum allowed {} bytes",
+                            "Invalid chunk size {} (must be > 0 and <= {} bytes)",
                             chunk_size_bytes, MAX_CHUNK_SIZE_BYTES
                         ),
                     )));
