@@ -57,7 +57,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 ; Launch after install
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser; WorkingDir: "{app}"
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser; WorkingDir: "{app}"; Check: FileExists(ExpandConstant('{app}\{#MyAppExeName}'))
 
 [UninstallRun]
 ; Graceful shutdown attempt first (no /F flag) - wait up to 5 seconds
