@@ -69,6 +69,10 @@ impl<K: Eq + Hash> KeyDebouncer<K> {
     }
 }
 
+/// Maximum time between analog input samples, computed at compile time to avoid
+/// recalculating on every debounce call.
+const MAX_ANALOGUE_SAMPLING_MICROSECONDS: u64 = (1_000_000.0 / (FPS as f32 * 2.0)) as u64;
+
 struct AnalogDebouncer<K: Eq + Hash> {
     last_change: HashMap<K, std::time::Instant>,
 }
@@ -82,8 +86,6 @@ impl<K: Eq + Hash> Default for AnalogDebouncer<K> {
 impl<K: Eq + Hash> AnalogDebouncer<K> {
     /// Returns whether or not a sufficient amount of time has passed since the last change.
     pub(crate) fn debounce(&mut self, key: K) -> bool {
-        const MAX_ANALOGUE_SAMPLING_MICROSECONDS: u64 = (1_000_000.0 / (FPS as f32 * 2.0)) as u64;
-
         let now = std::time::Instant::now();
         let Some(last_change) = self.last_change.get(&key) else {
             self.last_change.insert(key, now);
