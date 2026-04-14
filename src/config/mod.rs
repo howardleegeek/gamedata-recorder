@@ -430,8 +430,11 @@ impl Config {
         tracing::info!("Saving configs to {}", config_path.to_string_lossy());
 
         // Write to a temporary file first, then rename atomically to avoid corruption
-        // if the process crashes or system loses power during the write
-        let temp_path = config_path.with_extension("tmp");
+        // if the process crashes or system loses power during the write.
+        // Use a randomized temp filename to prevent symlink attacks that could
+        // cause us to write to arbitrary locations via predictable paths.
+        let temp_filename = format!(".tmp.{}.json", std::process::id());
+        let temp_path = config_path.with_file_name(&temp_filename);
         fs::write(&temp_path, serde_json::to_string_pretty(&self)?)
             .context("Failed to write temporary config file")?;
 
