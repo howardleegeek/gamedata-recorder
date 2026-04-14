@@ -403,7 +403,8 @@ if WinExist("ahk_exe OWL Control.exe") {
             MouseClick "left", x, y
         }
     }
-    WinMinimize "A"  ; Minimize window after all UI operations complete
+    if WinExist("ahk_exe OWL Control.exe")
+        WinMinimize "A"  ; Minimize window after all UI operations complete
 } else {
     MsgBox("OWL Control.exe window not found - ensure application is running")
     ExitApp()
