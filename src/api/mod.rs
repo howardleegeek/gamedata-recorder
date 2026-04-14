@@ -154,7 +154,18 @@ async fn check_for_response_success(
 
     let status = response.status();
     if !status.is_success() {
-        let text = response.text().await?;
+        // Read response body, but don't fail immediately if that fails - preserve the HTTP status
+        let text = match response.text().await {
+            Ok(body) => body,
+            Err(e) => {
+                tracing::error!("API error (HTTP {status}) and failed to read response body: {e}");
+                return Err(ApiError::ApiFailure {
+                    context: context.into(),
+                    error: format!("HTTP {status}, failed to read response body: {e}"),
+                    status: Some(status),
+                });
+            }
+        };
         tracing::error!("API error response (HTTP {status}): {text}");
 
         // if 502 this will return None, then APIError must fallback to using just the text
