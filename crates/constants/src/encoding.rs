@@ -134,7 +134,7 @@ pub const BITRATE: u64 = 10_000;
 pub const RATE_CONTROL: &str = "CBR";
 
 /// B-frames
-pub const B_FRAMES: i64 = 2;
+pub const B_FRAMES: u64 = 2;
 
 /// Psycho AQ
 pub const PSYCHO_AQ: bool = true;
