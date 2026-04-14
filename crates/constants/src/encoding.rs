@@ -67,8 +67,10 @@ impl VideoEncoderType {
 /// https://github.com/obsproject/obs-studio/blob/5ec3af3f6d6465122dc2b0abff9661cbe64b406b/plugins/obs-x264/obs-x264.c
 pub const X264_PRESETS: &[&str] = &["fast", "faster", "veryfast"];
 
-/// https://github.com/obsproject/obs-studio/blob/5ec3af3f6d6465122dc2b0abff9661cbe64b406b/plugins/obs-x264/obs-x264.c#L213-L221
+/// x264 tune options — control tradeoffs for specific types of source material
+/// https://github.com/obsproject/obs-studio/blob/5ec3af3f6d6465122dc2b0abff9661cbe64b406b/plugins/obs-x264/obs-x264.c#L233-L248
 pub const X264_TUNE_OPTIONS: &[&str] = &[
+    "", // empty/default
     "film",
     "animation",
     "grain",

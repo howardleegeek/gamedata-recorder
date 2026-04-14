@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, RwLock},
+    sync::{atomic::Ordering, Arc, AtomicBool, Mutex, RwLock},
+    time::Duration,
 };
 
 use tokio::sync::mpsc;
@@ -124,6 +125,15 @@ pub struct GamepadMetadata {
 pub struct GamepadThreads {
     _xinput_thread: std::thread::JoinHandle<()>,
     _wgi_thread: std::thread::JoinHandle<()>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl GamepadThreads {
+    /// Signal the gamepad capture threads to shut down gracefully.
+    /// This sets an atomic flag that the threads check between event polling.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
 }
 
 pub fn initialize_thread(
@@ -131,10 +141,11 @@ pub fn initialize_thread(
     active_gamepads: Arc<Mutex<ActiveGamepads>>,
     gamepads: Arc<RwLock<HashMap<GamepadId, GamepadMetadata>>>,
 ) -> GamepadThreads {
-    // Use Arc<str> instead of String to avoid allocation during lookup in hot path.
-    // HashSet<Arc<str>> allows contains() to accept &str without allocation.
-    let already_captured_by_xinput: Arc<RwLock<HashSet<Arc<str>>>> =
-        Arc::new(RwLock::new(HashSet::new()));
+    let already_captured_by_xinput = Arc::new(RwLock::new(HashSet::new()));
+    // Shared shutdown flag for clean thread termination
+    let shutdown = Arc::new(AtomicBool::new(false));
+    // Polling interval for checking shutdown signal (100ms)
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
     // We use both the `xinput` and `wgi` versions of gilrs so that we can capture Xbox controllers
     // (which only work with `xinput`) and PS controllers (which only work with `wgi`).
@@ -151,6 +162,7 @@ pub fn initialize_thread(
         let gamepads = gamepads.clone();
         let input_tx = input_tx.clone();
         let active_gamepads = active_gamepads.clone();
+        let shutdown = shutdown.clone();
         move || {
             let mut gilrs = match gilrs_xinput::Gilrs::new() {
                 Ok(g) => g,
@@ -160,9 +172,17 @@ pub fn initialize_thread(
                 }
             };
 
-            // Examine new events
-            while let Some(gilrs_xinput::Event { id, event, .. }) = gilrs.next_event_blocking(None)
-            {
+            // Examine new events with periodic shutdown checks
+            loop {
+                if shutdown.load(Ordering::SeqCst) {
+                    tracing::debug!("XInput gamepad capture shutting down");
+                    break;
+                }
+
+                let event_opt = gilrs.next_event_blocking(Some(POLL_INTERVAL));
+                let Some(gilrs_xinput::Event { id, event, .. }) = event_opt else {
+                    continue;
+                };
                 let gamepad = gilrs.gamepad(id);
                 let gamepad_name = gamepad.name().to_string();
 
@@ -238,6 +258,7 @@ pub fn initialize_thread(
     // wgi
     let _wgi_thread = std::thread::spawn({
         let already_captured_by_xinput = already_captured_by_xinput.clone();
+        let shutdown = shutdown.clone();
         move || {
             let mut gilrs = match gilrs_wgi::Gilrs::new() {
                 Ok(g) => g,
@@ -247,8 +268,17 @@ pub fn initialize_thread(
                 }
             };
 
-            // Examine new events
-            while let Some(gilrs_wgi::Event { id, event, .. }) = gilrs.next_event_blocking(None) {
+            // Examine new events with periodic shutdown checks
+            loop {
+                if shutdown.load(Ordering::SeqCst) {
+                    tracing::debug!("WGI gamepad capture shutting down");
+                    break;
+                }
+
+                let event_opt = gilrs.next_event_blocking(Some(POLL_INTERVAL));
+                let Some(gilrs_wgi::Event { id, event, .. }) = event_opt else {
+                    continue;
+                };
                 let gamepad = gilrs.gamepad(id);
                 let gamepad_name = gamepad.name().to_string();
 
@@ -346,6 +376,7 @@ pub fn initialize_thread(
     GamepadThreads {
         _xinput_thread,
         _wgi_thread,
+        shutdown,
     }
 }
 

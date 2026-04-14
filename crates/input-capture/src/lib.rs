@@ -223,3 +223,11 @@ impl InputCapture {
         }
     }
 }
+
+impl Drop for InputCapture {
+    fn drop(&mut self) {
+        // Signal gamepad threads to shut down gracefully
+        tracing::debug!("InputCapture dropping, signaling gamepad threads to shutdown");
+        self._gamepad_threads.shutdown();
+    }
+}
