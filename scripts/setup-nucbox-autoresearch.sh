@@ -71,6 +71,14 @@ if command -v rustup &>/dev/null; then
     rustup component add rustfmt clippy 2>/dev/null || true
 fi
 
+# Verify rustfmt and clippy are available (needed for autoresearch lint checks)
+if ! command -v rustfmt &>/dev/null; then
+    echo "Warning: rustfmt not available after installation"
+fi
+if ! command -v clippy-driver &>/dev/null; then
+    echo "Warning: clippy not available after installation"
+fi
+
 # 7. Verify
 echo
 echo "=== Verification ==="
