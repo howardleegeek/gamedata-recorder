@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use backoff::{future::retry_notify, Error as BackoffError, ExponentialBackoff};
+use backoff::{Error as BackoffError, ExponentialBackoff, future::retry_notify};
 
 use futures::TryStreamExt as _;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
@@ -188,7 +188,12 @@ pub async fn run(
             let api_client = self.api_client.clone();
             let api_token = self.api_token.clone();
             tokio::spawn(async move {
-                paused.abort_and_cleanup(&api_client, &api_token).await.ok();
+                if let Err(e) = paused.abort_and_cleanup(&api_client, &api_token).await {
+                    tracing::error!(
+                        "Failed to abort and cleanup upload in drop handler: {:?}",
+                        e
+                    );
+                }
             });
         }
     }
