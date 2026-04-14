@@ -288,7 +288,13 @@ async fn validate_recording_paused(
             );
         }
 
-        paused.abort_and_cleanup(api_client, api_token).await.ok();
+        if let Err(e) = paused.abort_and_cleanup(api_client, api_token).await {
+            tracing::error!(
+                "Failed to abort and cleanup upload for {}: {:?}",
+                path.display(),
+                e
+            );
+        }
 
         return None;
     }
