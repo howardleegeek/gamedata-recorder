@@ -57,7 +57,7 @@ impl FpsLogger {
 
         // Record frame interval
         if let Some(last) = self.last_frame_time {
-            let frame_time_ms = now.duration_since(last).as_secs_f64() * 1000.0;
+            let frame_time_ms = now.saturating_duration_since(last).as_secs_f64() * 1000.0;
             self.current_second_frame_times.push(frame_time_ms);
         }
 
