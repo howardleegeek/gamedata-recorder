@@ -456,7 +456,7 @@ Buyer API: REST + Stripe 计量 + R2 Presigned URL 下载
 
 ## 十二、定价 & 单位经济
 
-> 完整文档: `oyster/docs/gamedata-labs-unit-economics.md`
+> **Note:** Unit economics documentation pending
 
 ### 12.1 卖给 AI 公司
 
@@ -735,5 +735,5 @@ session_{id}/
 | `GameData_Labs_Plan_v3.docx` | 原始 Business Plan |
 | `GameData_Labs_Tech_Research.md` | 本文: 技术选型总报告 |
 | `gamedata-labs-architecture.md` | 后端 Pipeline 详细架构 |
-| `oyster/docs/gamedata-labs-unit-economics.md` | 定价 & 单位经济详细模型 |
+| *(pending)* | 定价 & 单位经济详细模型 |
 | `gamedata-labs-engine-plugin-research.md` | 引擎插件详细研究 |
