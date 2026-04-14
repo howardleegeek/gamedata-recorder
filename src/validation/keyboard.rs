@@ -132,15 +132,16 @@ fn get_stats(input: &super::ValidationInput) -> KeyboardStats {
         }
     }
 
+    // Use a minimum duration threshold to prevent unrealistic APM calculations
+    // on extremely short recordings that could cause misleading validation results
+    const MIN_DURATION_MINUTES: f64 = 0.1; // 6 seconds minimum
+    let effective_duration = input.duration_minutes.max(MIN_DURATION_MINUTES);
+
     KeyboardStats {
         wasd_apm,
         unique_keys,
         button_diversity: diversity,
         total_keyboard_events: keyboard_events.len() as u64,
-        apm: if input.duration_minutes > 0.0 {
-            keyboard_events.len() as f64 / input.duration_minutes
-        } else {
-            0.0
-        },
+        apm: keyboard_events.len() as f64 / effective_duration,
     }
 }
