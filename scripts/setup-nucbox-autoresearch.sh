@@ -33,7 +33,10 @@ export PATH="$HOME/.bun/bin:$PATH"
 
 # 3. Install OpenCode
 if [ ! -d "$HOME/.opencode" ]; then
-    curl -fsSL --connect-timeout 30 --max-time 300 https://opencode.ai/install | bash
+    if ! curl -fsSL --connect-timeout 30 --max-time 300 https://opencode.ai/install | bash; then
+        echo "Error: Failed to install OpenCode"
+        exit 1
+    fi
 fi
 export PATH="$HOME/.opencode/bin:$PATH"
 
