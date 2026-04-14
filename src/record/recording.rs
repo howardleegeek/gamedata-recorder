@@ -250,14 +250,21 @@ impl Recording {
 }
 
 pub fn get_recording_base_resolution(hwnd: HWND) -> Result<(u32, u32)> {
-    use windows::Win32::{Foundation::RECT, UI::WindowsAndMessaging::GetClientRect};
+    use windows::Win32::{
+        Foundation::{GetLastError, RECT},
+        UI::WindowsAndMessaging::GetClientRect,
+    };
 
     /// Returns the size (width, height) of the inner area of a window given its HWND.
     /// Returns None if the window does not exist or the call fails.
     fn get_window_inner_size(hwnd: HWND) -> Option<(u32, u32)> {
         unsafe {
             let mut rect = RECT::default();
-            GetClientRect(hwnd, &mut rect).ok()?;
+            if GetClientRect(hwnd, &mut rect).is_err() {
+                let err = GetLastError();
+                tracing::warn!("GetClientRect failed for hwnd {:?}: error {}", hwnd, err.0);
+                return None;
+            }
             // Bounds check: prevent underflow if rect has invalid coordinates
             let width = rect.right.saturating_sub(rect.left);
             let height = rect.bottom.saturating_sub(rect.top);
