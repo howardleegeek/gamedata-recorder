@@ -54,32 +54,15 @@ pub enum TrajectoryTerminator {
     Scroll { delta: i16 },
     /// Pause — no movement for longer than threshold
     Pause { gap_ms: f64 },
-    /// Max path length reached — prevents unbounded memory growth
-    MaxPathLength { path_len: usize },
     /// End of session
     SessionEnd,
 }
-
-/// Maximum number of points in a trajectory path to prevent unbounded
-/// memory growth during long recording sessions with continuous mouse movement.
-/// At 1000Hz polling, 10,000 points = ~10 seconds of continuous movement.
-const MAX_PATH_LENGTH: usize = 10_000;
 
 /// Segments raw input events into trajectories.
 ///
 /// Input: chronologically sorted events with timestamps.
 /// Output: list of Trajectory structs.
 pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec<Trajectory> {
-    // Validate pause_threshold_ms to ensure pause detection works correctly
-    let pause_threshold_ms = if pause_threshold_ms <= 0.0 || !pause_threshold_ms.is_finite() {
-        tracing::warn!(
-            "Invalid pause_threshold_ms: {}, using default 250.0",
-            pause_threshold_ms
-        );
-        250.0
-    } else {
-        pause_threshold_ms
-    };
     let mut trajectories = Vec::new();
     let mut current_path: Vec<[i32; 2]> = Vec::new();
     let mut current_start_ns: Option<u64> = None;
@@ -95,8 +78,7 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
             RawEventKind::MouseMove { dx, dy } => {
                 // Check for pause gap
                 if let Some(start) = current_start_ns {
-                    let gap_ms =
-                        event.timestamp_ns.saturating_sub(last_move_ns) as f64 / 1_000_000.0;
+                    let gap_ms = (event.timestamp_ns - last_move_ns) as f64 / 1_000_000.0;
                     if gap_ms > pause_threshold_ms && !current_path.is_empty() {
                         // Finalize trajectory due to pause
                         trajectories.push(build_trajectory(
@@ -109,49 +91,25 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                             TrajectoryTerminator::Pause { gap_ms },
                         ));
                         traj_index += 1;
-                        reset_state(
-                            &mut current_path,
-                            &mut total_distance,
-                            &mut event_count,
-                            &mut current_start_ns,
-                        );
-                    }
-                }
-
-                // Accumulate movement using saturating_add to prevent i32 overflow
-                // in long sessions with extensive mouse movement.
-                cursor_x = cursor_x.saturating_add(*dx);
-                cursor_y = cursor_y.saturating_add(*dy);
-                let dist = ((*dx as f64).powi(2) + (*dy as f64).powi(2)).sqrt();
-                total_distance += dist;
-                event_count = event_count.saturating_add(1);
-
-                if current_start_ns.is_none() {
-                    current_start_ns = Some(event.timestamp_ns);
-                }
-                current_path.push([cursor_x, cursor_y]);
-                last_move_ns = event.timestamp_ns;
-
-                // Check for max path length to prevent unbounded memory growth
-                if current_path.len() >= MAX_PATH_LENGTH {
-                    if let Some(start) = current_start_ns {
-                        let path_len = current_path.len();
-                        trajectories.push(build_trajectory(
-                            traj_index,
-                            start,
-                            last_move_ns,
-                            &current_path,
-                            total_distance,
-                            event_count,
-                            TrajectoryTerminator::MaxPathLength { path_len },
-                        ));
-                        traj_index += 1;
                         current_path.clear();
                         total_distance = 0.0;
                         event_count = 0;
                         current_start_ns = None;
                     }
                 }
+
+                // Accumulate movement
+                cursor_x += dx;
+                cursor_y += dy;
+                let dist = ((*dx as f64).powi(2) + (*dy as f64).powi(2)).sqrt();
+                total_distance += dist;
+                event_count += 1;
+
+                if current_start_ns.is_none() {
+                    current_start_ns = Some(event.timestamp_ns);
+                }
+                current_path.push([cursor_x, cursor_y]);
+                last_move_ns = event.timestamp_ns;
             }
 
             RawEventKind::MouseButton {
@@ -159,10 +117,7 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                 pressed: true,
             } => {
                 // Click terminates the current trajectory
-                // Only create trajectory if there was actual movement (non-empty path)
-                if let Some(start) = current_start_ns
-                    && !current_path.is_empty()
-                {
+                if let Some(start) = current_start_ns {
                     trajectories.push(build_trajectory(
                         traj_index,
                         start,
@@ -172,22 +127,17 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                         event_count,
                         TrajectoryTerminator::Click { button: *button },
                     ));
-                    traj_index = traj_index.saturating_add(1);
+                    traj_index += 1;
                 }
-                reset_state(
-                    &mut current_path,
-                    &mut total_distance,
-                    &mut event_count,
-                    &mut current_start_ns,
-                );
+                current_path.clear();
+                total_distance = 0.0;
+                event_count = 0;
+                current_start_ns = None;
             }
 
             RawEventKind::KeyDown { vkey, .. } => {
                 // Key press terminates trajectory
-                // Only create trajectory if there was actual movement (non-empty path)
-                if let Some(start) = current_start_ns
-                    && !current_path.is_empty()
-                {
+                if let Some(start) = current_start_ns {
                     trajectories.push(build_trajectory(
                         traj_index,
                         start,
@@ -197,21 +147,16 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                         event_count,
                         TrajectoryTerminator::KeyPress { key: *vkey },
                     ));
-                    traj_index = traj_index.saturating_add(1);
+                    traj_index += 1;
                 }
-                reset_state(
-                    &mut current_path,
-                    &mut total_distance,
-                    &mut event_count,
-                    &mut current_start_ns,
-                );
+                current_path.clear();
+                total_distance = 0.0;
+                event_count = 0;
+                current_start_ns = None;
             }
 
             RawEventKind::Scroll { delta } => {
-                // Only create trajectory if there was actual movement (non-empty path)
-                if let Some(start) = current_start_ns
-                    && !current_path.is_empty()
-                {
+                if let Some(start) = current_start_ns {
                     trajectories.push(build_trajectory(
                         traj_index,
                         start,
@@ -221,14 +166,12 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                         event_count,
                         TrajectoryTerminator::Scroll { delta: *delta },
                     ));
-                    traj_index = traj_index.saturating_add(1);
+                    traj_index += 1;
                 }
-                reset_state(
-                    &mut current_path,
-                    &mut total_distance,
-                    &mut event_count,
-                    &mut current_start_ns,
-                );
+                current_path.clear();
+                total_distance = 0.0;
+                event_count = 0;
+                current_start_ns = None;
             }
 
             _ => {} // Key up, mouse button up — don't terminate trajectories
@@ -248,28 +191,9 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                 TrajectoryTerminator::SessionEnd,
             ));
         }
-        // Ensure the start marker is always cleared to maintain consistent state
-        current_start_ns = None;
     }
 
     trajectories
-}
-
-/// Reset trajectory state after finalizing a trajectory.
-/// Ensures all state variables are consistently cleared to prevent
-/// timestamp drift in gap calculations for the next trajectory.
-fn reset_trajectory_state(
-    current_path: &mut Vec<[i32; 2]>,
-    total_distance: &mut f64,
-    event_count: &mut u32,
-    current_start_ns: &mut Option<u64>,
-    last_move_ns: &mut u64,
-) {
-    current_path.clear();
-    *total_distance = 0.0;
-    *event_count = 0;
-    *current_start_ns = None;
-    *last_move_ns = 0; // Reset to prevent timestamp drift in next trajectory
 }
 
 fn build_trajectory(
@@ -281,9 +205,8 @@ fn build_trajectory(
     event_count: u32,
     terminator: TrajectoryTerminator,
 ) -> Trajectory {
-    let duration_ms = end_ns.saturating_sub(start_ns) as f64 / 1_000_000.0;
-    // Use a minimum threshold to prevent infinity from extreme values when duration is tiny
-    let avg_speed = if duration_ms > 0.001 {
+    let duration_ms = (end_ns - start_ns) as f64 / 1_000_000.0;
+    let avg_speed = if duration_ms > 0.0 {
         total_distance / duration_ms
     } else {
         0.0
@@ -300,20 +223,6 @@ fn build_trajectory(
         event_count,
         terminator,
     }
-}
-
-/// Resets trajectory accumulation state after finalizing a trajectory.
-#[inline]
-fn reset_state(
-    path: &mut Vec<[i32; 2]>,
-    distance: &mut f64,
-    count: &mut u32,
-    start_ns: &mut Option<u64>,
-) {
-    path.clear();
-    *distance = 0.0;
-    *count = 0;
-    *start_ns = None;
 }
 
 /// Raw event for trajectory processing input.

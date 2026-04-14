@@ -9,12 +9,6 @@ use tokio::sync::mpsc;
 mod kbm_capture;
 use kbm_capture::KbmCapture;
 
-#[cfg(target_os = "windows")]
-use windows::Win32::{
-    Foundation::{LPARAM, WPARAM},
-    UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT},
-};
-
 mod gamepad_capture;
 pub use gamepad_capture::{ActiveGamepad, GamepadId, GamepadMetadata};
 
@@ -78,67 +72,34 @@ pub struct ActiveInput {
 
 pub struct InputCapture {
     _raw_input_thread: std::thread::JoinHandle<()>,
-    raw_input_thread_id: u32,
     _gamepad_threads: gamepad_capture::GamepadThreads,
     active_keys: Arc<Mutex<kbm_capture::ActiveKeys>>,
     active_gamepad: Arc<Mutex<gamepad_capture::ActiveGamepads>>,
     gamepads: Arc<RwLock<HashMap<GamepadId, GamepadMetadata>>>,
 }
 impl InputCapture {
-    /// Channel capacity for input events. 1000 prevents dropped events during
-    /// high-frequency gaming input (e.g., 1000Hz mouse polling with rapid keypresses).
-    const INPUT_CHANNEL_CAPACITY: usize = 1000;
-
     pub fn new() -> Result<(Self, mpsc::Receiver<Event>)> {
         tracing::debug!("InputCapture::new() called");
-        // Capacity of 1000 to handle high-frequency input devices (1000Hz gaming mice,
-        // rapid keyboard input) without dropping events during intense gameplay bursts.
-        // This prevents backpressure that could cause input event loss.
-        let (input_tx, input_rx) = mpsc::channel(1000);
+        let (input_tx, input_rx) = mpsc::channel(10);
 
         tracing::debug!("Spawning raw input thread for keyboard/mouse capture");
         let active_keys = Arc::new(Mutex::new(kbm_capture::ActiveKeys::default()));
-        let (thread_id_tx, thread_id_rx) = std::sync::mpsc::channel::<u32>();
         let _raw_input_thread = std::thread::spawn({
             let input_tx = input_tx.clone();
             let active_keys = active_keys.clone();
             move || {
-                #[cfg(target_os = "windows")]
-                {
-                    let thread_id =
-                        unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
-                    let _ = thread_id_tx.send(thread_id);
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = thread_id_tx.send(0);
-                }
-                let mut capture = match KbmCapture::initialize(active_keys) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::error!("Failed to initialize raw input: {}", e);
-                        return;
-                    }
-                };
-                if let Err(e) = capture.run_queue(move |event| {
-                    if input_tx.blocking_send(event).is_err() {
-                        tracing::warn!("Keyboard input tx closed, stopping keyboard capture");
-                        return false;
-                    }
-                    true
-                }) {
-                    tracing::error!("Failed to run windows message queue: {}", e);
-                }
+                KbmCapture::initialize(active_keys)
+                    .expect("failed to initialize raw input")
+                    .run_queue(move |event| {
+                        if input_tx.blocking_send(event).is_err() {
+                            tracing::warn!("Keyboard input tx closed, stopping keyboard capture");
+                            return false;
+                        }
+                        true
+                    })
+                    .expect("failed to run windows message queue");
             }
         });
-        // Wait for the thread to start and get its thread ID for shutdown signaling
-        let raw_input_thread_id = match thread_id_rx.recv() {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!("Failed to receive raw input thread ID: {}", e);
-                0
-            }
-        };
 
         tracing::debug!("Initializing gamepad capture threads");
         let active_gamepad = Arc::new(Mutex::new(gamepad_capture::ActiveGamepads::default()));
@@ -150,7 +111,6 @@ impl InputCapture {
         Ok((
             Self {
                 _raw_input_thread,
-                raw_input_thread_id,
                 _gamepad_threads,
                 active_keys,
                 active_gamepad,
@@ -159,52 +119,10 @@ impl InputCapture {
             input_rx,
         ))
     }
-}
 
-impl Drop for InputCapture {
-    fn drop(&mut self) {
-        // Signal the raw input thread to stop by posting WM_QUIT.
-        // The thread is blocked on GetMessageA and won't wake up otherwise.
-        // This prevents thread resource leaks when InputCapture is dropped.
-        #[cfg(target_os = "windows")]
-        if self.raw_input_thread_id != 0 {
-            unsafe {
-                if let Err(e) =
-                    PostThreadMessageW(self.raw_input_thread_id, WM_QUIT, WPARAM(0), LPARAM(0))
-                {
-                    tracing::warn!("Failed to post WM_QUIT to raw input thread: {:?}", e);
-                }
-            }
-        }
-    }
-}
-
-impl InputCapture {
     pub fn active_input(&self) -> ActiveInput {
-        // Handle poisoned locks gracefully: if another thread panicked while holding
-        // the lock, log the error and return default/empty input state rather than crashing.
-        let active_keys = match self.active_keys.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                tracing::error!(
-                    "ActiveKeys mutex poisoned, returning empty keyboard/mouse state: {e}"
-                );
-                return ActiveInput::default();
-            }
-        };
-        let active_gamepad = match self.active_gamepad.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                tracing::error!(
-                    "ActiveGamepads mutex poisoned, returning empty gamepad state: {e}"
-                );
-                return ActiveInput {
-                    keyboard: active_keys.keyboard.clone(),
-                    mouse: active_keys.mouse.clone(),
-                    gamepads: HashMap::new(),
-                };
-            }
-        };
+        let active_keys = self.active_keys.lock().unwrap();
+        let active_gamepad = self.active_gamepad.lock().unwrap();
         ActiveInput {
             keyboard: active_keys.keyboard.clone(),
             mouse: active_keys.mouse.clone(),
@@ -213,21 +131,6 @@ impl InputCapture {
     }
 
     pub fn gamepads(&self) -> HashMap<GamepadId, GamepadMetadata> {
-        // Handle poisoned locks gracefully: return empty map instead of panicking
-        match self.gamepads.read() {
-            Ok(guard) => guard.clone(),
-            Err(e) => {
-                tracing::error!("Gamepads RwLock poisoned, returning empty gamepad metadata: {e}");
-                HashMap::new()
-            }
-        }
-    }
-}
-
-impl Drop for InputCapture {
-    fn drop(&mut self) {
-        // Signal gamepad threads to shut down gracefully
-        tracing::debug!("InputCapture dropping, signaling gamepad threads to shutdown");
-        self._gamepad_threads.shutdown();
+        self.gamepads.read().unwrap().clone()
     }
 }
