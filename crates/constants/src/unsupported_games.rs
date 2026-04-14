@@ -46,18 +46,19 @@ impl UnsupportedGames {
     }
 
     pub fn get(&self, game_exe_without_ext: &str) -> Option<&UnsupportedGame> {
-        let game_exe_without_ext = game_exe_without_ext.to_lowercase();
         self.games.iter().find(|g| {
             g.binaries.iter().any(|b| {
-                let b_lower = b.to_lowercase();
-                // Exact match or exe has a suffix (e.g., _dx12, -win64-shipping), or epic games store variant
-                game_exe_without_ext == b_lower
-                    || (game_exe_without_ext.starts_with(&b_lower)
-                        && game_exe_without_ext[b_lower.len()..].starts_with('_'))
-                    || (game_exe_without_ext.starts_with(&b_lower)
-                        && game_exe_without_ext[b_lower.len()..].starts_with('-'))
-                    || (game_exe_without_ext.starts_with(&b_lower)
-                        && game_exe_without_ext[b_lower.len()..].starts_with("epicgamesstore"))
+                // Case-insensitive comparison without allocation
+                game_exe_without_ext.eq_ignore_ascii_case(b)
+                    || (game_exe_without_ext.len() > b.len()
+                        && game_exe_without_ext[..b.len()].eq_ignore_ascii_case(b)
+                        && game_exe_without_ext[b.len()..].starts_with('_'))
+                    || (game_exe_without_ext.len() > b.len()
+                        && game_exe_without_ext[..b.len()].eq_ignore_ascii_case(b)
+                        && game_exe_without_ext[b.len()..].starts_with('-'))
+                    || (game_exe_without_ext.len() >= b.len() + "epicgamesstore".len()
+                        && game_exe_without_ext[..b.len()].eq_ignore_ascii_case(b)
+                        && game_exe_without_ext[b.len()..].starts_with("epicgamesstore"))
             })
         })
     }
