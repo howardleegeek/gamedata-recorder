@@ -82,7 +82,7 @@ impl ProgressSender {
         };
         let elapsed = now.duration_since(oldest_time).as_secs_f64();
         let bps = if elapsed > 0.0 {
-            (self.bytes_uploaded - oldest_bytes) as f64 / elapsed
+            self.bytes_uploaded.saturating_sub(oldest_bytes) as f64 / elapsed
         } else {
             0.0
         };
