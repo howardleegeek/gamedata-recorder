@@ -54,9 +54,16 @@ pub enum TrajectoryTerminator {
     Scroll { delta: i16 },
     /// Pause — no movement for longer than threshold
     Pause { gap_ms: f64 },
+    /// Max path length reached — prevents unbounded memory growth
+    MaxPathLength { path_len: usize },
     /// End of session
     SessionEnd,
 }
+
+/// Maximum number of points in a trajectory path to prevent unbounded
+/// memory growth during long recording sessions with continuous mouse movement.
+/// At 1000Hz polling, 10,000 points = ~10 seconds of continuous movement.
+const MAX_PATH_LENGTH: usize = 10_000;
 
 /// Segments raw input events into trajectories.
 ///
@@ -125,6 +132,27 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                 }
                 current_path.push([cursor_x, cursor_y]);
                 last_move_ns = event.timestamp_ns;
+
+                // Check for max path length to prevent unbounded memory growth
+                if current_path.len() >= MAX_PATH_LENGTH {
+                    if let Some(start) = current_start_ns {
+                        let path_len = current_path.len();
+                        trajectories.push(build_trajectory(
+                            traj_index,
+                            start,
+                            last_move_ns,
+                            &current_path,
+                            total_distance,
+                            event_count,
+                            TrajectoryTerminator::MaxPathLength { path_len },
+                        ));
+                        traj_index += 1;
+                        current_path.clear();
+                        total_distance = 0.0;
+                        event_count = 0;
+                        current_start_ns = None;
+                    }
+                }
             }
 
             RawEventKind::MouseButton {

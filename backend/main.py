@@ -16,10 +16,9 @@ import traceback
 from datetime import datetime, timedelta
 from typing import Optional, List
 from contextlib import asynccontextmanager
-from urllib.parse import quote_plus
+from urllib.parse import quote
 
 import boto3
-from botocore.config import Config as BotoConfig
 from fastapi import FastAPI, HTTPException, Header, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -65,8 +64,7 @@ if not DATABASE_URL:
     DB_NAME = os.getenv("DB_NAME", "gamedata")
     # URL-encode credentials to handle special characters in passwords
     DATABASE_URL = (
-        f"postgresql+asyncpg://{quote_plus(DB_USER)}:{quote_plus(DB_PASSWORD)}"
-        f"@{quote_plus(DB_HOST)}:{DB_PORT}/{quote_plus(DB_NAME)}"
+        f"postgresql+asyncpg://{DB_USER}:{quote(DB_PASSWORD, safe='')}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     )
 
 # Create database engine and session factory
@@ -110,10 +108,7 @@ logger = logging.getLogger(__name__)
 async def get_db() -> AsyncSession:
     """Get database session."""
     async with SessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
+        yield session
 
 
 # --- Startup Validation ---
@@ -795,7 +790,7 @@ async def upload_complete(
     earnings_per_hour = 0.50  # Default
     if upload.game_exe:
         game_result = await db.execute(
-            select(Game).where(Game.exe_name == upload.game_exe.lower())
+            select(Game).where(func.lower(Game.exe_name) == func.lower(upload.game_exe))
         )
         game = game_result.scalar_one_or_none()
         if game:
