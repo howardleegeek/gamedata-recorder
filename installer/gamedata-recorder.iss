@@ -55,10 +55,20 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--minimized"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-; Kill the process before uninstall
-Filename: "taskkill"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden
+; Kill the process before uninstall (only if running to avoid error)
+Filename: "taskkill"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden; Check: IsAppRunning()
 
 [Code]
+// Check if the application is currently running
+function IsAppRunning(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  // Query tasklist to check if process exists - returns 0 if found, 1 if not found
+  Exec('tasklist', '/FI "IMAGENAME eq {#MyAppExeName}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := (ResultCode = 0);
+end;
+
 // Show a simple "Install complete! GameData Recorder will run in your system tray." message
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
