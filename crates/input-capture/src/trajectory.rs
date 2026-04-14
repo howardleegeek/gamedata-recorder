@@ -78,7 +78,8 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
             RawEventKind::MouseMove { dx, dy } => {
                 // Check for pause gap
                 if let Some(start) = current_start_ns {
-                    let gap_ms = (event.timestamp_ns - last_move_ns) as f64 / 1_000_000.0;
+                    let gap_ms =
+                        event.timestamp_ns.saturating_sub(last_move_ns) as f64 / 1_000_000.0;
                     if gap_ms > pause_threshold_ms && !current_path.is_empty() {
                         // Finalize trajectory due to pause
                         trajectories.push(build_trajectory(
@@ -205,7 +206,7 @@ fn build_trajectory(
     event_count: u32,
     terminator: TrajectoryTerminator,
 ) -> Trajectory {
-    let duration_ms = (end_ns - start_ns) as f64 / 1_000_000.0;
+    let duration_ms = end_ns.saturating_sub(start_ns) as f64 / 1_000_000.0;
     let avg_speed = if duration_ms > 0.0 {
         total_distance / duration_ms
     } else {
