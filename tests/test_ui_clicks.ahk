@@ -31,12 +31,20 @@ InitUIVars() {
     hotkey_button := Array(412, 186)
     hotkey_stop := Array(412, 216)
     stop_button := Array(225, 223)
+    if (stop_button.Length < 2) {
+        MsgBox("stop_button array must have at least 2 elements")
+        ExitApp()
+    }
     stop_toggle := PixelGetColor(stop_button[1], stop_button[2])
 
     ;   Recorder Customization
     location_button := Array(277, 324, 4)
     opacity_button := Array(702, 353)
     honk_button := Array(224, 384)
+    if (honk_button.Length < 2) {
+        MsgBox("honk_button array must have at least 2 elements")
+        ExitApp()
+    }
     honk_toggled := PixelGetColor(honk_button[1], honk_button[2])
     encoder_button := Array(293, 410, 3)
     settings_button := Array(456, 410)
@@ -52,6 +60,10 @@ InitUIVars() {
 
     ; Upload Tracker
     collapse_button := Array(31, 681)
+    if (collapse_button.Length < 2) {
+        MsgBox("collapse_button array must have at least 2 elements")
+        ExitApp()
+    }
     collapse_toggled := PixelGetColor(collapse_button[1], collapse_button[2])
     unreliable_button := Array(27, 887)
     after_button := Array(27, 913)
