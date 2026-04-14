@@ -88,16 +88,22 @@ impl InputCapture {
             let input_tx = input_tx.clone();
             let active_keys = active_keys.clone();
             move || {
-                KbmCapture::initialize(active_keys)
-                    .expect("failed to initialize raw input")
-                    .run_queue(move |event| {
-                        if input_tx.blocking_send(event).is_err() {
-                            tracing::warn!("Keyboard input tx closed, stopping keyboard capture");
-                            return false;
-                        }
-                        true
-                    })
-                    .expect("failed to run windows message queue");
+                let mut capture = match KbmCapture::initialize(active_keys) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!("Failed to initialize raw input: {}", e);
+                        return;
+                    }
+                };
+                if let Err(e) = capture.run_queue(move |event| {
+                    if input_tx.blocking_send(event).is_err() {
+                        tracing::warn!("Keyboard input tx closed, stopping keyboard capture");
+                        return false;
+                    }
+                    true
+                }) {
+                    tracing::error!("Failed to run windows message queue: {}", e);
+                }
             }
         });
 
