@@ -652,6 +652,11 @@ async def upload_init(
                     logger.info(f"Aborted orphaned S3 multipart upload: {s3_upload_id}")
                 except Exception as abort_err:
                     logger.warning(f"Failed to abort S3 multipart upload: {abort_err}")
+            # Clear S3 references from database to maintain consistency
+            # since the S3 upload was aborted but DB was already committed
+            upload.s3_key = None
+            upload.s3_upload_id = None
+            await db.commit()
             # Continue with local storage fallback
 
     logger.info(f"Upload initialized: {upload_id} for user {current_user.id}")
