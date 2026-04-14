@@ -17,7 +17,8 @@ pub struct InitMultipartUploadArgs<'a> {
     pub video_codec: Option<&'a str>,
     pub video_fps: Option<f32>,
     pub chunk_size_bytes: Option<u64>,
-    pub additional_metadata: serde_json::Value,
+    /// Optional additional metadata. Use None to skip serialization entirely.
+    pub additional_metadata: Option<serde_json::Value>,
     #[serde(alias = "uploading_owl_control_version")]
     pub uploading_recorder_version: Option<&'a str>,
 }
@@ -134,7 +135,7 @@ impl ApiClient {
                 video_codec: args.video_codec,
                 video_fps: args.video_fps,
 
-                additional_metadata: Some(args.additional_metadata),
+                additional_metadata: args.additional_metadata,
 
                 uploading_recorder_version: args.uploading_recorder_version,
 
