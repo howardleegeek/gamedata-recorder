@@ -59,6 +59,10 @@ struct KeyboardStats {
     pub total_keyboard_events: u64,
     pub apm: f64,
 }
+// Minimum duration threshold to prevent unrealistic APM calculations
+// on extremely short recordings that could cause misleading validation results
+const MIN_DURATION_MINUTES: f64 = 0.1; // 6 seconds minimum
+
 fn get_stats(input: &super::ValidationInput) -> KeyboardStats {
     // Get WASD keycodes
     let wasd_codes: Vec<u16> = ["W", "A", "S", "D"]
@@ -90,8 +94,10 @@ fn get_stats(input: &super::ValidationInput) -> KeyboardStats {
             })
             .count();
 
+        let effective_duration = input.duration_minutes.max(MIN_DURATION_MINUTES);
+
         wasd_apm = if input.duration_minutes > 0.0 {
-            wasd_presses as f64 / input.duration_minutes
+            wasd_presses as f64 / effective_duration
         } else {
             0.0
         };
@@ -143,9 +149,6 @@ fn get_stats(input: &super::ValidationInput) -> KeyboardStats {
         }
     }
 
-    // Use a minimum duration threshold to prevent unrealistic APM calculations
-    // on extremely short recordings that could cause misleading validation results
-    const MIN_DURATION_MINUTES: f64 = 0.1; // 6 seconds minimum
     let effective_duration = input.duration_minutes.max(MIN_DURATION_MINUTES);
 
     KeyboardStats {
