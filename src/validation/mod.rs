@@ -43,7 +43,16 @@ pub fn validate_folder(path: &Path) -> eyre::Result<ValidationResult> {
     }
 
     match validate_folder_impl(path) {
-        Ok(result) => Ok(result),
+        Ok(result) => {
+            // Clean up any stale INVALID marker file from previous failed validation
+            let invalid_marker = path.join(constants::filename::recording::INVALID);
+            if invalid_marker.is_file() {
+                if let Err(e) = std::fs::remove_file(&invalid_marker) {
+                    tracing::warn!("Failed to remove stale INVALID marker file: {}", e);
+                }
+            }
+            Ok(result)
+        }
         Err(e) => {
             if let Err(write_err) = std::fs::write(
                 path.join(constants::filename::recording::INVALID),
