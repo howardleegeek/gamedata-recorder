@@ -45,7 +45,7 @@ impl FpsLogger {
     /// Records the inter-frame interval for FPS calculation.
     pub fn on_frame(&mut self) {
         let now = std::time::Instant::now();
-        let elapsed_seconds = now.duration_since(self.start_instant).as_secs();
+        let elapsed_seconds = now.saturating_duration_since(self.start_instant).as_secs();
 
         // If we've moved to a new second, finalize the previous one
         while self.current_second < elapsed_seconds {
