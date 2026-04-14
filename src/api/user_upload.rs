@@ -125,6 +125,14 @@ impl ApiClient {
 
         let server_stats = response.json::<UserStatisticsResponse>().await?;
 
+        if !server_stats.success {
+            return Err(ApiError::ApiFailure {
+                context: "User upload statistics unavailable".into(),
+                error: "Server reported failure".into(),
+                status: None,
+            });
+        }
+
         Ok(server_stats.statistics)
     }
 
@@ -189,6 +197,14 @@ impl ApiClient {
         let response = check_for_response_success(response, "User upload list unavailable").await?;
 
         let server_list = response.json::<UserUploadListResponse>().await?;
+
+        if !server_list.success {
+            return Err(ApiError::ApiFailure {
+                context: "User upload list unavailable".into(),
+                error: "Server reported failure".into(),
+                status: None,
+            });
+        }
 
         Ok((server_list.uploads, server_list.limit, server_list.offset))
     }
