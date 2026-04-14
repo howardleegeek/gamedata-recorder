@@ -251,7 +251,7 @@
 ```
 🎮 招募游戏录制测试用户！
 
-我们正在测试 GameData Recorder - 一个自动录制游戏并赚取收益的工具。
+我们正在测试 GameData Recorder — 一个自动录制游戏并赚取收益的工具。
 
 要求：
 ✅ Windows 10/11 + 游戏 PC
