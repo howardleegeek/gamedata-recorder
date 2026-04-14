@@ -603,7 +603,7 @@ async def upload_init(
         total_size_bytes=req.total_size_bytes,
         chunk_size_bytes=chunk_size,
         total_chunks=total_chunks,
-        game_exe=req.game_exe,
+        game_exe=req.game_exe.lower() if req.game_exe else None,
         video_duration_seconds=req.video_duration_seconds,
         video_width=req.video_width,
         video_height=req.video_height,
