@@ -15,6 +15,9 @@ use crate::{
     upload::{FileProgress, ProgressSender},
 };
 
+/// Maximum allowed chunk size (1 GB) to prevent memory exhaustion from malicious server responses.
+const MAX_CHUNK_SIZE_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// Result type for `upload_tar` that distinguishes between different outcomes.
 pub enum UploadTarOutput {
     /// Upload completed successfully, recording is now Uploaded variant
@@ -228,6 +231,17 @@ pub async fn run(
                         bytes_to_skip,
                         start_chunk
                     );
+                }
+
+                // Validate chunk size to prevent memory exhaustion from malicious server responses
+                if chunk_size_bytes > MAX_CHUNK_SIZE_BYTES {
+                    return Err(UploadTarError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "Chunk size {} exceeds maximum allowed {} bytes",
+                            chunk_size_bytes, MAX_CHUNK_SIZE_BYTES
+                        ),
+                    )));
                 }
 
                 let mut buffer = vec![0u8; chunk_size_bytes as usize];
