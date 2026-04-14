@@ -1,4 +1,4 @@
-# GameData Labs - Engine Metadata Extraction Plugin Research
+# GameData Labs — Engine Metadata Extraction Plugin Research
 
 ## Executive Summary
 
