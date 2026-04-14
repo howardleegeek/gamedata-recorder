@@ -172,6 +172,12 @@ pub fn initialize_thread(
             {
                 let gamepad = gilrs.gamepad(id);
 
+                // Map the event first to ensure we only mark gamepads as captured
+                // if they produce useful events (not Connected/Disconnected/Dropped etc.)
+                let Some(event) = map_event_xinput(GamepadId::XInput(id.into()), event) else {
+                    continue;
+                };
+
                 // Handle poisoned locks gracefully: if another thread panicked while
                 // holding the lock, log the error and break rather than crashing.
                 let mut gamepads_guard = match gamepads.write() {
@@ -201,10 +207,6 @@ pub fn initialize_thread(
                 };
                 captured_guard.insert(gamepad_name);
                 drop(captured_guard);
-
-                let Some(event) = map_event_xinput(GamepadId::XInput(id.into()), event) else {
-                    continue;
-                };
 
                 let mut active_guard = match active_gamepads.lock() {
                     Ok(guard) => guard,
