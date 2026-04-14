@@ -238,6 +238,8 @@ impl LocalRecordingPaused {
         use std::io::Write;
         writeln!(&mut file)?;
         file.flush()?;
+        // Sync file to disk to ensure chunk durability (crash safety)
+        file.sync_all()?;
 
         Ok(())
     }
