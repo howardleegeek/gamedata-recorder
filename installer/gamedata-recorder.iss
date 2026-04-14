@@ -75,12 +75,10 @@ var
   ExecSuccess: Boolean;
 begin
   // Query tasklist via cmd to handle PATH/WOW64 issues - returns 0 if found, 1 if not found
-  // If tasklist itself fails to execute, assume process is not running to be safe
-  // Use {sys} constant for cmd.exe to ensure it's found regardless of PATH
-  // Search for the exe name directly (locale-independent) instead of "Running" status
+  // If tasklist itself fails to execute, assume process is running to be safe
   ExecSuccess := Exec(ExpandConstant('{sys}\cmd.exe'), '/C "' + ExpandConstant('{sys}\tasklist.exe') + '" /FI "IMAGENAME eq {#MyAppExeName}" 2>nul | "' + ExpandConstant('{sys}\find.exe') + '" "{#MyAppExeName}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if not ExecSuccess then
-    Result := False
+    Result := True  // Assume running if check fails, to prevent install over running app
   else
     Result := (ResultCode = 0);
 end;
