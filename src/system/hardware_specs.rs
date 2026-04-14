@@ -153,5 +153,13 @@ pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
     .map_err(|e| tracing::warn!("Failed to get display settings: {e}"))
     .ok()?;
 
-    Some((devmode.dmPelsWidth, devmode.dmPelsHeight))
+    // Validate resolution values to prevent downstream issues
+    let width = devmode.dmPelsWidth;
+    let height = devmode.dmPelsHeight;
+    if width == 0 || height == 0 {
+        tracing::warn!("Invalid monitor resolution returned: {}x{}", width, height);
+        return None;
+    }
+
+    Some((width, height))
 }
