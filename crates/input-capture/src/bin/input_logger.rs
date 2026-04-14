@@ -193,7 +193,9 @@ async fn run_logger<W: OutputWriter>(
     while let Some(event) = rx.recv().await {
         let t = timer.wall_time_str();
         let line = format_event(&t, &event);
-        let _ = writeln!(out, "{}", line);
+        if let Err(e) = writeln!(out, "{}", line) {
+            tracing::warn!("Failed to write event to output: {}", e);
+        }
 
         // Flush periodically to ensure data is written
         if matches!(
@@ -203,8 +205,16 @@ async fn run_logger<W: OutputWriter>(
                 ..
             }
         ) {
-            let _ = out.flush_output();
+            if let Err(e) = out.flush_output() {
+                tracing::warn!("Failed to flush output: {}", e);
+            }
         }
+    }
+
+    // Final flush on shutdown to ensure all buffered data is written
+    // This is critical for compressed output (zstd encoder has internal buffers)
+    if let Err(e) = out.flush_output() {
+        tracing::warn!("Failed to flush output on shutdown: {}", e);
     }
     Ok(())
 }
