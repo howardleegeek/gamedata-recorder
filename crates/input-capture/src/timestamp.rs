@@ -47,7 +47,17 @@ impl HighPrecisionTimer {
             }
 
             // Get initial message time for correlation
-            let msg_time_offset_ms = unsafe { GetMessageTime() };
+            // GetMessageTime returns -1 on error (rare on modern Windows, but possible)
+            let msg_time_offset_ms = unsafe {
+                let result = GetMessageTime();
+                if result < 0 {
+                    tracing::warn!(
+                        "GetMessageTime returned negative value at timer init: {}",
+                        result
+                    );
+                }
+                result
+            };
 
             Self {
                 frequency,
