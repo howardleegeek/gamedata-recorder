@@ -411,7 +411,7 @@ Layer 5: GPU 占用 (nvml-wrapper, >40% 持续 5s)
 
 ## 十一、后端 Pipeline
 
-> 完整文档: `backend-architecture.md`
+> 完整文档: [backend-architecture.md](backend-architecture.md)
 
 ### 11.1 架构
 
@@ -500,7 +500,7 @@ Buyer API: REST + Stripe 计量 + R2 Presigned URL 下载
 
 ## 十三、引擎插件 (Premium 数据, 3-5x 溢价)
 
-> 完整文档: `engine-plugin-research.md`
+> 完整文档: [engine-plugin-research.md](engine-plugin-research.md)
 
 ### 13.1 方案
 
@@ -732,7 +732,7 @@ session_{id}/
 
 | 文件 | 内容 |
 |------|------|
-| `tech-research.md` | 本文: 技术选型总报告 |
-| `backend-architecture.md` | 后端 Pipeline 详细架构 |
+| [tech-research.md](tech-research.md) | 本文: 技术选型总报告 |
+| [backend-architecture.md](backend-architecture.md) | 后端 Pipeline 详细架构 |
 | *(pending)* | 定价 & 单位经济详细模型 |
-| `engine-plugin-research.md` | 引擎插件详细研究 |
+| [engine-plugin-research.md](engine-plugin-research.md) | 引擎插件详细研究 |
