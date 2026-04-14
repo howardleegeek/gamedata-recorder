@@ -1001,6 +1001,9 @@ async def upload_stats(
     db: AsyncSession = Depends(get_db),
 ):
     """Get upload stats (OWL Control compatibility)."""
+    # Validate path parameter matches authenticated user to prevent tampering
+    if uid != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied: user ID mismatch")
     result = await db.execute(
         select(Upload).where(
             and_(
@@ -1030,6 +1033,9 @@ async def upload_list_legacy(
     db: AsyncSession = Depends(get_db),
 ):
     """List uploads (OWL Control compatibility)."""
+    # Validate path parameter matches authenticated user to prevent tampering
+    if uid != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied: user ID mismatch")
     # Validate pagination parameters to prevent DoS
     if limit < 1 or limit > 100:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
