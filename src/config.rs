@@ -454,10 +454,31 @@ impl EncoderSettings {
     }
 }
 
+/// Validates that the x264 preset value is one of the valid options from
+/// X264_PRESETS. Returns an error if the preset is not in the allowed list.
+fn validate_x264_preset<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    let preset = String::deserialize(deserializer)?;
+
+    if !constants::encoding::X264_PRESETS.contains(&preset.as_str()) {
+        return Err(Error::custom(format!(
+            "Invalid x264 preset '{}'. Valid options are: {:?}",
+            preset,
+            constants::encoding::X264_PRESETS
+        )));
+    }
+
+    Ok(preset)
+}
+
 /// OBS x264 (CPU) encoder specific settings
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ObsX264Settings {
+    #[serde(deserialize_with = "validate_x264_preset")]
     pub preset: String,
     pub tune: String,
 }
