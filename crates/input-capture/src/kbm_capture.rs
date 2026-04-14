@@ -130,7 +130,15 @@ impl KbmCapture {
             let mut msg = MSG::default();
             let mut last_absolute: Option<(i32, i32)> = None;
 
-            while GetMessageA(&mut msg, None, 0, 0).as_bool() {
+            loop {
+                let result = GetMessageA(&mut msg, None, 0, 0);
+                // result is BOOL: 0 = WM_QUIT, -1 = error, >0 = success
+                if result.0 == 0 {
+                    break; // WM_QUIT received, exit cleanly
+                }
+                if result.0 == -1 {
+                    bail!("GetMessageA failed");
+                }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageA(&msg);
 
