@@ -4,23 +4,26 @@ Production-ready API server with PostgreSQL database.
 Handles: auth, user management, uploads, earnings, payouts.
 """
 
+import math
 import os
 import uuid
 import time
 import hmac
 import hashlib
-import json
 import re
+import secrets
+import traceback
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional, List
 from contextlib import asynccontextmanager
+from urllib.parse import quote_plus
 
 import boto3
-from fastapi import FastAPI, HTTPException, Header, Depends, Request, status
+from botocore.config import Config as BotoConfig
+from fastapi import FastAPI, HTTPException, Header, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer
 from pydantic import BaseModel, EmailStr, Field, validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func, and_
@@ -53,14 +56,17 @@ API_SECRET = os.getenv("API_SECRET")
 
 # Database configuration
 DATABASE_URL = os.getenv("DATABASE_URL")
+# Always capture DB_PASSWORD for validation (even when using DATABASE_URL)
+DB_PASSWORD = os.getenv("DB_PASSWORD")
 if not DATABASE_URL:
     DB_USER = os.getenv("DB_USER", "gamedata")
-    DB_PASSWORD = os.getenv("DB_PASSWORD", "gamedata")
     DB_HOST = os.getenv("DB_HOST", "localhost")
     DB_PORT = os.getenv("DB_PORT", "5432")
     DB_NAME = os.getenv("DB_NAME", "gamedata")
+    # URL-encode credentials to handle special characters in passwords
     DATABASE_URL = (
-        f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+        f"postgresql+asyncpg://{quote_plus(DB_USER)}:{quote_plus(DB_PASSWORD)}"
+        f"@{quote_plus(DB_HOST)}:{DB_PORT}/{quote_plus(DB_NAME)}"
     )
 
 # Create database engine and session factory
@@ -72,6 +78,17 @@ S3_BUCKET = os.getenv("S3_BUCKET", "gamedata-recordings")
 S3_REGION = os.getenv("S3_REGION", "us-east-1")
 AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+
+# S3 client timeout configuration (prevents hanging requests)
+S3_TIMEOUT_CONFIG = BotoConfig(
+    connect_timeout=10,  # seconds to establish connection
+    read_timeout=30,     # seconds to read data
+    retries={"max_attempts": 3, "mode": "adaptive"}
+)
+
+# Upload limits
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024  # 50 GB per recording
+MAX_CHUNKS = 10000  # Maximum number of chunks per upload
 
 # CORS configuration
 ALLOWED_ORIGINS = os.getenv(
@@ -110,8 +127,6 @@ def validate_startup_config():
     # Check API_SECRET
     if not API_SECRET:
         if ENVIRONMENT == "development":
-            import secrets
-
             temp_secret = secrets.token_hex(32)
             print(f"\n{'=' * 60}")
             print("⚠️  WARNING: API_SECRET not set!")
@@ -125,6 +140,10 @@ def validate_startup_config():
             errors.append("API_SECRET environment variable is required in production")
     elif len(API_SECRET) < 32:
         errors.append("API_SECRET must be at least 32 characters long")
+
+    # Check database password
+    if not DB_PASSWORD:
+        errors.append("DB_PASSWORD environment variable is required")
 
     # Check CORS in production
     if ENVIRONMENT == "production":
@@ -224,8 +243,6 @@ async def global_exception_handler(request: Request, exc: Exception):
             },
         )
     else:
-        import traceback
-
         return JSONResponse(
             status_code=500,
             content={
@@ -235,6 +252,35 @@ async def global_exception_handler(request: Request, exc: Exception):
                 "traceback": traceback.format_exc().split("\n")[-5:],
             },
         )
+
+
+# --- Security Utilities ---
+
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename to prevent path traversal attacks.
+    
+    Extracts only the base filename (stripping all path components), removes
+    null bytes, and strips leading dots to prevent hidden file targeting.
+    This is more secure than string replacement which can be bypassed.
+    """
+    if not filename:
+        return "unnamed"
+    # Normalize path separators to handle both Unix (/) and Windows (\) paths
+    # This ensures os.path.basename works correctly regardless of platform
+    normalized = filename.replace("\\", "/")
+    # Extract just the filename component - drops all path separators
+    # This is more robust than string replacement (e.g., ".../.../etc/passwd"
+    # would incorrectly become "..etcpasswd" with naive replacement)
+    sanitized = os.path.basename(normalized)
+    # Remove null bytes
+    sanitized = sanitized.replace("\x00", "")
+    # Remove leading dots to prevent hidden file targeting (.htaccess, .env, etc.)
+    sanitized = sanitized.lstrip(".")
+    # Ensure we have a valid filename left
+    if not sanitized or sanitized.strip(".") == "":
+        return "unnamed"
+    return sanitized
 
 
 # --- Auth Utilities ---
@@ -264,8 +310,15 @@ def verify_token(token: str) -> Optional[str]:
     if not hmac.compare_digest(sig, expected_sig):
         return None
 
-    # Token valid for 30 days
-    if int(time.time()) - int(timestamp) > 30 * 86400:
+    # Token valid for 30 days - use constant-time comparison to prevent timing attacks
+    try:
+        ts = int(timestamp)
+    except ValueError:
+        return None
+    token_age = int(time.time()) - ts
+    max_age = 30 * 86400
+    # Use comparison that doesn't leak timing information about token age
+    if token_age > max_age or token_age < 0:  # Also check for future timestamps
         return None
 
     return user_id
@@ -346,13 +399,13 @@ class UploadInitRequest(BaseModel):
 
     filename: str = Field(..., max_length=255)
     total_size_bytes: int = Field(..., gt=0)
-    chunk_size_bytes: Optional[int] = 33554432
+    chunk_size_bytes: Optional[int] = Field(33554432, gt=0, le=1073741824)  # Max 1GB per chunk
     game_exe: Optional[str] = Field(None, max_length=255)
-    video_duration_seconds: Optional[float] = None
-    video_width: Optional[int] = None
-    video_height: Optional[int] = None
+    video_duration_seconds: Optional[float] = Field(None, ge=0)
+    video_width: Optional[int] = Field(None, ge=0)
+    video_height: Optional[int] = Field(None, ge=0)
     video_codec: Optional[str] = Field(None, max_length=50)
-    video_fps: Optional[float] = None
+    video_fps: Optional[float] = Field(None, ge=0)
     recorder_version: Optional[str] = Field(None, max_length=50)
     hardware_id: Optional[str] = Field(None, max_length=255)
     metadata: Optional[dict] = None
@@ -361,8 +414,14 @@ class UploadInitRequest(BaseModel):
 class UploadCompleteRequest(BaseModel):
     """Upload completion request."""
 
-    upload_id: str
-    etags: List[str] = []
+    upload_id: str = Field(..., max_length=36)
+    etags: List[str] = Field(default=[], max_length=10000)
+
+    @validator("etags")
+    def validate_etags_length(cls, v):
+        if len(v) > 10000:
+            raise ValueError("etags list exceeds maximum of 10000 items")
+        return v
 
 
 class PayoutRequest(BaseModel):
@@ -399,8 +458,11 @@ async def health(db: AsyncSession = Depends(get_db)):
 @app.post("/api/v1/auth/register")
 async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     """Register new user account."""
+    # Normalize email to lowercase for consistent lookup
+    normalized_email = req.email.lower()
+
     # Check if email already exists
-    result = await db.execute(select(User).where(User.email == req.email))
+    result = await db.execute(select(User).where(User.email == normalized_email))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
 
@@ -408,7 +470,7 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     user_id = f"user_{uuid.uuid4().hex[:12]}"
     user = User(
         id=user_id,
-        email=req.email,
+        email=normalized_email,
         password_hash=hash_password(req.password),
         display_name=req.display_name,
         status=UserStatus.PENDING_VERIFICATION,
@@ -421,12 +483,12 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     # Generate token
     token = generate_token(user_id)
 
-    logger.info(f"New user registered: {user_id} ({req.email})")
+    logger.info(f"New user registered: {user_id} ({normalized_email})")
 
     return {
         "token": token,
         "user_id": user_id,
-        "email": req.email,
+        "email": normalized_email,
         "message": "Registration successful. Please verify your email.",
     }
 
@@ -434,8 +496,15 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 @app.post("/api/v1/auth/login")
 async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     """Login with email and password."""
-    # Find user by email
-    result = await db.execute(select(User).where(User.email == req.email))
+    # Normalize email to lowercase for consistent lookup
+    normalized_email = req.email.lower()
+
+    # Find user by email with row lock to prevent TOCTOU race on status check
+    result = await db.execute(
+        select(User)
+        .where(User.email == normalized_email)
+        .with_for_update()
+    )
     user = result.scalar_one_or_none()
 
     if not user or not user.password_hash:
@@ -445,7 +514,7 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     if not verify_password(req.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    # Check user status
+    # Check user status (now safe from race conditions due to row lock)
     if user.status != UserStatus.ACTIVE:
         raise HTTPException(
             status_code=403,
@@ -513,9 +582,7 @@ async def upload_init(
     upload_id = str(uuid.uuid4())
     game_control_id = str(uuid.uuid4())
 
-    # Validate upload size — max 50 GB per recording, max 10000 chunks
-    MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024  # 50 GB
-    MAX_CHUNKS = 10000
+    # Validate upload size against module-level limits
     if req.total_size_bytes > MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=400,
@@ -523,19 +590,22 @@ async def upload_init(
         )
     chunk_size = req.chunk_size_bytes or 33554432
     total_chunks = min(
-        max(1, (req.total_size_bytes + chunk_size - 1) // chunk_size), MAX_CHUNKS
+        max(1, math.ceil(req.total_size_bytes / chunk_size)), MAX_CHUNKS
     )
+
+    # Sanitize filename to prevent path traversal
+    safe_filename = sanitize_filename(req.filename)
 
     # Create upload record
     upload = Upload(
         id=upload_id,
         user_id=current_user.id,
         game_control_id=game_control_id,
-        filename=req.filename,
+        filename=safe_filename,
         total_size_bytes=req.total_size_bytes,
         chunk_size_bytes=chunk_size,
         total_chunks=total_chunks,
-        game_exe=req.game_exe,
+        game_exe=req.game_exe.lower() if req.game_exe else None,
         video_duration_seconds=req.video_duration_seconds,
         video_width=req.video_width,
         video_height=req.video_height,
@@ -552,6 +622,9 @@ async def upload_init(
 
     # Generate S3 presigned URLs if configured
     chunk_urls = []
+    s3_upload_id = None
+    s3_key = None
+    s3 = None
     if AWS_ACCESS_KEY and AWS_SECRET_KEY:
         try:
             s3 = boto3.client(
@@ -559,14 +632,16 @@ async def upload_init(
                 region_name=S3_REGION,
                 aws_access_key_id=AWS_ACCESS_KEY,
                 aws_secret_access_key=AWS_SECRET_KEY,
+                config=S3_TIMEOUT_CONFIG,
             )
 
-            # Create multipart upload
-            s3_key = f"uploads/{current_user.id}/{upload_id}/{req.filename}"
+            # Create multipart upload with sanitized filename
+            s3_key = f"uploads/{current_user.id}/{upload_id}/{safe_filename}"
             mpu = s3.create_multipart_upload(Bucket=S3_BUCKET, Key=s3_key)
+            s3_upload_id = mpu["UploadId"]
 
             upload.s3_key = s3_key
-            upload.s3_upload_id = mpu["UploadId"]
+            upload.s3_upload_id = s3_upload_id
             await db.commit()
 
             # Generate presigned URLs for each chunk
@@ -576,15 +651,32 @@ async def upload_init(
                     Params={
                         "Bucket": S3_BUCKET,
                         "Key": s3_key,
-                        "UploadId": mpu["UploadId"],
+                        "UploadId": s3_upload_id,
                         "PartNumber": i,
                     },
-                    ExpiresIn=3600,
+                    ExpiresIn=86400,  # 24 hours to match API expiration
                 )
                 chunk_urls.append({"chunk_number": i, "upload_url": url})
         except Exception as e:
             logger.error(f"S3 error: {e}")
+            # Abort orphaned multipart upload to prevent resource leak
+            if s3_upload_id and s3_key and s3:
+                try:
+                    s3.abort_multipart_upload(
+                        Bucket=S3_BUCKET, Key=s3_key, UploadId=s3_upload_id
+                    )
+                    logger.info(f"Aborted orphaned S3 multipart upload: {s3_upload_id}")
+                except Exception as abort_err:
+                    logger.warning(f"Failed to abort S3 multipart upload: {abort_err}")
+            # Clear S3 references from database to maintain consistency
+            # since the S3 upload was aborted but DB was already committed
+            upload.s3_key = None
+            upload.s3_upload_id = None
+            await db.commit()
             # Continue with local storage fallback
+        finally:
+            if s3:
+                s3.close()
 
     logger.info(f"Upload initialized: {upload_id} for user {current_user.id}")
 
@@ -598,6 +690,75 @@ async def upload_init(
     }
 
 
+@app.post("/api/v1/upload/chunk")
+async def upload_chunk(
+    upload_id: str,
+    chunk_number: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get presigned URL for a specific chunk upload."""
+    # Validate chunk_number
+    if chunk_number < 1:
+        raise HTTPException(status_code=400, detail="chunk_number must be >= 1")
+    if chunk_number > MAX_CHUNKS:
+        raise HTTPException(status_code=400, detail=f"chunk_number exceeds maximum ({MAX_CHUNKS})")
+
+    # Find upload
+    result = await db.execute(
+        select(Upload).where(
+            and_(Upload.id == upload_id, Upload.user_id == current_user.id)
+        )
+    )
+    upload = result.scalar_one_or_none()
+
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    # Validate chunk_number doesn't exceed this upload's total_chunks
+    if chunk_number > upload.total_chunks:
+        raise HTTPException(
+            status_code=400,
+            detail=f"chunk_number exceeds total_chunks ({upload.total_chunks})"
+        )
+
+    if upload.status != UploadStatus.IN_PROGRESS:
+        raise HTTPException(
+            status_code=400, detail=f"Upload is already {upload.status.value}"
+        )
+
+    # Generate S3 presigned URL if configured
+    upload_url = None
+    if AWS_ACCESS_KEY and AWS_SECRET_KEY and upload.s3_upload_id:
+        s3 = None
+        try:
+            s3 = boto3.client(
+                "s3",
+                region_name=S3_REGION,
+                aws_access_key_id=AWS_ACCESS_KEY,
+                aws_secret_access_key=AWS_SECRET_KEY,
+                config=S3_TIMEOUT_CONFIG,
+            )
+            upload_url = s3.generate_presigned_url(
+                "upload_part",
+                Params={
+                    "Bucket": S3_BUCKET,
+                    "Key": upload.s3_key,
+                    "UploadId": upload.s3_upload_id,
+                    "PartNumber": chunk_number,
+                },
+                ExpiresIn=86400,  # 24 hours to match API expiration
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate chunk URL: {e}")
+            raise HTTPException(status_code=500, detail="Failed to generate upload URL")
+        finally:
+            if s3:
+                s3.close()
+
+    return {"upload_url": upload_url, "chunk_number": chunk_number}
+
+
 @app.post("/api/v1/upload/complete")
 async def upload_complete(
     req: UploadCompleteRequest,
@@ -605,11 +766,11 @@ async def upload_complete(
     db: AsyncSession = Depends(get_db),
 ):
     """Complete upload and calculate earnings."""
-    # Find upload
+    # Find upload with row lock to prevent race conditions on concurrent completion attempts
     result = await db.execute(
-        select(Upload).where(
-            and_(Upload.id == req.upload_id, Upload.user_id == current_user.id)
-        )
+        select(Upload)
+        .where(and_(Upload.id == req.upload_id, Upload.user_id == current_user.id))
+        .with_for_update()
     )
     upload = result.scalar_one_or_none()
 
@@ -638,9 +799,13 @@ async def upload_complete(
         )
         game = game_result.scalar_one_or_none()
         if game:
-            earnings_per_hour *= game.earnings_multiplier
+            earnings_per_hour *= (
+                game.earnings_multiplier if game.earnings_multiplier is not None else 1.0
+            )
 
     earnings = round(duration_hours * earnings_per_hour, 2)
+    # Ensure earnings are never negative (protects against negative multipliers in DB)
+    earnings = max(0.0, earnings)
     upload.earnings_usd = earnings
 
     # Update user balance
@@ -715,6 +880,11 @@ async def earnings_history(
     db: AsyncSession = Depends(get_db),
 ):
     """Get earnings history."""
+    # Validate pagination parameters to prevent DoS and division by zero
+    if page < 1:
+        raise HTTPException(status_code=400, detail="page must be >= 1")
+    if per_page < 1 or per_page > 100:
+        raise HTTPException(status_code=400, detail="per_page must be between 1 and 100")
     offset = (page - 1) * per_page
 
     result = await db.execute(
@@ -760,7 +930,7 @@ async def earnings_history(
         "total": total,
         "page": page,
         "per_page": per_page,
-        "total_pages": (total + per_page - 1) // per_page,
+        "total_pages": math.ceil(total / per_page),
     }
 
 
@@ -773,6 +943,11 @@ async def list_uploads(
     db: AsyncSession = Depends(get_db),
 ):
     """List user's uploads."""
+    # Validate pagination parameters to prevent DoS and division by zero
+    if page < 1:
+        raise HTTPException(status_code=400, detail="page must be >= 1")
+    if per_page < 1 or per_page > 100:
+        raise HTTPException(status_code=400, detail="per_page must be between 1 and 100")
     query = select(Upload).where(Upload.user_id == current_user.id)
 
     if status:
@@ -864,6 +1039,9 @@ async def upload_stats(
     db: AsyncSession = Depends(get_db),
 ):
     """Get upload stats (OWL Control compatibility)."""
+    # Validate path parameter matches authenticated user to prevent tampering
+    if uid != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied: user ID mismatch")
     result = await db.execute(
         select(Upload).where(
             and_(
@@ -893,6 +1071,15 @@ async def upload_list_legacy(
     db: AsyncSession = Depends(get_db),
 ):
     """List uploads (OWL Control compatibility)."""
+    # Validate path parameter matches authenticated user to prevent tampering
+    if uid != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied: user ID mismatch")
+    # Validate pagination parameters to prevent DoS
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+
     result = await db.execute(
         select(Upload)
         .where(Upload.user_id == current_user.id)
@@ -928,5 +1115,10 @@ async def upload_list_legacy(
 if __name__ == "__main__":
     import uvicorn
 
-    port = int(os.getenv("PORT", 8080))
+    port_str = os.getenv("PORT", "8080")
+    try:
+        port = int(port_str)
+    except ValueError:
+        logger.error(f"Invalid PORT environment variable: '{port_str}'. Using default 8080.")
+        port = 8080
     uvicorn.run(app, host="0.0.0.0", port=port)

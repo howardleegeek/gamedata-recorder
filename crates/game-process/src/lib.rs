@@ -51,10 +51,10 @@ pub fn exe_name_for_pid(Pid(pid): Pid) -> Result<PathBuf> {
             PSTR(&mut process_name as *mut u8),
             &mut process_name_size,
         )?;
-        let size = process_name_size
+        let process_name_size = process_name_size
             .try_into()
-            .map_err(|e| color_eyre::eyre::eyre!("process name size too large: {e}"))?;
-        let process_name = CString::new(&process_name[..size])?;
+            .map_err(|e| color_eyre::eyre::eyre!("process_name_size too large: {}", e))?;
+        let process_name = CString::new(&process_name[..process_name_size])?;
         let process_name = OsString::from_encoded_bytes_unchecked(process_name.into_bytes());
         let process_name = PathBuf::from(process_name);
         Ok(process_name)

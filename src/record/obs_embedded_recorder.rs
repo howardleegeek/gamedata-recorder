@@ -152,12 +152,18 @@ impl VideoRecorder for ObsEmbeddedRecorder {
     }
 
     async fn poll(&mut self) -> PollUpdate {
-        if let Err(e) = self.obs_tx.send(RecorderMessage::Poll).await {
-            tracing::error!("Failed to send poll message to OBS thread: {e}");
-            return PollUpdate { active_fps: None };
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        if self
+            .obs_tx
+            .send(RecorderMessage::Poll { result_tx })
+            .await
+            .is_err()
+        {
+            return PollUpdate::default();
         }
-        PollUpdate {
-            active_fps: Some(unsafe { libobs_wrapper::sys::obs_get_active_fps() }),
+        match result_rx.await {
+            Ok(fps) => PollUpdate { active_fps: fps },
+            Err(_) => PollUpdate::default(),
         }
         // Wait for poll to complete, receiving is_recording status
         let is_recording = match result_rx.await {
@@ -206,7 +212,7 @@ enum RecorderMessage {
         result_tx: tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
     },
     Poll {
-        result_tx: tokio::sync::oneshot::Sender<bool>, // returns is_recording status
+        result_tx: tokio::sync::oneshot::Sender<Option<f64>>,
     },
     CheckHookTimeout {
         result_tx: tokio::sync::oneshot::Sender<bool>,
@@ -260,7 +266,13 @@ fn recorder_thread(
     >,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        recorder_thread_impl(adapter_index, rx, init_success_tx);
+        // Create a dedicated Tokio runtime for this thread to avoid executor mismatch
+        // between futures::executor and tokio primitives (channels, select!)
+        let rt = tokio::runtime::Runtime::new()
+            .expect("Failed to create Tokio runtime for OBS recorder thread");
+        rt.block_on(async move {
+            recorder_thread_impl(adapter_index, rx, init_success_tx).await;
+        });
     }));
     if let Err(e) = result {
         tracing::error!("OBS recorder thread panicked: {e:?}");
@@ -268,7 +280,7 @@ fn recorder_thread(
     }
 }
 
-fn recorder_thread_impl(
+async fn recorder_thread_impl(
     adapter_index: usize,
     mut rx: tokio::sync::mpsc::Receiver<RecorderMessage>,
     init_success_tx: tokio::sync::oneshot::Sender<
@@ -316,7 +328,9 @@ fn recorder_thread_impl(
                 if let Err(e) = state.poll() {
                     tracing::error!("Failed to poll OBS embedded recorder: {e}");
                 }
-                result_tx.send(state.is_recording).ok();
+                // Get FPS from the OBS thread to avoid race conditions
+                let fps = unsafe { libobs_wrapper::sys::obs_get_active_fps() };
+                result_tx.send(Some(fps)).ok();
             }
             RecorderMessage::CheckHookTimeout { result_tx } => {
                 if let Err(e) = result_tx.send(state.check_hook_timeout()) {
@@ -520,8 +534,8 @@ impl RecorderState {
         self.last_video_encoder_type = Some(encoder_type);
 
         // Listen for signals to pass onto the event stream
-        self.was_hooked.store(false, Ordering::Relaxed);
-        let signal_thread = std::thread::spawn({
+        self.was_hooked.store(false, Ordering::SeqCst);
+        std::thread::spawn({
             let event_stream = request.event_stream;
             let was_hooked = self.was_hooked.clone();
 
@@ -549,19 +563,20 @@ impl RecorderState {
 
             move || {
                 let initial_time = Instant::now();
-                futures::executor::block_on(async {
-                    // Seems a bit dubious to use a tokio::select with
-                    // a tokio oneshot in a non-Tokio context, but it seems to work
+                // Use the current Tokio runtime (from recorder_thread) instead of futures executor
+                // to ensure tokio::select! and tokio channels work correctly
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(async {
                     loop {
                         tokio::select! {
                             r = start_signal_rx.recv() => {
                                 if r.is_ok() {
                                     if last_application.as_ref().is_some_and(|a| a.0 == game_exe && a.1 .0 == hwnd.0) {
                                         tracing::warn!("Video started again for last game, assuming we're already hooked");
-                                        if let Err(e) = event_stream.send(InputEventType::HookStart) {
-                                            tracing::warn!("Failed to send HookStart event: {}", e);
+                                        // Only send HookStart if not already hooked (prevents race with hook_signal_rx)
+                                        if !was_hooked.swap(true, Ordering::SeqCst) {
+                                            let _ = event_stream.send(InputEventType::HookStart);
                                         }
-                                        was_hooked.store(true, Ordering::Relaxed);
                                     }
 
                                     tracing::info!("Video started at {}s", initial_time.elapsed().as_secs_f64());
@@ -581,10 +596,10 @@ impl RecorderState {
                             r = hook_signal_rx.recv() => {
                                 if r.is_ok() {
                                     tracing::info!("Game hooked at {}s", initial_time.elapsed().as_secs_f64());
-                                    if let Err(e) = event_stream.send(InputEventType::HookStart) {
-                                        tracing::warn!("Failed to send HookStart event: {}", e);
+                                    // Only send HookStart if not already sent (prevents duplicate with synthetic hook)
+                                    if !was_hooked.swap(true, Ordering::SeqCst) {
+                                        let _ = event_stream.send(InputEventType::HookStart);
                                     }
-                                    was_hooked.store(true, Ordering::Relaxed);
                                 }
                             }
                             _ = &mut shutdown_rx => {
@@ -665,7 +680,7 @@ impl RecorderState {
             }
         }
 
-        if !self.was_hooked.load(Ordering::Relaxed) {
+        if !self.was_hooked.load(Ordering::SeqCst) {
             bail!("Application was never hooked, recording will be blank");
         }
 
@@ -720,7 +735,7 @@ impl RecorderState {
         }
 
         // If we're already hooked, no timeout
-        if self.was_hooked.load(Ordering::Relaxed) {
+        if self.was_hooked.load(Ordering::SeqCst) {
             return false;
         }
 
