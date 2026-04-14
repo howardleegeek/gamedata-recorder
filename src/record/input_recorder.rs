@@ -114,7 +114,7 @@ impl InputEventWriter {
         ))
         .await?;
 
-        // Ensure all data is flushed to disk for crash durability
+        // Ensure data is synced to disk for crash durability
         self.file
             .sync_all()
             .await

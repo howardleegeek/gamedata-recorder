@@ -104,24 +104,30 @@ impl FpsLogger {
         });
     }
 
-    /// Get the current real-time FPS including frames from the in-progress second.
-    /// Returns the frame count from the current second if available, otherwise
-    /// falls back to the last completed second's FPS.
+    /// Get the current real-time FPS (frames in the last completed second,
+    /// or the current in-progress second if no completed seconds yet).
+    #[allow(dead_code)]
     pub fn current_fps(&self) -> Option<f64> {
-        // Count frames in the current in-progress second
-        // frame_times stores intervals between frames, so N intervals = N+1 frames
-        let current_second_frames = if self.current_second_frame_times.is_empty() {
-            0u32
+        // Return completed second if available
+        if let Some(entry) = self.entries.last() {
+            return Some(entry.fps as f64);
+        }
+        // Otherwise calculate from current in-progress second
+        // frame_times stores N intervals = N+1 frames, but if no intervals yet,
+        // we still have 1 frame (the first frame of the second)
+        let current_frames = if self.current_second_frame_times.is_empty() {
+            if self.last_frame_time.is_some() {
+                1 // First frame arrived, no interval recorded yet
+            } else {
+                0 // No frames at all
+            }
         } else {
-            (self.current_second_frame_times.len() + 1) as u32
+            self.current_second_frame_times.len() + 1
         };
-
-        // Return current second's frame count if we have frames in progress
-        if current_second_frames > 0 {
-            Some(current_second_frames as f64)
+        if current_frames > 0 {
+            Some(current_frames as f64)
         } else {
-            // Fall back to last completed second if available
-            self.entries.last().map(|e| e.fps as f64)
+            None
         }
     }
 
@@ -143,12 +149,12 @@ impl FpsLogger {
         }
 
         let path = session_dir.join(constants::filename::recording::FPS_LOG);
+        let temp_path = path.with_extension("tmp");
         let json = serde_json::to_string_pretty(&self.entries)?;
 
-        // Atomic write pattern: write to temp file, then rename
-        // Prevents corruption if the process crashes mid-write
-        let temp_path = path.with_extension("tmp");
+        // Atomic write: write to temp, sync, then rename for crash durability
         tokio::fs::write(&temp_path, json).await?;
+        tokio::fs::File::open(&temp_path).await?.sync_all().await?;
         tokio::fs::rename(&temp_path, &path).await?;
 
         tracing::info!(

@@ -109,12 +109,11 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                             TrajectoryTerminator::Pause { gap_ms },
                         ));
                         traj_index += 1;
-                        reset_trajectory_state(
+                        reset_state(
                             &mut current_path,
                             &mut total_distance,
                             &mut event_count,
                             &mut current_start_ns,
-                            &mut last_move_ns,
                         );
                     }
                 }
@@ -175,12 +174,11 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                     ));
                     traj_index = traj_index.saturating_add(1);
                 }
-                reset_trajectory_state(
+                reset_state(
                     &mut current_path,
                     &mut total_distance,
                     &mut event_count,
                     &mut current_start_ns,
-                    &mut last_move_ns,
                 );
             }
 
@@ -201,12 +199,11 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                     ));
                     traj_index = traj_index.saturating_add(1);
                 }
-                reset_trajectory_state(
+                reset_state(
                     &mut current_path,
                     &mut total_distance,
                     &mut event_count,
                     &mut current_start_ns,
-                    &mut last_move_ns,
                 );
             }
 
@@ -226,12 +223,11 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                     ));
                     traj_index = traj_index.saturating_add(1);
                 }
-                reset_trajectory_state(
+                reset_state(
                     &mut current_path,
                     &mut total_distance,
                     &mut event_count,
                     &mut current_start_ns,
-                    &mut last_move_ns,
                 );
             }
 
@@ -240,18 +236,20 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
     }
 
     // Finalize any remaining trajectory
-    if let Some(start) = current_start_ns
-        && !current_path.is_empty()
-    {
-        trajectories.push(build_trajectory(
-            traj_index,
-            start,
-            last_move_ns,
-            &current_path,
-            total_distance,
-            event_count,
-            TrajectoryTerminator::SessionEnd,
-        ));
+    if let Some(start) = current_start_ns {
+        if !current_path.is_empty() {
+            trajectories.push(build_trajectory(
+                traj_index,
+                start,
+                last_move_ns,
+                &current_path,
+                total_distance,
+                event_count,
+                TrajectoryTerminator::SessionEnd,
+            ));
+        }
+        // Ensure the start marker is always cleared to maintain consistent state
+        current_start_ns = None;
     }
 
     trajectories
@@ -302,6 +300,20 @@ fn build_trajectory(
         event_count,
         terminator,
     }
+}
+
+/// Resets trajectory accumulation state after finalizing a trajectory.
+#[inline]
+fn reset_state(
+    path: &mut Vec<[i32; 2]>,
+    distance: &mut f64,
+    count: &mut u32,
+    start_ns: &mut Option<u64>,
+) {
+    path.clear();
+    *distance = 0.0;
+    *count = 0;
+    *start_ns = None;
 }
 
 /// Raw event for trajectory processing input.
