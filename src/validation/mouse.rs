@@ -85,6 +85,10 @@ fn get_stats(input: &super::ValidationInput) -> MouseStats {
         let mut frame_data: HashMap<i32, Frame> = HashMap::new();
 
         for (timestamp, dx, dy) in mouse_moves {
+            // Skip events with invalid timestamps (before recording start)
+            if timestamp < input.start_time {
+                continue;
+            }
             let frame = ((timestamp - input.start_time) / frame_duration) as i32;
             let entry = frame_data.entry(frame).or_default();
             entry.dx += dx as f64;
