@@ -139,10 +139,14 @@ fn validate_files(
     mp4_path: &Path,
     csv_path: &Path,
 ) -> eyre::Result<(InputStats, Vec<String>)> {
-    let events = std::fs::read_to_string(csv_path)
-        .with_context(|| format!("Error reading CSV file at {csv_path:?})"))?
+    let file_content = std::fs::read_to_string(csv_path)
+        .with_context(|| format!("Error reading CSV file at {csv_path:?})"))?;
+    // Legacy CSV format has a header row that must be skipped;
+    // new JSON Lines format has no header (each line is self-describing).
+    let is_legacy_csv = csv_path.extension().and_then(|e| e.to_str()) == Some("csv");
+    let events = file_content
         .lines()
-        .skip(1)
+        .skip(if is_legacy_csv { 1 } else { 0 })
         .map(InputEvent::from_str)
         .collect::<Result<Vec<_>, _>>()
         .with_context(|| format!("Error parsing CSV file at {csv_path:?}"))?;
