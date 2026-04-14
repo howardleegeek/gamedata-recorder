@@ -33,8 +33,16 @@ pub struct UnsupportedGames {
     pub games: Vec<UnsupportedGame>,
 }
 
+/// Maximum JSON input size for unsupported games list (10MB)
+const MAX_GAMES_JSON_SIZE: usize = 10 * 1024 * 1024;
+
 impl UnsupportedGames {
     pub fn load_from_str(s: &str) -> serde_json::Result<Self> {
+        if s.len() > MAX_GAMES_JSON_SIZE {
+            return Err(serde::de::Error::custom(
+                "Input exceeds maximum allowed size for games JSON",
+            ));
+        }
         let games: Vec<UnsupportedGame> = serde_json::from_str(s)?;
         Ok(Self { games })
     }
