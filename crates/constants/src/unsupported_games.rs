@@ -97,6 +97,9 @@ pub struct InstalledGame {
     pub steam_app_id: u32,
 }
 
+/// Maximum number of installed games to detect (prevents memory exhaustion from huge libraries)
+const MAX_INSTALLED_GAMES: usize = 10_000;
+
 pub fn detect_installed_games() -> Vec<InstalledGame> {
     let Ok(steam_dir) = steamlocate::SteamDir::locate() else {
         tracing::warn!("Steam installation not found");
@@ -119,6 +122,13 @@ pub fn detect_installed_games() -> Vec<InstalledGame> {
                 tracing::warn!("Failed to read Steam app from library");
                 continue;
             };
+            if installed.len() >= MAX_INSTALLED_GAMES {
+                tracing::warn!(
+                    "Reached maximum limit of {} installed games, stopping detection",
+                    MAX_INSTALLED_GAMES
+                );
+                return installed;
+            }
             if let Some(name) = app.name {
                 installed.push(InstalledGame {
                     name,
