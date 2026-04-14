@@ -212,11 +212,7 @@ pub async fn upload_folder(
         let hardware_id =
             crate::system::hardware_id::get().map_err(UploadFolderError::MissingHardwareId)?;
 
-        let filename = tar_path
-            .file_name()
-            .ok_or_else(|| UploadFolderError::MissingFilename(tar_path.to_owned()))?
-            .to_string_lossy()
-            .to_string();
+        let filename = get_filename(tar_path)?;
 
         let init_response = api_client
             .init_multipart_upload(
