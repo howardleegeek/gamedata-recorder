@@ -76,7 +76,9 @@ pub fn get_hardware_specs(gpus: Vec<GpuSpecs>) -> Result<HardwareSpecs> {
         os_version: System::os_version().unwrap_or_else(|| "Unknown".to_string()),
         kernel_version: System::kernel_version().unwrap_or_else(|| "Unknown".to_string()),
         hostname: System::host_name().unwrap_or_else(|| "Unknown".to_string()),
-        total_memory_gb: sys.total_memory() as f64 / (1024.0 * 1024.0 * 1024.0),
+        // Use integer division first to avoid precision loss when converting large u64 values.
+        // u64 values > 2^53 lose precision when directly converted to f64.
+        total_memory_gb: (sys.total_memory() / (1024 * 1024 * 1024)) as f64,
     };
 
     Ok(HardwareSpecs {
