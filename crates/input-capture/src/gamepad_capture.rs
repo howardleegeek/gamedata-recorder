@@ -172,6 +172,7 @@ pub fn initialize_thread(
             {
                 let gamepad = gilrs.gamepad(id);
                 let gamepad_id = GamepadId::XInput(id.into());
+                let gamepad_name = sanitize_gamepad_name(gamepad.name(), id.into());
 
                 // Handle disconnection events to clean up stale state
                 if matches!(
@@ -217,7 +218,6 @@ pub fn initialize_thread(
                     };
                     let is_new = !gamepads_guard.contains_key(&gamepad_id);
                     if is_new {
-                        let gamepad_name = sanitize_gamepad_name(gamepad.name(), id.into());
                         gamepads_guard.insert(
                             gamepad_id,
                             GamepadMetadata {
@@ -232,7 +232,6 @@ pub fn initialize_thread(
                 };
 
                 if needs_registration {
-                    let gamepad_name = sanitize_gamepad_name(gamepad.name(), id.into());
                     let mut captured_guard = match already_captured_by_xinput.write() {
                         Ok(guard) => guard,
                         Err(e) => {
