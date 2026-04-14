@@ -71,14 +71,16 @@ if ! command -v cargo &>/dev/null; then
 fi
 source "$HOME/.cargo/env" 2>/dev/null || true
 if command -v rustup &>/dev/null; then
-    rustup component add rustfmt clippy 2>/dev/null || true
+    if ! rustup component add rustfmt clippy 2>/dev/null; then
+        echo "Warning: Failed to add rustfmt/clippy components"
+    fi
 fi
 
 # Verify rustfmt and clippy are available (needed for autoresearch lint checks)
 if ! command -v rustfmt &>/dev/null; then
     echo "Warning: rustfmt not available after installation"
 fi
-if ! command -v clippy-driver &>/dev/null; then
+if ! cargo --list 2>/dev/null | grep -q clippy; then
     echo "Warning: clippy not available after installation"
 fi
 
