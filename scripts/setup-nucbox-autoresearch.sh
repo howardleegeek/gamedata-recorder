@@ -58,7 +58,10 @@ fi
 
 # 6. Install Rust toolchain (for cargo fmt/clippy on linter side)
 if ! command -v cargo &>/dev/null; then
-    curl --proto '=https' --tlsv1.2 -sSfL --connect-timeout 30 --max-time 300 https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+    if ! curl --proto '=https' --tlsv1.2 -sSfL --connect-timeout 30 --max-time 300 https://sh.rustup.rs | sh -s -- -y --default-toolchain stable; then
+        echo "Error: Failed to install Rust toolchain"
+        exit 1
+    fi
 fi
 source "$HOME/.cargo/env" 2>/dev/null || true
 if command -v rustup &>/dev/null; then
@@ -68,7 +71,7 @@ fi
 # 7. Verify
 echo
 echo "=== Verification ==="
-BUN_VERSION=$(bun --version 2>/dev/null || echo "MISSING")
+BUN_VERSION=$(command -v bun &>/dev/null && bun --version 2>/dev/null || echo "MISSING")
 OPENCODE_VERSION=$(command -v opencode &>/dev/null && opencode --version 2>/dev/null || $HOME/.opencode/bin/opencode --version 2>/dev/null || echo "MISSING")
 CARGO_VERSION=$(cargo --version 2>/dev/null || echo "MISSING")
 JQ_VERSION=$(jq --version 2>/dev/null || echo "MISSING")
