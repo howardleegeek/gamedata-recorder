@@ -2,6 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// Reason why a game is not supported for recording
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnsupportedReason {
     EnoughData,
@@ -21,6 +22,7 @@ impl fmt::Display for UnsupportedReason {
     }
 }
 
+/// A game that is not supported for recording with the reason
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct UnsupportedGame {
     pub name: String,
@@ -28,6 +30,7 @@ pub struct UnsupportedGame {
     pub reason: UnsupportedReason,
 }
 
+/// Collection of unsupported games with lookup functionality
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsupportedGames {
     pub games: Vec<UnsupportedGame>,
@@ -92,6 +95,7 @@ impl UnsupportedGames {
     }
 }
 
+/// A detected installed Steam game with its metadata
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstalledGame {
     pub name: String,
@@ -104,6 +108,11 @@ const MAX_INSTALLED_GAMES: usize = 10_000;
 /// Maximum length for a game name (prevents memory exhaustion from malicious/broken app names)
 const MAX_GAME_NAME_LEN: usize = 1024;
 
+/// Detect installed Steam games on the system
+///
+/// Returns a vector of detected games with limits applied:
+/// - Maximum of 10,000 games (prevents memory exhaustion)
+/// - Game names limited to 1024 characters
 pub fn detect_installed_games() -> Vec<InstalledGame> {
     let Ok(steam_dir) = steamlocate::SteamDir::locate() else {
         tracing::warn!("Steam installation not found");
