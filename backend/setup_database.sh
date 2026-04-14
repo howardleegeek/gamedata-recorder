@@ -111,13 +111,14 @@ async def seed():
         )
         session.add(test_user)
         
-        # Add some test games
+        # Add some test games with validation
         games = [
             Game(id="game_001", exe_name="cs2.exe", title="Counter-Strike 2", genre="FPS", is_supported=True, demand_level=5),
             Game(id="game_002", exe_name="valorant.exe", title="Valorant", genre="FPS", is_supported=True, demand_level=5),
             Game(id="game_003", exe_name="genshinimpact.exe", title="Genshin Impact", genre="RPG", is_supported=True, demand_level=4),
         ]
         for game in games:
+            game.validate()  # Validate constraints before adding
             session.add(game)
         
         await session.commit()
