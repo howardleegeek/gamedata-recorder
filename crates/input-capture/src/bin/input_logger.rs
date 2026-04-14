@@ -11,7 +11,7 @@
 
 use std::io::Write;
 
-use input_capture::{Event, PressState, timestamp::HighPrecisionTimer, vkey_names::vkey_to_name};
+use input_capture::{timestamp::HighPrecisionTimer, vkey_names::vkey_to_name, Event, PressState};
 
 #[derive(Debug)]
 struct Args {
@@ -196,13 +196,18 @@ async fn run_logger<W: OutputWriter>(
         let _ = writeln!(out, "{}", line);
 
         // Flush periodically to ensure data is written
-        if matches!(
+        // Flush on all input events (keyboard, mouse buttons, scroll) for crash durability
+        let should_flush = matches!(
             event,
             Event::KeyPress {
                 press_state: PressState::Pressed,
                 ..
-            }
-        ) {
+            } | Event::MousePress {
+                press_state: PressState::Pressed,
+                ..
+            } | Event::MouseScroll { .. }
+        );
+        if should_flush {
             let _ = out.flush_output();
         }
     }
