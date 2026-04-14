@@ -35,8 +35,7 @@ export PATH="$HOME/.opencode/bin:$PATH"
 # 4. Configure Fireworks API key (Kimi K2.5 Turbo)
 mkdir -p ~/.config/opencode
 chmod 700 ~/.config/opencode
-jq -n --arg key "$FIREWORKS_API_KEY" '{"fireworks": {"type": "api", "key": $key}}' > ~/.config/opencode/auth.json
-chmod 600 ~/.config/opencode/auth.json
+(umask 077 && jq -n --arg key "$FIREWORKS_API_KEY" '{"fireworks": {"type": "api", "key": $key}}' > ~/.config/opencode/auth.json)
 
 # 5. Clone gamedata-recorder
 cd ~
