@@ -187,6 +187,14 @@ impl ApiClient {
     ) -> Result<UploadMultipartChunkResponse, ApiError> {
         Self::validate_upload_id(upload_id)?;
 
+        // Validate chunk_number is non-zero (S3 multipart uses 1-indexed part numbers)
+        if chunk_number == 0 {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "Chunk number must be greater than 0 (S3 multipart uses 1-indexed part numbers)"
+                    .into(),
+            ));
+        }
+
         // Validate chunk_hash format - should be non-empty, reasonable length, and valid hex
         if chunk_hash.is_empty() {
             return Err(ApiError::ApiKeyValidationFailure(
