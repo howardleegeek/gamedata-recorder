@@ -450,6 +450,19 @@ impl Config {
         fs::rename(&temp_path, &config_path)
             .context("Failed to rename temporary config file to final location")?;
 
+        // Sync the parent directory to ensure the rename operation is persisted.
+        // Without this, a crash immediately after rename could lose the file
+        // even though the data was written, because the directory entry update
+        // may not have reached the disk.
+        let parent_dir = config_path
+            .parent()
+            .ok_or_else(|| eyre!("Config path has no parent directory"))?;
+        let dir_file =
+            fs::File::open(parent_dir).context("Failed to open parent directory for sync")?;
+        dir_file
+            .sync_all()
+            .context("Failed to sync parent directory to disk")?;
+
         Ok(())
     }
 }
