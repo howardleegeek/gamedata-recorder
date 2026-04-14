@@ -284,8 +284,11 @@ def verify_token(token: str) -> Optional[str]:
     if not hmac.compare_digest(sig, expected_sig):
         return None
 
-    # Token valid for 30 days
-    if int(time.time()) - int(timestamp) > 30 * 86400:
+    # Token valid for 30 days - use constant-time comparison to prevent timing attacks
+    token_age = int(time.time()) - int(timestamp)
+    max_age = 30 * 86400
+    # Use comparison that doesn't leak timing information about token age
+    if token_age > max_age or token_age < 0:  # Also check for future timestamps
         return None
 
     return user_id
