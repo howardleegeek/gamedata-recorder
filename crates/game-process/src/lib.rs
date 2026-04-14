@@ -3,26 +3,26 @@ use std::{
     path::PathBuf,
 };
 
-use color_eyre::{Result, eyre::Context as _};
+use color_eyre::{eyre::Context as _, Result};
 
 use windows::{
+    core::{Error, Owned, PSTR},
     Win32::{
         Foundation::{HWND, STILL_ACTIVE},
         System::{
             Diagnostics::ToolHelp::{
-                CreateToolhelp32Snapshot, MODULEENTRY32, Module32First, Module32Next,
-                PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPMODULE,
+                CreateToolhelp32Snapshot, Module32First, Module32Next, Process32First,
+                Process32Next, MODULEENTRY32, PROCESSENTRY32, TH32CS_SNAPMODULE,
                 TH32CS_SNAPMODULE32, TH32CS_SNAPPROCESS,
             },
             Threading::{
-                GetExitCodeProcess, OpenProcess, PROCESS_NAME_NATIVE, PROCESS_QUERY_INFORMATION,
-                PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameA,
+                GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameA, PROCESS_NAME_NATIVE,
+                PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
             },
             WindowsProgramming::HW_PROFILE_INFOA,
         },
         UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
     },
-    core::{Error, Owned, PSTR},
 };
 
 pub use windows;
@@ -51,7 +51,10 @@ pub fn exe_name_for_pid(Pid(pid): Pid) -> Result<PathBuf> {
             PSTR(&mut process_name as *mut u8),
             &mut process_name_size,
         )?;
-        let process_name = CString::new(&process_name[..process_name_size.try_into().unwrap()])?;
+        let process_name_size = process_name_size
+            .try_into()
+            .map_err(|e| color_eyre::eyre::eyre!("process_name_size too large: {}", e))?;
+        let process_name = CString::new(&process_name[..process_name_size])?;
         let process_name = OsString::from_encoded_bytes_unchecked(process_name.into_bytes());
         let process_name = PathBuf::from(process_name);
         Ok(process_name)
