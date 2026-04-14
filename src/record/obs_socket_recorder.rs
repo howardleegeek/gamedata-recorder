@@ -1,12 +1,11 @@
 use std::{path::Path, time::Duration};
 
 use color_eyre::{
-    Result,
     eyre::{Context, OptionExt as _},
+    Result,
 };
-use constants::{FPS, RECORDING_HEIGHT, RECORDING_WIDTH, encoding::VideoEncoderType};
+use constants::{encoding::VideoEncoderType, FPS, RECORDING_HEIGHT, RECORDING_WIDTH};
 use obws::{
-    Client,
     requests::{
         config::SetVideoSettings,
         inputs::{InputId, SetSettings, Volume},
@@ -14,8 +13,9 @@ use obws::{
         scene_items::{Position, Scale, SceneItemTransform, SetTransform},
         scenes::SceneId,
     },
+    Client,
 };
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{GetLastError, HWND};
 
 use crate::{
     config::EncoderSettings,
@@ -377,9 +377,14 @@ fn get_obs_window_encoding(hwnd: HWND, game_exe: &str) -> String {
     // Get window class
     let mut class_buf = [0u16; 256];
     let class_len = unsafe { GetClassNameW(hwnd, &mut class_buf) };
+    // Check GetLastError to distinguish empty class name from API failure
     let class = if class_len > 0 {
         String::from_utf16_lossy(&class_buf[..class_len as usize])
     } else {
+        let err = unsafe { GetLastError() };
+        if err.0 != 0 {
+            tracing::warn!("GetClassNameW failed for hwnd {:?}: error {}", hwnd, err.0);
+        }
         String::new()
     };
 
