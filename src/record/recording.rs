@@ -142,6 +142,9 @@ impl Recording {
             GetWindowTextLengthW, GetWindowTextW,
         };
 
+        // GetWindowTextLengthW returns 0 for both empty titles AND on error.
+        // Clear last error first, then check GetLastError() to distinguish.
+        unsafe { windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::ERROR_SUCCESS) };
         let title_len = unsafe { GetWindowTextLengthW(self.hwnd) };
         if title_len > 0 {
             let mut buf = vec![0u16; (title_len + 1) as usize];
@@ -152,6 +155,12 @@ impl Recording {
                 } else {
                     return Some(String::from_utf16_lossy(&buf));
                 }
+            }
+        } else {
+            // Check if 0 means error or truly empty title
+            let last_error = unsafe { windows::Win32::Foundation::GetLastError() };
+            if last_error.0 != 0 {
+                tracing::warn!("GetWindowTextLengthW failed for hwnd {:?}: error {}", self.hwnd, last_error.0);
             }
         }
         None
