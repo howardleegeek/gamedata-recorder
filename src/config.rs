@@ -474,6 +474,46 @@ where
     Ok(preset)
 }
 
+/// Validates that the NVENC preset2 value is one of the valid options from
+/// NVENC_PRESETS. Returns an error if the preset is not in the allowed list.
+fn validate_nvenc_preset2<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    let preset = String::deserialize(deserializer)?;
+
+    if !constants::encoding::NVENC_PRESETS.contains(&preset.as_str()) {
+        return Err(Error::custom(format!(
+            "Invalid NVENC preset '{}'. Valid options are: {:?}",
+            preset,
+            constants::encoding::NVENC_PRESETS
+        )));
+    }
+
+    Ok(preset)
+}
+
+/// Validates that the NVENC tune value is one of the valid options from
+/// NVENC_TUNE_OPTIONS. Returns an error if the tune value is not in the allowed list.
+fn validate_nvenc_tune<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    let tune = String::deserialize(deserializer)?;
+
+    if !constants::encoding::NVENC_TUNE_OPTIONS.contains(&tune.as_str()) {
+        return Err(Error::custom(format!(
+            "Invalid NVENC tune '{}'. Valid options are: {:?}",
+            tune,
+            constants::encoding::NVENC_TUNE_OPTIONS
+        )));
+    }
+
+    Ok(tune)
+}
+
 /// OBS x264 (CPU) encoder specific settings
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -505,7 +545,9 @@ impl ObsX264Settings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct FfmpegNvencSettings {
+    #[serde(deserialize_with = "validate_nvenc_preset2")]
     pub preset2: String,
+    #[serde(deserialize_with = "validate_nvenc_tune")]
     pub tune: String,
 }
 impl Default for FfmpegNvencSettings {
