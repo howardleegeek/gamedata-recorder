@@ -23,8 +23,8 @@ sudo apt-get install -y -qq \
 # 2. Install Bun (OpenCode runtime)
 if ! command -v bun &>/dev/null; then
     curl -fsSL https://bun.sh/install | bash
-    export PATH="$HOME/.bun/bin:$PATH"
 fi
+export PATH="$HOME/.bun/bin:$PATH"
 
 # 3. Install OpenCode
 if [ ! -d "$HOME/.opencode" ]; then
@@ -34,14 +34,7 @@ export PATH="$HOME/.opencode/bin:$PATH"
 
 # 4. Configure Fireworks API key (Kimi K2.5 Turbo)
 mkdir -p ~/.config/opencode
-cat > ~/.config/opencode/auth.json <<EOF
-{
-  "fireworks": {
-    "type": "api",
-    "key": "$FIREWORKS_API_KEY"
-  }
-}
-EOF
+jq -n --arg key "$FIREWORKS_API_KEY" '{"fireworks": {"type": "api", "key": $key}}' > ~/.config/opencode/auth.json
 chmod 600 ~/.config/opencode/auth.json
 
 # 5. Clone gamedata-recorder
