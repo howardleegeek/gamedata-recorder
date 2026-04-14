@@ -67,18 +67,18 @@ impl UnsupportedGames {
                         && game_exe_without_ext.is_char_boundary(b.len())
                         && game_exe_without_ext
                             .get(..b.len())
-                            .map_or(false, |prefix| prefix.eq_ignore_ascii_case(b))
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b))
                         && game_exe_without_ext
                             .get(b.len()..)
-                            .map_or(false, |suffix| suffix.starts_with('_')))
+                            .is_some_and(|suffix| suffix.starts_with('_')))
                     || (game_exe_without_ext.len() > b.len()
                         && game_exe_without_ext.is_char_boundary(b.len())
                         && game_exe_without_ext
                             .get(..b.len())
-                            .map_or(false, |prefix| prefix.eq_ignore_ascii_case(b))
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b))
                         && game_exe_without_ext
                             .get(b.len()..)
-                            .map_or(false, |suffix| suffix.starts_with('-')))
+                            .is_some_and(|suffix| suffix.starts_with('-')))
                     || (game_exe_without_ext.len()
                         == b.len().saturating_add("epicgamesstore".len())
                         && game_exe_without_ext.is_char_boundary(b.len())
@@ -86,10 +86,10 @@ impl UnsupportedGames {
                             .is_char_boundary(b.len().saturating_add("epicgamesstore".len()))
                         && game_exe_without_ext
                             .get(..b.len())
-                            .map_or(false, |prefix| prefix.eq_ignore_ascii_case(b))
-                        && game_exe_without_ext.get(b.len()..).map_or(false, |suffix| {
-                            suffix.eq_ignore_ascii_case("epicgamesstore")
-                        }))
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b))
+                        && game_exe_without_ext
+                            .get(b.len()..)
+                            .is_some_and(|suffix| suffix.eq_ignore_ascii_case("epicgamesstore")))
             })
         })
     }
