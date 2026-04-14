@@ -186,7 +186,10 @@ async fn main(
                     continue;
                 }
 
-                let listening_for_new_hotkey = *app_state.listening_for_new_hotkey.read().unwrap();
+                let listening_for_new_hotkey = *app_state
+                    .listening_for_new_hotkey
+                    .read()
+                    .map_err(|_| color_eyre::eyre::eyre!("listening_for_new_hotkey lock poisoned"))?;
                 match listening_for_new_hotkey {
                     ListeningForNewHotkey::Listening { target } => {
                         if let Some(key) = e.key_press_keycode() { *app_state.listening_for_new_hotkey.write().unwrap() = ListeningForNewHotkey::Captured { target, key } }
