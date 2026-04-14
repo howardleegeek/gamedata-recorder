@@ -103,6 +103,13 @@ impl ApiClient {
             ));
         }
 
+        // Check maximum length to prevent potential DoS via header size limits
+        if api_key.len() > 256 {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "API key exceeds maximum length".into(),
+            ));
+        }
+
         // Simple validation - check if it starts with 'sk_'
         if !api_key.starts_with("sk_") {
             return Err(ApiError::ApiKeyValidationFailure(
