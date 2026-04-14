@@ -177,6 +177,7 @@ impl KbmCapture {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        // SAFETY: Windows API callback - unsafe required for FFI boundary
         unsafe {
             use windows::Win32::UI::WindowsAndMessaging;
             match msg {
