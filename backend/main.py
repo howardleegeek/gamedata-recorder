@@ -401,8 +401,14 @@ class UploadInitRequest(BaseModel):
 class UploadCompleteRequest(BaseModel):
     """Upload completion request."""
 
-    upload_id: str
-    etags: List[str] = []
+    upload_id: str = Field(..., max_length=36)
+    etags: List[str] = Field(default=[], max_length=10000)
+
+    @validator("etags")
+    def validate_etags_length(cls, v):
+        if len(v) > 10000:
+            raise ValueError("etags list exceeds maximum of 10000 items")
+        return v
 
 
 class PayoutRequest(BaseModel):
