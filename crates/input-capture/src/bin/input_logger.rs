@@ -103,6 +103,15 @@ struct ZstdWriter {
 }
 
 #[cfg(feature = "compression")]
+impl ZstdWriter {
+    /// Finish the zstd encoder, writing any remaining data and checksums.
+    /// This must be called before dropping to ensure a valid compressed file.
+    fn finish(mut self) -> std::io::Result<()> {
+        self.encoder.finish().map(|_| ())
+    }
+}
+
+#[cfg(feature = "compression")]
 impl Write for ZstdWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.encoder.write(buf)
@@ -155,7 +164,7 @@ fn main() {
 
     rt.block_on(async {
         // Setup output writer based on arguments
-        let _result: Result<(), Box<dyn std::error::Error>> = match &args.output {
+        let result: Result<(), Box<dyn std::error::Error>> = match &args.output {
             Some(path) => {
                 let file = std::fs::File::create(path).expect("Failed to create output file");
 
@@ -164,7 +173,12 @@ fn main() {
                     let encoder = zstd::stream::write::Encoder::new(file, args.level)
                         .expect("Failed to create zstd encoder");
                     let mut writer = ZstdWriter { encoder };
-                    run_logger(&timer, &mut rx, &mut writer).await
+                    let res = run_logger(&timer, &mut rx, &mut writer).await;
+                    // Finalize the zstd encoder to ensure complete compressed output
+                    if let Err(e) = writer.finish() {
+                        tracing::warn!("Failed to finalize zstd encoder: {}", e);
+                    }
+                    res
                 } else {
                     let mut writer = file;
                     run_logger(&timer, &mut rx, &mut writer).await
@@ -182,6 +196,10 @@ fn main() {
                 run_logger(&timer, &mut rx, &mut writer).await
             }
         };
+
+        if let Err(e) = result {
+            tracing::error!("Input logger error: {}", e);
+        }
     });
 }
 
