@@ -656,7 +656,7 @@ async def upload_init(
                         "UploadId": s3_upload_id,
                         "PartNumber": i,
                     },
-                    ExpiresIn=3600,
+                    ExpiresIn=86400,  # 24 hours to match API expiration
                 )
                 chunk_urls.append({"chunk_number": i, "upload_url": url})
         except Exception as e:
@@ -749,7 +749,7 @@ async def upload_chunk(
                     "UploadId": upload.s3_upload_id,
                     "PartNumber": chunk_number,
                 },
-                ExpiresIn=3600,
+                ExpiresIn=86400,  # 24 hours to match API expiration
             )
         except Exception as e:
             logger.error(f"Failed to generate chunk URL: {e}")
