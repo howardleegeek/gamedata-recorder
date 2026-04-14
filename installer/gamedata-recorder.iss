@@ -63,10 +63,15 @@ Filename: "taskkill"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden; Ch
 function IsAppRunning(): Boolean;
 var
   ResultCode: Integer;
+  ExecSuccess: Boolean;
 begin
   // Query tasklist to check if process exists - returns 0 if found, 1 if not found
-  Exec('tasklist', '/FI "IMAGENAME eq {#MyAppExeName}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Result := (ResultCode = 0);
+  // If tasklist itself fails to execute, assume process is not running to be safe
+  ExecSuccess := Exec('tasklist', '/FI "IMAGENAME eq {#MyAppExeName}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if not ExecSuccess then
+    Result := False
+  else
+    Result := (ResultCode = 0);
 end;
 
 // Show a simple "Install complete! GameData Recorder will run in your system tray." message
