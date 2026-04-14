@@ -67,9 +67,9 @@ gamedata-recorder/
 
 | 问题 | 位置 | 风险等级 | 建议修复 |
 |------|------|----------|----------|
-| **临时密钥回退** | `backend/main.py:89` | 🔴 高 | 生产环境必须设置 `API_SECRET` 环境变量，当前会生成临时随机密钥 |
-| **文件型数据库** | `backend/main.py:46-72` | 🟡 中 | 使用JSON文件存储，不适合生产，应迁移到PostgreSQL |
-| **CORS配置宽松** | `backend/main.py:25-35` | 🟡 中 | 开发环境允许localhost，生产需限制具体域名 |
+| **临时密钥回退** | `backend/main.py:110-127` | 🔴 高 | 生产环境必须设置 `API_SECRET` 环境变量，当前会生成临时随机密钥 |
+| **数据库配置** | `backend/main.py:54-68` | 🟡 中 | 已迁移到PostgreSQL，需确保DATABASE_URL正确配置 |
+| **CORS配置宽松** | `backend/main.py:76-79` | 🟡 中 | 开发环境允许localhost，生产需限制具体域名 |
 
 #### 2.2 🟡 中风险问题
 
