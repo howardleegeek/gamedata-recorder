@@ -216,14 +216,12 @@ impl EguiOverlay for OverlayApp {
             .show(egui_context, |ui| {
                 ui.horizontal(|ui| {
                     // Get logo bytes, using empty fallback if unavailable
-                    let logo_bytes: Vec<u8> = if self.rec_status.is_recording() {
+                    let logo_bytes: Arc<[u8]> = if self.rec_status.is_recording() {
                         get_logo_recording_bytes()
-                            .map(|b| b.to_vec())
+                            .map(Arc::from)
                             .unwrap_or_default()
                     } else {
-                        get_logo_default_bytes()
-                            .map(|b| b.to_vec())
-                            .unwrap_or_default()
+                        get_logo_default_bytes().map(Arc::from).unwrap_or_default()
                     };
                     ui.add(
                         Image::new(ImageSource::Bytes {
