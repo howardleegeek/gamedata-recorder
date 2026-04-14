@@ -32,9 +32,11 @@ impl EventDebouncer {
                 id,
             } => self.gamepad_button.debounce((id, key), press_state),
             Event::GamepadButtonChange { key, id, .. } => {
-                self.gamepad_button_value.debounce((id, key))
+                self.gamepad_button_value.debounce_with_cleanup((id, key))
             }
-            Event::GamepadAxisChange { axis: key, id, .. } => self.gamepad_axis.debounce((id, key)),
+            Event::GamepadAxisChange { axis: key, id, .. } => {
+                self.gamepad_axis.debounce_with_cleanup((id, key))
+            }
             Event::MouseMove(_) | Event::MouseScroll { .. } => true,
         }
     }
@@ -85,6 +87,45 @@ impl<K: Eq + Hash> AnalogDebouncer<K> {
         const MAX_ANALOGUE_SAMPLING_MICROSECONDS: u64 = (1_000_000.0 / (FPS as f32 * 2.0)) as u64;
         // Cleanup threshold: 10x the sampling period to avoid memory growth during long sessions
         const CLEANUP_THRESHOLD_MICROSECONDS: u64 = MAX_ANALOGUE_SAMPLING_MICROSECONDS * 10;
+        // Cleanup probability: run cleanup approximately once every 100 calls to amortize cost
+        const CLEANUP_PROBABILITY_THRESHOLD: u32 = 100;
+
+        let now = std::time::Instant::now();
+        let Some(last_change) = self.last_change.get(&key) else {
+            self.last_change.insert(key, now);
+            return true;
+        };
+
+        if now - *last_change > Duration::from_micros(MAX_ANALOGUE_SAMPLING_MICROSECONDS) {
+            self.last_change.insert(key, now);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns whether or not a sufficient amount of time has passed since the last change.
+    /// This variant performs probabilistic cleanup to prevent unbounded memory growth.
+    pub(crate) fn debounce_with_cleanup(&mut self, key: K) -> bool {
+        const MAX_ANALOGUE_SAMPLING_MICROSECONDS: u64 = (1_000_000.0 / (FPS as f32 * 2.0)) as u64;
+        // Cleanup threshold: 10x the sampling period to avoid memory growth during long sessions
+        const CLEANUP_THRESHOLD_MICROSECONDS: u64 = MAX_ANALOGUE_SAMPLING_MICROSECONDS * 10;
+        // Cleanup probability: run cleanup approximately once every 100 calls to amortize cost
+        const CLEANUP_PROBABILITY_THRESHOLD: u32 = 100;
+
+        // Probabilistic cleanup: ~1% chance per call to avoid locking overhead
+        // Uses thread-local random for lock-free, fast random number generation
+        use std::cell::Cell;
+        thread_local! {
+            static COUNTER: Cell<u32> = const { Cell::new(0) };
+        }
+        COUNTER.with(|c| {
+            let count = c.get().wrapping_add(1);
+            c.set(count);
+            if count % CLEANUP_PROBABILITY_THRESHOLD == 0 {
+                self.cleanup_stale_entries();
+            }
+        });
 
         let now = std::time::Instant::now();
         let Some(last_change) = self.last_change.get(&key) else {
