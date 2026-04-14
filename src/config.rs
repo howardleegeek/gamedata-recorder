@@ -301,9 +301,7 @@ impl EncoderSettings {
             .set_bool("lookahead", constants::encoding::LOOKAHEAD);
 
         updater = match self.encoder {
-            VideoEncoderType::X264 => {
-                self.x264.apply_to_data_updater(updater)
-            }
+            VideoEncoderType::X264 => self.x264.apply_to_data_updater(updater),
             VideoEncoderType::NvEncHevc | VideoEncoderType::NvEnc => {
                 self.nvenc.apply_to_data_updater(updater)
             }
