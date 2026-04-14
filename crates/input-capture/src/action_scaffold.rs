@@ -79,6 +79,8 @@ pub fn build_actions(
     let mut action_index: u32 = 0;
     let mut cursor_x: i32 = 0;
     let mut cursor_y: i32 = 0;
+    // Track trajectories with a moving pointer since both inputs are sorted by timestamp
+    let mut traj_idx: usize = 0;
 
     for event in events {
         // Track cursor position
@@ -111,12 +113,15 @@ pub fn build_actions(
         };
 
         if let Some(action_type) = action_type {
-            // Find the preceding trajectory (the one that ended at or just before this action)
-            let preceding_traj = trajectories
-                .iter()
-                .rev()
-                .find(|t| t.end_ns <= event.timestamp_ns)
-                .map(|t| t.index);
+            // Advance trajectory pointer to find the one that ended at or just before this action
+            while traj_idx + 1 < trajectories.len()
+                && trajectories[traj_idx + 1].end_ns <= event.timestamp_ns
+            {
+                traj_idx += 1;
+            }
+            let preceding_traj = (traj_idx < trajectories.len())
+                .then(|| trajectories[traj_idx].index)
+                .filter(|_| trajectories[traj_idx].end_ns <= event.timestamp_ns);
 
             let frame_id = event.timestamp_ns / frame_interval_ns;
 
