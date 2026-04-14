@@ -51,7 +51,7 @@ InitUIVars() {
         MsgBox("stop_button X coordinate out of bounds: " . stop_button[1])
         ExitApp()
     }
-    if (stop_button[2] < 0 || stop_button[2] > 1200) {
+    if (stop_button[2] < 0 || stop_button[2] > 1080) {
         MsgBox("stop_button Y coordinate out of bounds: " . stop_button[2])
         ExitApp()
     }
@@ -69,7 +69,7 @@ InitUIVars() {
         MsgBox("honk_button X coordinate out of bounds: " . honk_button[1])
         ExitApp()
     }
-    if (honk_button[2] < 0 || honk_button[2] > 1200) {
+    if (honk_button[2] < 0 || honk_button[2] > 1080) {
         MsgBox("honk_button Y coordinate out of bounds: " . honk_button[2])
         ExitApp()
     }
@@ -96,7 +96,7 @@ InitUIVars() {
         MsgBox("collapse_button X coordinate out of bounds: " . collapse_button[1])
         ExitApp()
     }
-    if (collapse_button[2] < 0 || collapse_button[2] > 1200) {
+    if (collapse_button[2] < 0 || collapse_button[2] > 1080) {
         MsgBox("collapse_button Y coordinate out of bounds: " . collapse_button[2])
         ExitApp()
     }
@@ -126,7 +126,7 @@ if WinExist("ahk_exe OWL Control.exe") {
         MsgBox("reset_position X coordinate out of bounds: " . reset_position[1])
         ExitApp()
     }
-    if (reset_position[2] < 0 || reset_position[2] > 1200) {
+    if (reset_position[2] < 0 || reset_position[2] > 1080) {
         MsgBox("reset_position Y coordinate out of bounds: " . reset_position[2])
         ExitApp()
     }
@@ -134,7 +134,7 @@ if WinExist("ahk_exe OWL Control.exe") {
 
     if (stop_toggle == checked_true) {
         y := stop_button[2] + option_offset
-        if (y < 0 || y > 1200) {
+        if (y < 0 || y > 1080) {
             MsgBox("Calculated Y coordinate out of bounds: " . y)
             ExitApp()
         }
@@ -172,13 +172,13 @@ if WinExist("ahk_exe OWL Control.exe") {
             }
             loop repeat {
                 y := coords[2]
-                if (y < 0 || y > 1200) {
+                if (y < 0 || y > 1080) {
                     MsgBox("Calculated Y coordinate out of bounds in loop: " . y)
                     ExitApp()
                 }
                 MouseClick "left", x, y
                 y := (coords[2] + (A_Index) * option_offset) - collapse_offset
-                if (y < 0 || y > 1200) {
+                if (y < 0 || y > 1080) {
                     MsgBox("Calculated Y coordinate out of bounds in loop: " . y)
                     ExitApp()
                 }
@@ -186,7 +186,7 @@ if WinExist("ahk_exe OWL Control.exe") {
             }
         } else {
             y := coords[2] - collapse_offset
-            if (y < 0 || y > 1200) {
+            if (y < 0 || y > 1080) {
                 MsgBox("Calculated Y coordinate out of bounds: " . y)
                 ExitApp()
             }
