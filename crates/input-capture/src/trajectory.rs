@@ -205,7 +205,7 @@ fn build_trajectory(
     event_count: u32,
     terminator: TrajectoryTerminator,
 ) -> Trajectory {
-    let duration_ms = (end_ns - start_ns) as f64 / 1_000_000.0;
+    let duration_ms = end_ns.saturating_sub(start_ns) as f64 / 1_000_000.0;
     let avg_speed = if duration_ms > 0.0 {
         total_distance / duration_ms
     } else {
