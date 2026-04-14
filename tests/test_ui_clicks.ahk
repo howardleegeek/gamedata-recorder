@@ -374,7 +374,7 @@ if WinExist("ahk_exe OWL Control.exe") {
             MsgBox("Calculated X coordinate out of bounds: " . x)
             ExitApp()
         }
-        if (coords.Length = 3) {
+        if (coords.Length >= 3) {
             repeat := coords[3]
             if (repeat < 1 || repeat > 100) {
                 MsgBox("Invalid repeat count: must be between 1 and 100, got " . repeat)
