@@ -76,7 +76,7 @@ echo "Cargo:    $CARGO_VERSION"
 echo "jq:       $JQ_VERSION"
 echo "Repo:     $REPO_STATUS"
 echo "Memory:   $(free -h 2>/dev/null | awk '/^Mem:/{print $2}' || echo "N/A")"
-echo "CPUs:     $(nproc)"
+echo "CPUs:     $(nproc 2>/dev/null || echo "N/A")"
 
 # Check critical tools are present
 CRITICAL_MISSING=""
