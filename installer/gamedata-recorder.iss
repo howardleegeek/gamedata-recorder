@@ -27,6 +27,8 @@ PrivilegesRequiredOverridesAllowed=dialog
 WizardStyle=modern
 ; Auto-run after install
 SetupIconFile=..\assets\owl-logo.png
+; Uninstall entry icon in Add/Remove Programs
+UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
