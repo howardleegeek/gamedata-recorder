@@ -289,7 +289,7 @@ where
     use serde::de::Error;
     match serde_json::Value::deserialize(deserializer)? {
         serde_json::Value::Bool(b) => Ok(b),
-        serde_json::Value::String(s) => match s.as_str() {
+        serde_json::Value::String(s) => match s.trim() {
             "true" => Ok(true),
             "false" => Ok(false),
             _ => Err(Error::custom(format!("Invalid boolean string: {s}"))),
