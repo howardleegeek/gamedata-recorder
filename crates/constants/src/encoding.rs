@@ -1,13 +1,16 @@
 use serde::{Deserialize, Serialize};
 
 /// Supported video encoder types — HEVC (H.265) preferred for GameData Labs buyer spec
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum VideoEncoderType {
+    // NOTE: Enum variants are deliberately ordered with HEVC preferred as Default.
+    // NVIDIA NVENC HEVC is the default encoder (best compatibility & quality).
     // NOTE: X265 was removed — OBS has no software HEVC encoder.
     // It silently fell back to x264 (H.264), misleading users.
     // Use NvEncHevc/AmfHevc/QsvHevc for hardware HEVC instead.
-    X264,
+    #[default]
     NvEncHevc,
+    X264,
     NvEnc,
     AmfHevc,
     Amf,
