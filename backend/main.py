@@ -4,6 +4,7 @@ Production-ready API server with PostgreSQL database.
 Handles: auth, user management, uploads, earnings, payouts.
 """
 
+import math
 import os
 import uuid
 import time
@@ -559,7 +560,7 @@ async def upload_init(
         )
     chunk_size = req.chunk_size_bytes or 33554432
     total_chunks = min(
-        max(1, (req.total_size_bytes + chunk_size - 1) // chunk_size), MAX_CHUNKS
+        max(1, math.ceil(req.total_size_bytes / chunk_size)), MAX_CHUNKS
     )
 
     # Sanitize filename to prevent path traversal
@@ -816,7 +817,7 @@ async def earnings_history(
         "total": total,
         "page": page,
         "per_page": per_page,
-        "total_pages": (total + per_page - 1) // per_page,
+        "total_pages": math.ceil(total / per_page),
     }
 
 
