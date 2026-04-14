@@ -142,9 +142,12 @@ impl Recording {
             GetWindowTextLengthW, GetWindowTextW,
         };
 
+        // Maximum reasonable window title length (prevents DoS from malicious windows)
+        const MAX_TITLE_LEN: i32 = 4096;
+
         let title_len = unsafe { GetWindowTextLengthW(self.hwnd) };
-        // Bounds check: title_len is i32, ensure it's non-negative and +1 won't overflow
-        if title_len > 0 && title_len < i32::MAX {
+        // Bounds check: title_len must be positive and within reasonable limits
+        if title_len > 0 && title_len < MAX_TITLE_LEN {
             let mut buf = vec![0u16; (title_len as usize).saturating_add(1)];
             let copied = unsafe { GetWindowTextW(self.hwnd, &mut buf) };
             if copied > 0 {
