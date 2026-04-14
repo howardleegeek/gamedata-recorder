@@ -152,7 +152,21 @@ impl VideoRecorder for ObsEmbeddedRecorder {
     }
 
     async fn poll(&mut self) -> PollUpdate {
-        self.obs_tx.send(RecorderMessage::Poll).await.ok();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        if self
+            .obs_tx
+            .send(RecorderMessage::Poll { result_tx })
+            .await
+            .is_err()
+        {
+            // Channel closed - OBS thread likely panicked, return None for FPS
+            return PollUpdate { active_fps: None };
+        }
+        // Wait for poll to complete before reading FPS
+        if result_rx.await.is_err() {
+            // OBS thread panicked during poll
+            return PollUpdate { active_fps: None };
+        }
         PollUpdate {
             active_fps: Some(unsafe { libobs_wrapper::sys::obs_get_active_fps() }),
         }
@@ -186,7 +200,9 @@ enum RecorderMessage {
     StopRecording {
         result_tx: tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
     },
-    Poll,
+    Poll {
+        result_tx: tokio::sync::oneshot::Sender<()>,
+    },
     CheckHookTimeout {
         result_tx: tokio::sync::oneshot::Sender<bool>,
     },
@@ -291,10 +307,11 @@ fn recorder_thread_impl(
                     .send(state.stop_recording(last_shutdown_tx.take()))
                     .ok();
             }
-            RecorderMessage::Poll => {
+            RecorderMessage::Poll { result_tx } => {
                 if let Err(e) = state.poll() {
                     tracing::error!("Failed to poll OBS embedded recorder: {e}");
                 }
+                result_tx.send(()).ok();
             }
             RecorderMessage::CheckHookTimeout { result_tx } => {
                 result_tx.send(state.check_hook_timeout()).ok();
