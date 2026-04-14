@@ -715,6 +715,11 @@ async def earnings_history(
     db: AsyncSession = Depends(get_db),
 ):
     """Get earnings history."""
+    # Validate pagination parameters to prevent DoS and division by zero
+    if page < 1:
+        raise HTTPException(status_code=400, detail="page must be >= 1")
+    if per_page < 1 or per_page > 100:
+        raise HTTPException(status_code=400, detail="per_page must be between 1 and 100")
     offset = (page - 1) * per_page
 
     result = await db.execute(
@@ -773,6 +778,11 @@ async def list_uploads(
     db: AsyncSession = Depends(get_db),
 ):
     """List user's uploads."""
+    # Validate pagination parameters to prevent DoS and division by zero
+    if page < 1:
+        raise HTTPException(status_code=400, detail="page must be >= 1")
+    if per_page < 1 or per_page > 100:
+        raise HTTPException(status_code=400, detail="per_page must be between 1 and 100")
     query = select(Upload).where(Upload.user_id == current_user.id)
 
     if status:
