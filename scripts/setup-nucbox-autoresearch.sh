@@ -2,7 +2,7 @@
 # Setup OpenCode + autoresearch deps on nucbox-wsl-1
 # Run on the nucbox WSL machine itself (not Mac1)
 
-set -e
+set -euo pipefail
 
 echo "=== GameData Recorder autoresearch setup on nucbox-wsl-1 ==="
 
