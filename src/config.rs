@@ -2,7 +2,7 @@ use color_eyre::eyre::{eyre, Context, Result};
 use constants::encoding::VideoEncoderType;
 use serde::{Deserialize, Deserializer, Serialize};
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::DirBuilderExt;
 use std::{collections::HashMap, fs, path::PathBuf};
 
 /// Maximum allowed length for API key to prevent DoS from malicious config files
@@ -246,13 +246,23 @@ pub fn get_persistent_dir() -> Result<PathBuf> {
     let dir = dirs::data_dir()
         .ok_or_else(|| eyre!("Could not find user data directory"))?
         .join("GameData Recorder");
-    fs::create_dir_all(&dir)?;
-    // Set restrictive permissions on Unix to protect sensitive config data (API keys)
+
+    // Create directory with restrictive permissions atomically on Unix to prevent
+    // TOCTOU race condition where directory is temporarily accessible with default
+    // permissions before we can chmod it. On non-Unix, use standard creation.
     #[cfg(unix)]
     {
-        let permissions = fs::Permissions::from_mode(0o700);
-        fs::set_permissions(&dir, permissions)?;
+        use std::fs::DirBuilder;
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = DirBuilder::new();
+        builder.mode(0o700);
+        builder.create(&dir)?;
     }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(&dir)?;
+    }
+
     tracing::debug!("Persistent dir: {:?}", dir);
     Ok(dir)
 }
