@@ -177,10 +177,10 @@ fn validate_files(
     let (mouse_stats, mouse_invalid_reasons) = mouse::validate(&input);
     let (gamepad_stats, gamepad_invalid_reasons) = gamepad::validate(&input);
 
-    // Only invalidate if all three input types are invalid
-    if !(keyboard_invalid_reasons.is_empty()
-        || mouse_invalid_reasons.is_empty()
-        || gamepad_invalid_reasons.is_empty())
+    // Invalidate if any input type has validation errors
+    if !keyboard_invalid_reasons.is_empty()
+        || !mouse_invalid_reasons.is_empty()
+        || !gamepad_invalid_reasons.is_empty()
     {
         invalid_reasons.extend(keyboard_invalid_reasons);
         invalid_reasons.extend(mouse_invalid_reasons);
