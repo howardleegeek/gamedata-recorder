@@ -6,7 +6,7 @@ This document describes the format of the `inputs.csv` file produced by owl-cont
 
 The input recording format is a CSV file with JSON-encoded event arguments. Each row represents a single input event.
 
-```
+```csv
 timestamp,event_type,event_args
 1767633347.5859811,START,"{""inputs"":{""keyboard"":[116],""mouse"":[]}}"
 1767633347.708028,VIDEO_START,"[]"
