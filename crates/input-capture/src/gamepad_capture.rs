@@ -131,7 +131,10 @@ pub fn initialize_thread(
     active_gamepads: Arc<Mutex<ActiveGamepads>>,
     gamepads: Arc<RwLock<HashMap<GamepadId, GamepadMetadata>>>,
 ) -> GamepadThreads {
-    let already_captured_by_xinput = Arc::new(RwLock::new(HashSet::new()));
+    // Use Arc<str> instead of String to avoid allocation during lookup in hot path.
+    // HashSet<Arc<str>> allows contains() to accept &str without allocation.
+    let already_captured_by_xinput: Arc<RwLock<HashSet<Arc<str>>>> =
+        Arc::new(RwLock::new(HashSet::new()));
 
     // We use both the `xinput` and `wgi` versions of gilrs so that we can capture Xbox controllers
     // (which only work with `xinput`) and PS controllers (which only work with `wgi`).
@@ -188,7 +191,7 @@ pub fn initialize_thread(
                         break;
                     }
                 };
-                captured_guard.insert(gamepad.name().to_string());
+                captured_guard.insert(Arc::from(gamepad.name()));
                 drop(captured_guard);
 
                 let Some(event) = map_event_xinput(GamepadId::XInput(id.into()), event) else {
@@ -257,7 +260,8 @@ pub fn initialize_thread(
                         break;
                     }
                 };
-                let is_captured = captured_guard.contains(&gamepad.name().to_string());
+                // No allocation: Arc<str> allows lookup by &str directly
+                let is_captured = captured_guard.contains(gamepad.name());
                 drop(captured_guard);
 
                 if is_captured {
