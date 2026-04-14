@@ -89,6 +89,21 @@ pub fn is_valid_amf_preset(value: &str) -> bool {
 /// both are the same
 pub const NVENC_TUNE_OPTIONS: &[&str] = &["hq", "ll", "ull"];
 
+/// Validates x264 preset setting
+pub fn is_valid_x264_preset(value: &str) -> bool {
+    X264_PRESETS.contains(&value)
+}
+
+/// Validates NVENC preset setting
+pub fn is_valid_nvenc_preset(value: &str) -> bool {
+    NVENC_PRESETS.contains(&value)
+}
+
+/// Validates NVENC tune setting
+pub fn is_valid_nvenc_tune(value: &str) -> bool {
+    NVENC_TUNE_OPTIONS.contains(&value)
+}
+
 /// H.265 profile for HEVC encoders (buyer spec: main profile)
 pub const HEVC_VIDEO_PROFILE: &str = "main";
 
