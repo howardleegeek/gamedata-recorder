@@ -691,6 +691,13 @@ async def upload_chunk(
     if not upload:
         raise HTTPException(status_code=404, detail="Upload not found")
 
+    # Validate chunk_number doesn't exceed this upload's total_chunks
+    if chunk_number > upload.total_chunks:
+        raise HTTPException(
+            status_code=400,
+            detail=f"chunk_number exceeds total_chunks ({upload.total_chunks})"
+        )
+
     if upload.status != UploadStatus.IN_PROGRESS:
         raise HTTPException(
             status_code=400, detail=f"Upload is already {upload.status.value}"
