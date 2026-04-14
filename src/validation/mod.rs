@@ -56,11 +56,19 @@ pub fn validate_folder(path: &Path) -> eyre::Result<ValidationResult> {
             Ok(result)
         }
         Err(e) => {
-            if let Err(write_err) = std::fs::write(
-                path.join(constants::filename::recording::INVALID),
-                e.join("\n"),
-            ) {
-                tracing::error!("Failed to write invalid marker file: {}", write_err);
+            // Use atomic write pattern for crash durability: write to temp, sync, rename
+            let invalid_path = path.join(constants::filename::recording::INVALID);
+            let temp_path = invalid_path.with_extension("tmp");
+            if let Err(write_err) = std::fs::write(&temp_path, e.join("\n")) {
+                tracing::error!("Failed to write INVALID marker temp file: {write_err}");
+            } else if let Err(sync_err) = std::fs::File::open(&temp_path)
+                .and_then(|f| f.sync_all())
+            {
+                tracing::error!("Failed to sync INVALID marker file: {sync_err}");
+            } else if let Err(rename_err) = std::fs::rename(&temp_path, &invalid_path) {
+                tracing::error!("Failed to rename INVALID marker file: {rename_err}");
+                // Clean up temp file on rename failure
+                std::fs::remove_file(&temp_path).ok();
             }
             eyre::bail!("Validation failures: {}", e.join("\n"));
         }
@@ -243,10 +251,10 @@ fn validate_files(
     let (mouse_stats, mouse_invalid_reasons) = mouse::validate(&input);
     let (gamepad_stats, gamepad_invalid_reasons) = gamepad::validate(&input);
 
-    // Only invalidate if all three input types are invalid
-    if !(keyboard_invalid_reasons.is_empty()
-        || mouse_invalid_reasons.is_empty()
-        || gamepad_invalid_reasons.is_empty())
+    // Invalidate if any input type has validation errors
+    if !keyboard_invalid_reasons.is_empty()
+        || !mouse_invalid_reasons.is_empty()
+        || !gamepad_invalid_reasons.is_empty()
     {
         invalid_reasons.extend(keyboard_invalid_reasons);
         invalid_reasons.extend(mouse_invalid_reasons);

@@ -84,7 +84,7 @@ New-Item -ItemType Directory -Force -Path build-resources/downloads | Out-Null
 $vcRedistPath = "build-resources/downloads/vc_redist.x64.exe"
 if (-not (Test-Path $vcRedistPath)) {
     $ProgressPreference = 'SilentlyContinue'
-    Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $vcRedistPath
+    Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $vcRedistPath -TimeoutSec 300
     Write-Status "VC Redistributable downloaded"
 }
 else {

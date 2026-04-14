@@ -102,16 +102,26 @@ impl InputEventWriter {
     }
 
     pub(crate) async fn stop(mut self, input_capture: &InputCapture) -> Result<()> {
-        // Flush any remaining events before capturing timestamp for End event
-        // This ensures chronological ordering: all flushed events have earlier timestamps
+        // Capture inputs before flush to get most accurate state
+        let end_inputs = input_capture.active_input();
+
+        // Flush any remaining events first to ensure proper ordering
         self.flush().await?;
 
-        // Write the end marker
+        // Capture timestamp AFTER flush to eliminate drift between
+        // last input event and End marker (metadata serialization gap fix)
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or_else(|_| {
+                tracing::warn!("System time is before UNIX epoch, using 0");
+                0.0
+            });
+
+        // Write the end marker with timestamp captured after flush
         self.write_entry(InputEvent::new(
             timestamp,
-            InputEventType::End {
-                inputs: input_capture.active_input(),
-            },
+            InputEventType::End { inputs: end_inputs },
         ))
         .await?;
 
