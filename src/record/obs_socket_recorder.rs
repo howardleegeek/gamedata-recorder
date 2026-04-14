@@ -1,12 +1,11 @@
 use std::{path::Path, time::Duration};
 
 use color_eyre::{
-    Result,
     eyre::{Context, OptionExt as _},
+    Result,
 };
-use constants::{FPS, RECORDING_HEIGHT, RECORDING_WIDTH, encoding::VideoEncoderType};
+use constants::{encoding::VideoEncoderType, FPS, RECORDING_HEIGHT, RECORDING_WIDTH};
 use obws::{
-    Client,
     requests::{
         config::SetVideoSettings,
         inputs::{InputId, SetSettings, Volume},
@@ -14,8 +13,9 @@ use obws::{
         scene_items::{Position, Scale, SceneItemTransform, SetTransform},
         scenes::SceneId,
     },
+    Client,
 };
-use windows::Win32::Foundation::{ERROR_SUCCESS, HWND, SetLastError};
+use windows::Win32::Foundation::{GetLastError, HWND};
 
 use crate::{
     config::EncoderSettings,
@@ -34,6 +34,8 @@ const SET_ENCODER: bool = false;
 pub struct ObsSocketRecorder {
     // Use an Option to allow it to be consumed within the destructor
     client: Option<Client>,
+    /// Handle to the shutdown task for proper cleanup in Drop
+    shutdown_handle: Option<tokio::task::JoinHandle<()>>,
 }
 impl ObsSocketRecorder {
     pub async fn new() -> Result<Self>
@@ -41,7 +43,10 @@ impl ObsSocketRecorder {
         Self: Sized,
     {
         tracing::debug!("ObsSocketRecorder::new() called");
-        Ok(Self { client: None })
+        Ok(Self {
+            client: None,
+            shutdown_handle: None,
+        })
     }
 }
 #[async_trait::async_trait(?Send)]
@@ -74,7 +79,9 @@ impl VideoRecorder for ObsSocketRecorder {
         let recording_path = dummy_video_path
             .parent()
             .ok_or_eyre("Video path must have a parent directory")?;
-        let recording_path = std::fs::canonicalize(recording_path)
+        // Use dunce::canonicalize which handles non-existent paths better than std::fs::canonicalize
+        // (std::fs::canonicalize requires the path to exist, which may not be true for new recordings)
+        let recording_path = dunce::canonicalize(recording_path)
             .wrap_err("Failed to get absolute path for recording directory")?;
 
         // Pull out sub-APIs for easier access
@@ -154,12 +161,18 @@ impl VideoRecorder for ObsSocketRecorder {
                 .wrap_err("Failed to create input")?;
         }
 
-        let _ = inputs
+        if let Err(e) = inputs
             .set_volume(InputId::Name("Mic/Aux"), Volume::Db(-100.0))
-            .await;
-        let _ = inputs
+            .await
+        {
+            tracing::warn!("Failed to mute Mic/Aux input: {e}");
+        }
+        if let Err(e) = inputs
             .set_volume(InputId::Name("Desktop Audio"), Volume::Db(-100.0))
-            .await;
+            .await
+        {
+            tracing::warn!("Failed to mute Desktop Audio input: {e}");
+        }
 
         for (category, name, value) in [
             ("SimpleOutput", "RecQuality", "Stream"),
@@ -318,24 +331,25 @@ impl VideoRecorder for ObsSocketRecorder {
 impl Drop for ObsSocketRecorder {
     fn drop(&mut self) {
         tracing::info!("Shutting down OBS socket recorder");
-        let client = self.client.take();
-        // Spawn a blocking thread to stop the recording synchronously.
-        // tokio::spawn cannot be used in Drop because the runtime may be
-        // shutting down or unavailable, causing the task to never execute.
-        std::thread::spawn(move {
-            // Create a temporary runtime for the blocking stop call
-            if let Ok(rt) = tokio::runtime::Runtime::new() {
-                rt.block_on(async {
-                    if let Some(client) = &client {
-                        if let Err(e) = client.recording().stop().await {
-                            tracing::error!("Failed to stop recording: {e}");
-                        }
-                    }
-                });
-            } else {
-                tracing::warn!("Failed to create runtime for OBS stop in Drop handler");
+        if let Some(client) = self.client.take() {
+            // Spawn the shutdown task and store its handle for cleanup
+            self.shutdown_handle = Some(tokio::spawn(async move {
+                // Log, but do not explode if it fails
+                if let Err(e) = client.recording().stop().await {
+                    tracing::error!("Failed to stop recording: {e}");
+                }
+            }));
+        }
+
+        // Wait for the shutdown task to complete to ensure proper cleanup.
+        // This prevents the task from being orphaned if the runtime shuts down.
+        if let Some(shutdown_handle) = self.shutdown_handle.take() {
+            // Try to block on the handle if we're in a tokio runtime context.
+            // If not in a runtime, the task will run fire-and-forget (fallback).
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let _ = runtime.block_on(shutdown_handle);
             }
-        });
+        }
     }
 }
 
@@ -350,8 +364,9 @@ fn get_obs_window_encoding(hwnd: HWND, game_exe: &str) -> String {
     unsafe { SetLastError(ERROR_SUCCESS) };
     let title_len = unsafe { GetWindowTextLengthW(hwnd) };
     let mut title = String::new();
-    if title_len > 0 {
-        let mut buf = vec![0u16; (title_len + 1) as usize];
+    // Bounds check: ensure title_len is positive and +1 won't overflow
+    if title_len > 0 && title_len < i32::MAX {
+        let mut buf = vec![0u16; (title_len as usize).saturating_add(1)];
         let copied = unsafe { GetWindowTextW(hwnd, &mut buf) };
         if copied > 0 {
             if let Some(end) = buf.iter().position(|&c| c == 0) {
@@ -371,9 +386,14 @@ fn get_obs_window_encoding(hwnd: HWND, game_exe: &str) -> String {
     // Get window class
     let mut class_buf = [0u16; 256];
     let class_len = unsafe { GetClassNameW(hwnd, &mut class_buf) };
+    // Check GetLastError to distinguish empty class name from API failure
     let class = if class_len > 0 {
         String::from_utf16_lossy(&class_buf[..class_len as usize])
     } else {
+        let err = unsafe { GetLastError() };
+        if err.0 != 0 {
+            tracing::warn!("GetClassNameW failed for hwnd {:?}: error {}", hwnd, err.0);
+        }
         String::new()
     };
 

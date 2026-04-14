@@ -152,15 +152,12 @@ impl VideoRecorder for ObsEmbeddedRecorder {
     }
 
     async fn poll(&mut self) -> PollUpdate {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        if self
-            .obs_tx
-            .send(RecorderMessage::Poll { result_tx })
-            .await
-            .is_err()
-        {
-            // Channel closed - OBS thread likely panicked, return None for FPS
+        if let Err(e) = self.obs_tx.send(RecorderMessage::Poll).await {
+            tracing::error!("Failed to send poll message to OBS thread: {e}");
             return PollUpdate { active_fps: None };
+        }
+        PollUpdate {
+            active_fps: Some(unsafe { libobs_wrapper::sys::obs_get_active_fps() }),
         }
         // Wait for poll to complete, receiving is_recording status
         let is_recording = match result_rx.await {
@@ -305,15 +302,15 @@ fn recorder_thread_impl(
             RecorderMessage::StartRecording { request, result_tx } => {
                 let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
-                result_tx
-                    .send(state.start_recording(request, shutdown_rx))
-                    .ok();
+                if let Err(e) = result_tx.send(state.start_recording(request, shutdown_rx)) {
+                    tracing::error!("Failed to send start_recording result: {e:?}");
+                }
                 last_shutdown_tx = Some(shutdown_tx);
             }
             RecorderMessage::StopRecording { result_tx } => {
-                result_tx
-                    .send(state.stop_recording(last_shutdown_tx.take()))
-                    .ok();
+                if let Err(e) = result_tx.send(state.stop_recording(last_shutdown_tx.take())) {
+                    tracing::error!("Failed to send stop_recording result: {e:?}");
+                }
             }
             RecorderMessage::Poll { result_tx } => {
                 if let Err(e) = state.poll() {
@@ -322,7 +319,9 @@ fn recorder_thread_impl(
                 result_tx.send(state.is_recording).ok();
             }
             RecorderMessage::CheckHookTimeout { result_tx } => {
-                result_tx.send(state.check_hook_timeout()).ok();
+                if let Err(e) = result_tx.send(state.check_hook_timeout()) {
+                    tracing::error!("Failed to send check_hook_timeout result: {e:?}");
+                }
             }
         }
     }
@@ -346,6 +345,8 @@ struct RecorderState {
     video_encoders: HashMap<VideoEncoderType, Arc<ObsVideoEncoder>>,
     // Audio encoder (created once upfront, reused always)
     audio_encoder: Arc<ObsAudioEncoder>,
+    /// Handle to the signal monitoring thread for proper cleanup
+    signal_thread_handle: Option<std::thread::JoinHandle<()>>,
 
     // This needs to be last as it needs to be dropped last
     obs_context: ObsContext,
@@ -427,6 +428,7 @@ impl RecorderState {
                 recording_start_time: None,
                 video_encoders: HashMap::new(),
                 audio_encoder,
+                signal_thread_handle: None,
                 obs_context,
             },
             available_encoders,
@@ -519,7 +521,7 @@ impl RecorderState {
 
         // Listen for signals to pass onto the event stream
         self.was_hooked.store(false, Ordering::Relaxed);
-        std::thread::spawn({
+        let signal_thread = std::thread::spawn({
             let event_stream = request.event_stream;
             let was_hooked = self.was_hooked.clone();
 
@@ -554,26 +556,34 @@ impl RecorderState {
                         tokio::select! {
                             r = start_signal_rx.recv() => {
                                 if r.is_ok() {
-                                    if last_application.as_ref().is_some_and(|a| a == &(game_exe.clone(), hwnd.clone())) {
+                                    if last_application.as_ref().is_some_and(|a| a.0 == game_exe && a.1 .0 == hwnd.0) {
                                         tracing::warn!("Video started again for last game, assuming we're already hooked");
-                                        let _ = event_stream.send(InputEventType::HookStart);
+                                        if let Err(e) = event_stream.send(InputEventType::HookStart) {
+                                            tracing::warn!("Failed to send HookStart event: {}", e);
+                                        }
                                         was_hooked.store(true, Ordering::Relaxed);
                                     }
 
                                     tracing::info!("Video started at {}s", initial_time.elapsed().as_secs_f64());
-                                    let _ = event_stream.send(InputEventType::VideoStart);
+                                    if let Err(e) = event_stream.send(InputEventType::VideoStart) {
+                                        tracing::warn!("Failed to send VideoStart event: {}", e);
+                                    }
                                 }
                             }
                             r = stop_signal_rx.recv() => {
                                 if r.is_ok() {
                                     tracing::info!("Video ended at {}s", initial_time.elapsed().as_secs_f64());
-                                    let _ = event_stream.send(InputEventType::VideoEnd);
+                                    if let Err(e) = event_stream.send(InputEventType::VideoEnd) {
+                                        tracing::warn!("Failed to send VideoEnd event: {}", e);
+                                    }
                                 }
                             }
                             r = hook_signal_rx.recv() => {
                                 if r.is_ok() {
                                     tracing::info!("Game hooked at {}s", initial_time.elapsed().as_secs_f64());
-                                    let _ = event_stream.send(InputEventType::HookStart);
+                                    if let Err(e) = event_stream.send(InputEventType::HookStart) {
+                                        tracing::warn!("Failed to send HookStart event: {}", e);
+                                    }
                                     was_hooked.store(true, Ordering::Relaxed);
                                 }
                             }
@@ -586,6 +596,7 @@ impl RecorderState {
                 tracing::info!("Game hook monitoring thread closed");
             }
         });
+        self.signal_thread_handle = Some(signal_thread);
 
         // Update our last encoder settings
         self.last_encoder_settings = video_encoder_settings
@@ -642,7 +653,16 @@ impl RecorderState {
         // Send shutdown signal BEFORE checking hook status, to ensure the signal thread
         // exits cleanly even when the recording was never hooked (avoids thread leak).
         if let Some(shutdown_tx) = last_shutdown_tx {
-            shutdown_tx.send(()).ok();
+            if let Err(e) = shutdown_tx.send(()) {
+                tracing::warn!("Failed to send shutdown signal (receiver dropped): {e:?}");
+            }
+        }
+
+        // Join the signal monitoring thread to ensure proper resource cleanup
+        if let Some(handle) = self.signal_thread_handle.take() {
+            if let Err(e) = handle.join() {
+                tracing::warn!("Signal monitoring thread panicked: {:?}", e);
+            }
         }
 
         if !self.was_hooked.load(Ordering::Relaxed) {

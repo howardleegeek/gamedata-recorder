@@ -98,6 +98,11 @@ impl Recorder {
             .position(|a| a.device_type == DeviceType::DiscreteGpu)
             .unwrap_or_default();
 
+        // Bounds check: ensure adapter_infos is not empty before indexing
+        if app_state.adapter_infos.is_empty() {
+            bail!("No graphics adapters found. Cannot initialize video recorder.");
+        }
+
         tracing::info!(
             "Initializing recorder with adapter index {adapter_index} ({:?})",
             app_state.adapter_infos[adapter_index]
@@ -199,7 +204,10 @@ impl Recorder {
         );
 
         let params = {
-            let config = self.app_state.config.read()
+            let config = self
+                .app_state
+                .config
+                .read()
                 .map_err(|_| color_eyre::eyre::eyre!("config lock poisoned"))?;
             RecordingParams {
                 recording_location: recording_location.clone(),
@@ -229,12 +237,16 @@ impl Recorder {
         delete_recording_on_exit.disarm();
 
         self.recording = Some(recording);
-        *self.app_state.state.write()
-            .map_err(|_| color_eyre::eyre::eyre!("state lock poisoned"))? = RecordingStatus::Recording {
-            start_time: Instant::now(),
-            game_exe,
-            current_fps: None,
-        };
+        *self
+            .app_state
+            .state
+            .write()
+            .map_err(|_| color_eyre::eyre::eyre!("state lock poisoned"))? =
+            RecordingStatus::Recording {
+                start_time: Instant::now(),
+                game_exe,
+                current_fps: None,
+            };
         Ok(())
     }
 
@@ -268,8 +280,12 @@ impl Recorder {
                 input_capture,
             )
             .await?;
-        *self.app_state.state.write()
-            .map_err(|_| color_eyre::eyre::eyre!("state lock poisoned"))? = RecordingStatus::Stopped;
+        *self
+            .app_state
+            .state
+            .write()
+            .map_err(|_| color_eyre::eyre::eyre!("state lock poisoned"))? =
+            RecordingStatus::Stopped;
 
         tracing::info!("Recording stopped");
         Ok(())

@@ -1,14 +1,19 @@
 use std::path::Path;
 
 use color_eyre::{
+    eyre::{eyre, WrapErr as _},
     Result,
-    eyre::{WrapErr as _, eyre},
 };
 use input_capture::InputCapture;
 use serde::Serialize;
 use tokio::{fs::File, io::AsyncWriteExt as _, sync::mpsc};
 
 use crate::output_types::{InputEvent, InputEventType};
+
+/// Maximum buffered input events before backpressure kicks in.
+/// ~10k events = ~10 seconds at 1000Hz polling with some headroom.
+/// Prevents unbounded memory growth during long recording sessions.
+const INPUT_CHANNEL_CAPACITY: usize = 10000;
 
 /// JSON-serializable input event for buyer spec compliance.
 /// Each event is written as a JSON Lines entry (one JSON object per line).
@@ -32,7 +37,7 @@ impl From<&InputEvent> for JsonInputEvent {
 /// Stream for sending timestamped input events to the writer
 #[derive(Clone)]
 pub(crate) struct InputEventStream {
-    tx: mpsc::UnboundedSender<InputEvent>,
+    tx: mpsc::Sender<InputEvent>,
 }
 
 impl InputEventStream {
@@ -40,17 +45,29 @@ impl InputEventStream {
     /// since now that we rely on the rx queue to flush outputs to file, we also want this
     /// queue to be populated in chronological order, so arbitrary timestamp writing
     /// shouldn't be supported anyway.
+    ///
+    /// Uses try_send with bounded channel to prevent unbounded memory growth.
+    /// If the channel is full, the oldest events are dropped to maintain chronological
+    /// order while ensuring the recording remains stable.
     pub(crate) fn send(&self, event: InputEventType) -> Result<()> {
-        self.tx
-            .send(InputEvent::new_at_now(event))
-            .map_err(|_| eyre!("input event stream receiver was closed"))?;
-        Ok(())
+        match self.tx.try_send(InputEvent::new_at_now(event)) {
+            Ok(_) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Channel is full - drop the event to prevent memory exhaustion.
+                // This maintains recording stability over completeness.
+                tracing::warn!("Input event channel full, dropping event to prevent memory growth");
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(eyre!("input event stream receiver was closed"))
+            }
+        }
     }
 }
 
 pub(crate) struct InputEventWriter {
     file: File,
-    rx: mpsc::UnboundedReceiver<InputEvent>,
+    rx: mpsc::Receiver<InputEvent>,
 }
 
 impl InputEventWriter {
@@ -62,7 +79,7 @@ impl InputEventWriter {
             .await
             .wrap_err_with(|| eyre!("failed to create and open {path:?}"))?;
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
         let stream = InputEventStream { tx };
         let mut writer = Self { file, rx };
 
@@ -104,7 +121,13 @@ impl InputEventWriter {
                 inputs: input_capture.active_input(),
             },
         ))
-        .await
+        .await?;
+
+        // Sync file to disk to ensure end marker durability (crash safety)
+        self.file
+            .sync_all()
+            .await
+            .wrap_err("failed to sync input events file to disk")
     }
 
     async fn write_entry(&mut self, event: InputEvent) -> Result<()> {

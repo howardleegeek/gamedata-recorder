@@ -7,6 +7,7 @@ use color_eyre::{Result, eyre::ContextCompat};
 use egui_wgpu::wgpu;
 use game_process::{Pid, windows::Win32::Foundation::HWND};
 use input_capture::InputCapture;
+use tokio::io::AsyncWriteExt as _;
 
 use crate::{
     config::{EncoderSettings, GameConfig},
@@ -142,12 +143,13 @@ impl Recording {
             GetWindowTextLengthW, GetWindowTextW,
         };
 
-        // GetWindowTextLengthW returns 0 for both empty titles AND on error.
-        // Clear last error first, then check GetLastError() to distinguish.
-        unsafe { windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::ERROR_SUCCESS) };
+        // Maximum reasonable window title length (prevents DoS from malicious windows)
+        const MAX_TITLE_LEN: i32 = 4096;
+
         let title_len = unsafe { GetWindowTextLengthW(self.hwnd) };
-        if title_len > 0 {
-            let mut buf = vec![0u16; (title_len + 1) as usize];
+        // Bounds check: title_len must be positive and within reasonable limits
+        if title_len > 0 && title_len < MAX_TITLE_LEN {
+            let mut buf = vec![0u16; (title_len as usize).saturating_add(1)];
             let copied = unsafe { GetWindowTextW(self.hwnd, &mut buf) };
             if copied > 0 {
                 if let Some(end) = buf.iter().position(|&c| c == 0) {
@@ -229,15 +231,21 @@ impl Recording {
 
         if let Err(e) = result {
             tracing::error!("Error while stopping recording, invalidating recording: {e}");
-            // Best-effort write — may fail on disk full, which is acceptable
-            if let Err(write_err) = tokio::fs::write(
-                self.recording_location
-                    .join(constants::filename::recording::INVALID),
-                e.to_string(),
-            )
-            .await
-            {
-                tracing::error!("Failed to write INVALID marker (disk full?): {write_err}");
+            // Write INVALID marker with crash durability (sync to disk)
+            let invalid_path = self
+                .recording_location
+                .join(constants::filename::recording::INVALID);
+            match tokio::fs::File::create(&invalid_path).await {
+                Ok(mut file) => {
+                    if let Err(write_err) = file.write_all(e.to_string().as_bytes()).await {
+                        tracing::error!("Failed to write INVALID marker (disk full?): {write_err}");
+                    } else if let Err(sync_err) = file.sync_all().await {
+                        tracing::error!("Failed to sync INVALID marker: {sync_err}");
+                    }
+                }
+                Err(create_err) => {
+                    tracing::error!("Failed to create INVALID marker file: {create_err}");
+                }
             }
             return Ok(());
         }
@@ -263,16 +271,28 @@ impl Recording {
 }
 
 pub fn get_recording_base_resolution(hwnd: HWND) -> Result<(u32, u32)> {
-    use windows::Win32::{Foundation::RECT, UI::WindowsAndMessaging::GetClientRect};
+    use windows::Win32::{
+        Foundation::{GetLastError, RECT},
+        UI::WindowsAndMessaging::GetClientRect,
+    };
 
     /// Returns the size (width, height) of the inner area of a window given its HWND.
     /// Returns None if the window does not exist or the call fails.
     fn get_window_inner_size(hwnd: HWND) -> Option<(u32, u32)> {
         unsafe {
             let mut rect = RECT::default();
-            GetClientRect(hwnd, &mut rect).ok()?;
+            if GetClientRect(hwnd, &mut rect).is_err() {
+                let err = GetLastError();
+                tracing::warn!("GetClientRect failed for hwnd {:?}: error {}", hwnd, err.0);
+                return None;
+            }
+            // Bounds check: prevent underflow if rect has invalid coordinates
             let width = rect.right.saturating_sub(rect.left);
             let height = rect.bottom.saturating_sub(rect.top);
+            // Reject zero-sized windows (invalid capture target)
+            if width == 0 || height == 0 {
+                return None;
+            }
             Some((width as u32, height as u32))
         }
     }
