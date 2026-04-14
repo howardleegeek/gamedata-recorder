@@ -4,35 +4,34 @@ use std::{
 };
 
 use color_eyre::{
+    eyre::{bail, Context},
     Result,
-    eyre::{Context, bail},
 };
 
 use windows::{
+    core::PCSTR,
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleA,
         UI::{
             Input::{
-                self, GetRawInputData, HRAWINPUT,
+                self, GetRawInputData,
                 KeyboardAndMouse::{VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2},
-                MOUSE_MOVE_ABSOLUTE, MOUSE_VIRTUAL_DESKTOP, RAWINPUT, RAWINPUTDEVICE,
-                RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RegisterRawInputDevices,
+                RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, MOUSE_VIRTUAL_DESKTOP,
+                RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RID_INPUT,
             },
             WindowsAndMessaging::{
                 self, CreateWindowExA, DefWindowProcA, DestroyWindow, DispatchMessageA,
-                GetMessageA, GetSystemMetrics, HWND_MESSAGE, MSG, PostQuitMessage, RI_KEY_BREAK,
-                RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
-                RI_MOUSE_BUTTON_5_UP, RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP,
-                RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN,
-                RI_MOUSE_RIGHT_BUTTON_UP, RI_MOUSE_WHEEL, RegisterClassA, SM_CXSCREEN,
-                SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-                SM_YVIRTUALSCREEN, TranslateMessage, UnregisterClassA, WINDOW_EX_STYLE,
-                WINDOW_STYLE, WNDCLASSA,
+                GetMessageA, GetSystemMetrics, PostQuitMessage, RegisterClassA, TranslateMessage,
+                UnregisterClassA, HWND_MESSAGE, MSG, RI_KEY_BREAK, RI_MOUSE_BUTTON_4_DOWN,
+                RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_BUTTON_5_UP,
+                RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP, RI_MOUSE_MIDDLE_BUTTON_DOWN,
+                RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN, RI_MOUSE_RIGHT_BUTTON_UP,
+                RI_MOUSE_WHEEL, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
+                SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSA,
             },
         },
     },
-    core::PCSTR,
 };
 
 use crate::{Event, PressState};
@@ -220,129 +219,130 @@ impl KbmCapture {
                 Input::RIM_TYPEMOUSE => {
                     let mut events = Vec::new();
                     let mouse = rawinput.data.mouse;
-                let us_flags = mouse.usFlags.0;
+                    let us_flags = mouse.usFlags.0;
 
-                // Handle mouse movement
-                if mouse.lLastX != 0 || mouse.lLastY != 0 {
-                    let (delta_x, delta_y) = if (us_flags & MOUSE_MOVE_ABSOLUTE.0) != 0 {
-                        let is_virtual_desktop = (us_flags & MOUSE_VIRTUAL_DESKTOP.0) != 0;
-                        let (screen_x, screen_y) = convert_absolute_to_screen_coords(
-                            mouse.lLastX,
-                            mouse.lLastY,
-                            is_virtual_desktop,
-                        );
-                        let delta = last_absolute
-                            .map(|(last_x, last_y)| (screen_x - last_x, screen_y - last_y))
-                            .unwrap_or_default();
-                        *last_absolute = Some((screen_x, screen_y));
-                        delta
-                    } else {
-                        (mouse.lLastX, mouse.lLastY)
-                    };
+                    // Handle mouse movement
+                    if mouse.lLastX != 0 || mouse.lLastY != 0 {
+                        let (delta_x, delta_y) = if (us_flags & MOUSE_MOVE_ABSOLUTE.0) != 0 {
+                            let is_virtual_desktop = (us_flags & MOUSE_VIRTUAL_DESKTOP.0) != 0;
+                            let (screen_x, screen_y) = convert_absolute_to_screen_coords(
+                                mouse.lLastX,
+                                mouse.lLastY,
+                                is_virtual_desktop,
+                            );
+                            let delta = last_absolute
+                                .map(|(last_x, last_y)| (screen_x - last_x, screen_y - last_y))
+                                .unwrap_or_default();
+                            *last_absolute = Some((screen_x, screen_y));
+                            delta
+                        } else {
+                            (mouse.lLastX, mouse.lLastY)
+                        };
 
-                    if delta_x != 0 || delta_y != 0 {
-                        events.push(Event::MouseMove([delta_x, delta_y]));
+                        if delta_x != 0 || delta_y != 0 {
+                            events.push(Event::MouseMove([delta_x, delta_y]));
+                        }
                     }
-                }
 
-                let us_button_flags = unsafe { u32::from(mouse.Anonymous.Anonymous.usButtonFlags) };
+                    let us_button_flags = u32::from(mouse.Anonymous.Anonymous.usButtonFlags);
 
-                if us_button_flags & RI_MOUSE_LEFT_BUTTON_DOWN != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_LBUTTON.0,
-                        press_state: PressState::Pressed,
-                    });
-                    self.active_keys().mouse.insert(VK_LBUTTON.0);
-                }
-                if us_button_flags & RI_MOUSE_LEFT_BUTTON_UP != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_LBUTTON.0,
-                        press_state: PressState::Released,
-                    });
-                    self.active_keys().mouse.remove(&VK_LBUTTON.0);
-                }
-                if us_button_flags & RI_MOUSE_RIGHT_BUTTON_DOWN != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_RBUTTON.0,
-                        press_state: PressState::Pressed,
-                    });
-                    self.active_keys().mouse.insert(VK_RBUTTON.0);
-                }
-                if us_button_flags & RI_MOUSE_RIGHT_BUTTON_UP != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_RBUTTON.0,
-                        press_state: PressState::Released,
-                    });
-                    self.active_keys().mouse.remove(&VK_RBUTTON.0);
-                }
-                if us_button_flags & RI_MOUSE_MIDDLE_BUTTON_DOWN != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_MBUTTON.0,
-                        press_state: PressState::Pressed,
-                    });
-                    self.active_keys().mouse.insert(VK_MBUTTON.0);
-                }
-                if us_button_flags & RI_MOUSE_MIDDLE_BUTTON_UP != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_MBUTTON.0,
-                        press_state: PressState::Released,
-                    });
-                    self.active_keys().mouse.remove(&VK_MBUTTON.0);
-                }
-                if us_button_flags & RI_MOUSE_BUTTON_4_DOWN != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_XBUTTON1.0,
-                        press_state: PressState::Pressed,
-                    });
-                    self.active_keys().mouse.insert(VK_XBUTTON1.0);
-                }
-                if us_button_flags & RI_MOUSE_BUTTON_4_UP != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_XBUTTON1.0,
-                        press_state: PressState::Released,
-                    });
-                    self.active_keys().mouse.remove(&VK_XBUTTON1.0);
-                }
-                if us_button_flags & RI_MOUSE_BUTTON_5_DOWN != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_XBUTTON2.0,
-                        press_state: PressState::Pressed,
-                    });
-                    self.active_keys().mouse.insert(VK_XBUTTON2.0);
-                }
-                if us_button_flags & RI_MOUSE_BUTTON_5_UP != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_XBUTTON2.0,
-                        press_state: PressState::Released,
-                    });
-                    self.active_keys().mouse.remove(&VK_XBUTTON2.0);
-                }
+                    if us_button_flags & RI_MOUSE_LEFT_BUTTON_DOWN != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_LBUTTON.0,
+                            press_state: PressState::Pressed,
+                        });
+                        self.active_keys().mouse.insert(VK_LBUTTON.0);
+                    }
+                    if us_button_flags & RI_MOUSE_LEFT_BUTTON_UP != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_LBUTTON.0,
+                            press_state: PressState::Released,
+                        });
+                        self.active_keys().mouse.remove(&VK_LBUTTON.0);
+                    }
+                    if us_button_flags & RI_MOUSE_RIGHT_BUTTON_DOWN != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_RBUTTON.0,
+                            press_state: PressState::Pressed,
+                        });
+                        self.active_keys().mouse.insert(VK_RBUTTON.0);
+                    }
+                    if us_button_flags & RI_MOUSE_RIGHT_BUTTON_UP != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_RBUTTON.0,
+                            press_state: PressState::Released,
+                        });
+                        self.active_keys().mouse.remove(&VK_RBUTTON.0);
+                    }
+                    if us_button_flags & RI_MOUSE_MIDDLE_BUTTON_DOWN != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_MBUTTON.0,
+                            press_state: PressState::Pressed,
+                        });
+                        self.active_keys().mouse.insert(VK_MBUTTON.0);
+                    }
+                    if us_button_flags & RI_MOUSE_MIDDLE_BUTTON_UP != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_MBUTTON.0,
+                            press_state: PressState::Released,
+                        });
+                        self.active_keys().mouse.remove(&VK_MBUTTON.0);
+                    }
+                    if us_button_flags & RI_MOUSE_BUTTON_4_DOWN != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_XBUTTON1.0,
+                            press_state: PressState::Pressed,
+                        });
+                        self.active_keys().mouse.insert(VK_XBUTTON1.0);
+                    }
+                    if us_button_flags & RI_MOUSE_BUTTON_4_UP != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_XBUTTON1.0,
+                            press_state: PressState::Released,
+                        });
+                        self.active_keys().mouse.remove(&VK_XBUTTON1.0);
+                    }
+                    if us_button_flags & RI_MOUSE_BUTTON_5_DOWN != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_XBUTTON2.0,
+                            press_state: PressState::Pressed,
+                        });
+                        self.active_keys().mouse.insert(VK_XBUTTON2.0);
+                    }
+                    if us_button_flags & RI_MOUSE_BUTTON_5_UP != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_XBUTTON2.0,
+                            press_state: PressState::Released,
+                        });
+                        self.active_keys().mouse.remove(&VK_XBUTTON2.0);
+                    }
 
-                if us_button_flags & RI_MOUSE_WHEEL != 0 {
-                    events.push(Event::MouseScroll {
-                        scroll_amount: unsafe { mouse.Anonymous.Anonymous.usButtonData as i16 },
-                    });
-                }
+                    if us_button_flags & RI_MOUSE_WHEEL != 0 {
+                        events.push(Event::MouseScroll {
+                            scroll_amount: mouse.Anonymous.Anonymous.usButtonData as i16,
+                        });
+                    }
 
-                events
+                    events
+                }
+                Input::RIM_TYPEKEYBOARD => {
+                    let keyboard = rawinput.data.keyboard;
+                    let key = keyboard.VKey;
+                    let flags = u32::from(keyboard.Flags);
+                    let press_state = if flags & RI_KEY_BREAK != 0 {
+                        PressState::Released
+                    } else {
+                        PressState::Pressed
+                    };
+                    if press_state == PressState::Pressed {
+                        self.active_keys().keyboard.insert(key);
+                    } else {
+                        self.active_keys().keyboard.remove(&key);
+                    }
+                    vec![Event::KeyPress { key, press_state }]
+                }
+                _ => vec![],
             }
-            Input::RIM_TYPEKEYBOARD => {
-                let keyboard = unsafe { rawinput.data.keyboard };
-                let key = keyboard.VKey;
-                let flags = u32::from(keyboard.Flags);
-                let press_state = if flags & RI_KEY_BREAK != 0 {
-                    PressState::Released
-                } else {
-                    PressState::Pressed
-                };
-                if press_state == PressState::Pressed {
-                    self.active_keys().keyboard.insert(key);
-                } else {
-                    self.active_keys().keyboard.remove(&key);
-                }
-                vec![Event::KeyPress { key, press_state }]
-            }
-            _ => vec![],
         }
     }
 
