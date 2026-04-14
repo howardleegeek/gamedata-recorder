@@ -77,7 +77,7 @@ impl HighPrecisionTimer {
                     return self.start_instant.elapsed().as_millis() as u64;
                 }
             }
-            let elapsed = current - self.start_counter;
+            let elapsed = current.saturating_sub(self.start_counter);
             ((elapsed as u128 * 1000) / self.frequency as u128) as u64
         }
 
@@ -100,7 +100,7 @@ impl HighPrecisionTimer {
                     return self.start_instant.elapsed().as_micros() as u64;
                 }
             }
-            let elapsed = current - self.start_counter;
+            let elapsed = current.saturating_sub(self.start_counter);
             ((elapsed as u128 * 1_000_000) / self.frequency as u128) as u64
         }
 
@@ -124,7 +124,7 @@ impl HighPrecisionTimer {
                     return self.start_instant.elapsed().as_nanos() as u64;
                 }
             }
-            let elapsed = current - self.start_counter;
+            let elapsed = current.saturating_sub(self.start_counter);
             ((elapsed as u128 * 1_000_000_000) / self.frequency as u128) as u64
         }
 
@@ -189,17 +189,20 @@ impl HighPrecisionTimer {
     }
 
     /// Calculate the drift between QPC and GetMessageTime.
-    /// Returns the difference in milliseconds.
+    /// Returns the difference in milliseconds (QPC-based time minus message-time-based time).
     /// Useful for detecting timing anomalies.
+    ///
+    /// The drift is calculated as: elapsed_qpc_ms - (current_msg_time - initial_msg_time).
+    /// This avoids i32 overflow when the timer runs for extended periods (>24 days).
     #[cfg(target_os = "windows")]
     pub fn time_drift_ms(&self) -> i32 {
         let current_msg_time = unsafe { GetMessageTime() };
-        // Use i64 for calculation to prevent overflow when elapsed_ms exceeds i32::MAX (~24.8 days)
-        let elapsed = self.elapsed_ms() as i64;
-        let expected_msg_time = self.msg_time_offset_ms as i64 + elapsed;
-        let drift = current_msg_time as i64 - expected_msg_time;
-        // Clamp to i32 range to avoid overflow on return
-        drift.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+        // Calculate message time delta (time passed according to GetMessageTime)
+        let msg_delta_ms = current_msg_time.wrapping_sub(self.msg_time_offset_ms);
+        // Use saturating cast to prevent truncation for timers running >24 days
+        let elapsed = self.elapsed_ms().min(i32::MAX as u64) as i32;
+        // Drift is QPC elapsed time minus message time delta
+        elapsed - msg_delta_ms
     }
 }
 
@@ -234,7 +237,7 @@ mod tests {
     fn test_wall_time_format() {
         let timer = HighPrecisionTimer::new();
         let time_str = timer.wall_time_str();
-        // Format should be HH:MM:SS.mmm (15 chars)
+        // Format should be HH:MM:SS.mmm (12 chars)
         assert_eq!(
             time_str.len(),
             12,

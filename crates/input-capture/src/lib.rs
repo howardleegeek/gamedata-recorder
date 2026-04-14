@@ -9,6 +9,12 @@ use tokio::sync::mpsc;
 mod kbm_capture;
 use kbm_capture::KbmCapture;
 
+#[cfg(target_os = "windows")]
+use windows::Win32::{
+    Foundation::{LPARAM, WPARAM},
+    UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT},
+};
+
 mod gamepad_capture;
 pub use gamepad_capture::{ActiveGamepad, GamepadId, GamepadMetadata};
 
@@ -72,6 +78,7 @@ pub struct ActiveInput {
 
 pub struct InputCapture {
     _raw_input_thread: std::thread::JoinHandle<()>,
+    raw_input_thread_id: u32,
     _gamepad_threads: gamepad_capture::GamepadThreads,
     active_keys: Arc<Mutex<kbm_capture::ActiveKeys>>,
     active_gamepad: Arc<Mutex<gamepad_capture::ActiveGamepads>>,
@@ -88,14 +95,25 @@ impl InputCapture {
 
         tracing::debug!("Spawning raw input thread for keyboard/mouse capture");
         let active_keys = Arc::new(Mutex::new(kbm_capture::ActiveKeys::default()));
+        let (thread_id_tx, thread_id_rx) = std::sync::mpsc::channel::<u32>();
         let _raw_input_thread = std::thread::spawn({
             let input_tx = input_tx.clone();
             let active_keys = active_keys.clone();
             move || {
+                #[cfg(target_os = "windows")]
+                {
+                    let thread_id =
+                        unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+                    let _ = thread_id_tx.send(thread_id);
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = thread_id_tx.send(0);
+                }
                 let mut capture = match KbmCapture::initialize(active_keys) {
                     Ok(c) => c,
                     Err(e) => {
-                        tracing::error!("Failed to initialize raw input capture: {e}");
+                        tracing::error!("Failed to initialize raw input: {}", e);
                         return;
                     }
                 };
@@ -106,10 +124,18 @@ impl InputCapture {
                     }
                     true
                 }) {
-                    tracing::error!("Raw input message queue failed: {e}");
+                    tracing::error!("Failed to run windows message queue: {}", e);
                 }
             }
         });
+        // Wait for the thread to start and get its thread ID for shutdown signaling
+        let raw_input_thread_id = match thread_id_rx.recv() {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!("Failed to receive raw input thread ID: {}", e);
+                0
+            }
+        };
 
         tracing::debug!("Initializing gamepad capture threads");
         let active_gamepad = Arc::new(Mutex::new(gamepad_capture::ActiveGamepads::default()));
@@ -121,6 +147,7 @@ impl InputCapture {
         Ok((
             Self {
                 _raw_input_thread,
+                raw_input_thread_id,
                 _gamepad_threads,
                 active_keys,
                 active_gamepad,
@@ -129,7 +156,27 @@ impl InputCapture {
             input_rx,
         ))
     }
+}
 
+impl Drop for InputCapture {
+    fn drop(&mut self) {
+        // Signal the raw input thread to stop by posting WM_QUIT.
+        // The thread is blocked on GetMessageA and won't wake up otherwise.
+        // This prevents thread resource leaks when InputCapture is dropped.
+        #[cfg(target_os = "windows")]
+        if self.raw_input_thread_id != 0 {
+            unsafe {
+                if let Err(e) =
+                    PostThreadMessageW(self.raw_input_thread_id, WM_QUIT, WPARAM(0), LPARAM(0))
+                {
+                    tracing::warn!("Failed to post WM_QUIT to raw input thread: {:?}", e);
+                }
+            }
+        }
+    }
+}
+
+impl InputCapture {
     pub fn active_input(&self) -> ActiveInput {
         // Handle poisoned locks gracefully: if another thread panicked while holding
         // the lock, log the error and return default/empty input state rather than crashing.

@@ -67,10 +67,16 @@ pub fn build_actions(
     trajectories: &[Trajectory],
     fps: f64,
 ) -> Vec<Action> {
-    // Guard against non-positive FPS to prevent divide-by-zero or invalid frame calculations
-    let fps = fps.max(1.0);
-    // Guard against extremely high FPS that would cause frame_interval_ns to be 0
-    let frame_interval_ns = ((1_000_000_000.0 / fps) as u64).max(1);
+    // Validate fps to prevent division by zero and ensure reasonable frame interval
+    let fps = if fps <= 0.0 || !fps.is_finite() {
+        tracing::warn!("Invalid fps: {}, using default 30.0", fps);
+        30.0
+    } else {
+        fps
+    };
+    let frame_interval_ns = (1_000_000_000.0 / fps) as u64;
+    // Ensure frame_interval_ns is at least 1 to prevent division by zero
+    let frame_interval_ns = frame_interval_ns.max(1);
     let mut actions = Vec::new();
     let mut action_index: u32 = 0;
     let mut cursor_x: i32 = 0;
@@ -79,6 +85,8 @@ pub fn build_actions(
     for event in events {
         // Track cursor position
         if let super::trajectory::RawEventKind::MouseMove { dx, dy } = &event.kind {
+            // Use saturating_add to prevent overflow in long sessions with extensive mouse movement.
+            // An i32 can overflow after ~2 billion pixels of movement (plausible in a gaming session).
             cursor_x = cursor_x.saturating_add(*dx);
             cursor_y = cursor_y.saturating_add(*dy);
             continue;
@@ -127,7 +135,7 @@ pub fn build_actions(
                 target_entity: None,
                 bounding_box: None,
             });
-            action_index += 1;
+            action_index = action_index.saturating_add(1);
         }
     }
 

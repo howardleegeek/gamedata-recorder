@@ -111,6 +111,7 @@ impl FpsLogger {
     }
 
     /// Finalize and write fps_log.json to the session directory.
+    /// Uses atomic write pattern (write .tmp then rename) for crash durability.
     pub async fn save(mut self, session_dir: &Path) -> Result<()> {
         // Calculate total elapsed seconds of the recording
         let elapsed_seconds = std::time::Instant::now()
@@ -128,9 +129,12 @@ impl FpsLogger {
 
         let path = session_dir.join(constants::filename::recording::FPS_LOG);
         let json = serde_json::to_string_pretty(&self.entries)?;
-        let mut file = tokio::fs::File::create(&path).await?;
-        file.write_all(json.as_bytes()).await?;
-        file.sync_all().await?;
+
+        // Atomic write: write to temp file then rename for crash durability
+        let temp_path = path.with_extension("tmp");
+        tokio::fs::write(&temp_path, json).await?;
+        tokio::fs::rename(&temp_path, &path).await?;
+
         tracing::info!(
             "FPS log saved: {} entries to {:?}",
             self.entries.len(),

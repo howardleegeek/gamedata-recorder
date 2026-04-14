@@ -102,32 +102,24 @@ impl InputEventWriter {
     }
 
     pub(crate) async fn stop(mut self, input_capture: &InputCapture) -> Result<()> {
-        // Most accurate possible timestamp of exactly when the stop input recording was called
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or_else(|_| {
-                tracing::warn!("System time is before UNIX epoch, using 0");
-                0.0
-            });
-
-        // Flush any remaining events
+        // Flush any remaining events before capturing timestamp for End event
+        // This ensures chronological ordering: all flushed events have earlier timestamps
         self.flush().await?;
 
-        // Write the end marker
-        self.write_entry(InputEvent::new(
-            timestamp,
-            InputEventType::End {
-                inputs: input_capture.active_input(),
-            },
-        ))
+        // Write the end marker with timestamp captured after flush for consistency
+        // Using new_at_now to match Start event pattern and ensure proper ordering
+        self.write_entry(InputEvent::new_at_now(InputEventType::End {
+            inputs: input_capture.active_input(),
+        }))
         .await?;
 
-        // Sync file to disk to ensure end marker durability (crash safety)
+        // Sync file to disk for crash durability - ensures all buffered data is written
+        // before the file handle is dropped. This protects against data loss if the
+        // system crashes immediately after recording stops.
         self.file
             .sync_all()
             .await
-            .wrap_err("failed to sync input events file to disk")
+            .wrap_err("failed to sync input file to disk")
     }
 
     async fn write_entry(&mut self, event: InputEvent) -> Result<()> {

@@ -17,6 +17,7 @@ use input_capture::{Event, PressState, timestamp::HighPrecisionTimer, vkey_names
 struct Args {
     compress: bool,
     output: Option<String>,
+    #[cfg(feature = "compression")]
     level: i32,
 }
 
@@ -25,6 +26,7 @@ impl Args {
         let args: Vec<String> = std::env::args().collect();
         let mut compress = false;
         let mut output = None;
+        #[cfg(feature = "compression")]
         let mut level = 3; // Default zstd compression level
 
         let mut i = 1;
@@ -35,14 +37,23 @@ impl Args {
                     if i + 1 < args.len() {
                         output = Some(args[i + 1].clone());
                         i += 1;
+                    } else {
+                        eprintln!("Warning: --output requires a file path argument");
                     }
                 }
+                #[cfg(feature = "compression")]
                 "--level" | "-l" => {
                     if i + 1 < args.len() {
-                        if let Ok(l) = args[i + 1].parse::<i32>() {
-                            level = l.clamp(1, 22);
+                        match args[i + 1].parse::<i32>() {
+                            Ok(l) => level = l.clamp(1, 22),
+                            Err(_) => eprintln!(
+                                "Warning: --level requires a numeric argument (1-22), got: {}",
+                                args[i + 1]
+                            ),
                         }
                         i += 1;
+                    } else {
+                        eprintln!("Warning: --level requires a numeric argument (1-22)");
                     }
                 }
                 "--help" | "-h" => {
@@ -57,6 +68,7 @@ impl Args {
         Self {
             compress,
             output,
+            #[cfg(feature = "compression")]
             level,
         }
     }
@@ -103,6 +115,15 @@ struct ZstdWriter {
 }
 
 #[cfg(feature = "compression")]
+impl ZstdWriter {
+    /// Finish the zstd encoder, writing any remaining data and checksums.
+    /// This must be called before dropping to ensure a valid compressed file.
+    fn finish(mut self) -> std::io::Result<()> {
+        self.encoder.finish().map(|_| ())
+    }
+}
+
+#[cfg(feature = "compression")]
 impl Write for ZstdWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.encoder.write(buf)
@@ -145,9 +166,9 @@ fn main() {
     let timer = HighPrecisionTimer::new();
 
     let (_capture, mut rx) = match input_capture::InputCapture::new() {
-        Ok(cap) => cap,
+        Ok(capture_rx) => capture_rx,
         Err(e) => {
-            eprintln!("Failed to initialize input capture: {e}");
+            tracing::error!("Failed to initialize input capture: {}", e);
             std::process::exit(1);
         }
     };
@@ -159,19 +180,19 @@ fn main() {
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("Failed to build tokio runtime for input logger: {e}");
+            tracing::error!("Failed to build tokio runtime for input logger: {}", e);
             std::process::exit(1);
         }
     };
 
     rt.block_on(async {
         // Setup output writer based on arguments
-        let _result: Result<(), Box<dyn std::error::Error>> = match &args.output {
+        let result: Result<(), Box<dyn std::error::Error>> = match &args.output {
             Some(path) => {
                 let file = match std::fs::File::create(path) {
                     Ok(f) => f,
                     Err(e) => {
-                        eprintln!("Failed to create output file: {e}");
+                        tracing::error!("Failed to create output file '{}': {}", path, e);
                         std::process::exit(1);
                     }
                 };
@@ -181,12 +202,17 @@ fn main() {
                     let encoder = match zstd::stream::write::Encoder::new(file, args.level) {
                         Ok(enc) => enc,
                         Err(e) => {
-                            eprintln!("Failed to create zstd encoder: {e}");
+                            tracing::error!("Failed to create zstd encoder: {}", e);
                             std::process::exit(1);
                         }
                     };
                     let mut writer = ZstdWriter { encoder };
-                    run_logger(&timer, &mut rx, &mut writer).await
+                    let res = run_logger(&timer, &mut rx, &mut writer).await;
+                    // Finalize the zstd encoder to ensure complete compressed output
+                    if let Err(e) = writer.finish() {
+                        tracing::warn!("Failed to finalize zstd encoder: {}", e);
+                    }
+                    res
                 } else {
                     let mut writer = file;
                     run_logger(&timer, &mut rx, &mut writer).await
@@ -204,6 +230,10 @@ fn main() {
                 run_logger(&timer, &mut rx, &mut writer).await
             }
         };
+
+        if let Err(e) = result {
+            tracing::error!("Input logger error: {}", e);
+        }
     });
 }
 
@@ -215,7 +245,10 @@ async fn run_logger<W: OutputWriter>(
     while let Some(event) = rx.recv().await {
         let t = timer.wall_time_str();
         let line = format_event(&t, &event);
-        let _ = writeln!(out, "{}", line);
+        writeln!(out, "{}", line).map_err(|e| {
+            tracing::error!("Failed to write log line: {}", e);
+            e
+        })?;
 
         // Flush periodically to ensure data is written
         if matches!(
@@ -225,9 +258,17 @@ async fn run_logger<W: OutputWriter>(
                 ..
             }
         ) {
-            let _ = out.flush_output();
+            out.flush_output().map_err(|e| {
+                tracing::error!("Failed to flush output: {}", e);
+                e
+            })?;
         }
     }
+    // Final flush to ensure all buffered data is written before exit
+    out.flush_output().map_err(|e| {
+        tracing::error!("Failed to flush output on exit: {}", e);
+        e
+    })?;
     Ok(())
 }
 
@@ -252,9 +293,9 @@ fn format_event(t: &str, event: &Event) -> String {
             let btn = match key {
                 1 => "LEFT",
                 2 => "RIGHT",
-                3 => "MIDDLE",
-                4 => "X1",
-                5 => "X2",
+                4 => "MIDDLE",
+                5 => "X1",
+                6 => "X2",
                 _ => "?",
             };
             format!("{}  MOUSE_BTN    {} {}", t, btn, state)

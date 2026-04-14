@@ -3,6 +3,10 @@ name = "input-capture"
 version = "0.0.0"
 edition = "2024"
 
+[features]
+default = []
+compression = ["dep:zstd"]
+
 [dependencies]
 tracing.workspace = true
 windows = { workspace = true, features = [
@@ -28,6 +32,7 @@ gilrs-xinput = { package = "gilrs", git = "https://gitlab.com/gilrs-project/gilr
 gilrs-wgi = { package = "gilrs", version = "0.11.0", default-features = false, features = [
     "wgi",
 ] }
+zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

@@ -131,7 +131,10 @@ pub fn initialize_thread(
     active_gamepads: Arc<Mutex<ActiveGamepads>>,
     gamepads: Arc<RwLock<HashMap<GamepadId, GamepadMetadata>>>,
 ) -> GamepadThreads {
-    let already_captured_by_xinput = Arc::new(RwLock::new(HashSet::new()));
+    // Use Arc<str> instead of String to avoid allocation during lookup in hot path.
+    // HashSet<Arc<str>> allows contains() to accept &str without allocation.
+    let already_captured_by_xinput: Arc<RwLock<HashSet<Arc<str>>>> =
+        Arc::new(RwLock::new(HashSet::new()));
 
     // We use both the `xinput` and `wgi` versions of gilrs so that we can capture Xbox controllers
     // (which only work with `xinput`) and PS controllers (which only work with `wgi`).
@@ -181,6 +184,10 @@ pub fn initialize_thread(
                 );
                 drop(gamepads_guard);
 
+                let Some(event) = map_event_xinput(GamepadId::XInput(id.into()), event) else {
+                    continue;
+                };
+
                 let mut captured_guard = match already_captured_by_xinput.write() {
                     Ok(guard) => guard,
                     Err(e) => {
@@ -188,12 +195,8 @@ pub fn initialize_thread(
                         break;
                     }
                 };
-                captured_guard.insert(gamepad.name().to_string());
+                captured_guard.insert(Arc::from(gamepad.name()));
                 drop(captured_guard);
-
-                let Some(event) = map_event_xinput(GamepadId::XInput(id.into()), event) else {
-                    continue;
-                };
 
                 let mut active_guard = match active_gamepads.lock() {
                     Ok(guard) => guard,
@@ -257,7 +260,8 @@ pub fn initialize_thread(
                         break;
                     }
                 };
-                let is_captured = captured_guard.contains(&gamepad.name().to_string());
+                // No allocation: Arc<str> allows lookup by &str directly
+                let is_captured = captured_guard.contains(gamepad.name());
                 drop(captured_guard);
 
                 if is_captured {
@@ -334,16 +338,30 @@ macro_rules! generate_map_functions {
                     key: $map_button(button),
                     press_state: PressState::Released,
                 }),
-                EventType::ButtonChanged(button, value, _) => Some(Event::GamepadButtonChange {
-                    id: gamepad_id,
-                    key: $map_button(button),
-                    value,
-                }),
-                EventType::AxisChanged(axis, value, _) => Some(Event::GamepadAxisChange {
-                    id: gamepad_id,
-                    axis: $map_axis(axis),
-                    value,
-                }),
+                EventType::ButtonChanged(button, value, _) => {
+                    // Validate value is finite to prevent NaN/Infinity from propagating downstream
+                    if !value.is_finite() {
+                        tracing::warn!("Ignoring non-finite button value: {}", value);
+                        return None;
+                    }
+                    Some(Event::GamepadButtonChange {
+                        id: gamepad_id,
+                        key: $map_button(button),
+                        value,
+                    })
+                }
+                EventType::AxisChanged(axis, value, _) => {
+                    // Validate value is finite to prevent NaN/Infinity from propagating downstream
+                    if !value.is_finite() {
+                        tracing::warn!("Ignoring non-finite axis value: {}", value);
+                        return None;
+                    }
+                    Some(Event::GamepadAxisChange {
+                        id: gamepad_id,
+                        axis: $map_axis(axis),
+                        value,
+                    })
+                }
                 EventType::ButtonRepeated(..)
                 | EventType::Connected
                 | EventType::Disconnected
