@@ -222,9 +222,57 @@ InitUIVars() {
     }
     collapse_toggled := PixelGetColor(collapse_button[1], collapse_button[2])
     unreliable_button := Array(27, 887)
+    if (unreliable_button.Length < 2) {
+        MsgBox("unreliable_button array must have at least 2 elements")
+        ExitApp()
+    }
+    if (unreliable_button[1] < 0 || unreliable_button[1] > 1920) {
+        MsgBox("unreliable_button X coordinate out of bounds: " . unreliable_button[1])
+        ExitApp()
+    }
+    if (unreliable_button[2] < 0 || unreliable_button[2] > 1080) {
+        MsgBox("unreliable_button Y coordinate out of bounds: " . unreliable_button[2])
+        ExitApp()
+    }
     after_button := Array(27, 913)
+    if (after_button.Length < 2) {
+        MsgBox("after_button array must have at least 2 elements")
+        ExitApp()
+    }
+    if (after_button[1] < 0 || after_button[1] > 1920) {
+        MsgBox("after_button X coordinate out of bounds: " . after_button[1])
+        ExitApp()
+    }
+    if (after_button[2] < 0 || after_button[2] > 1080) {
+        MsgBox("after_button Y coordinate out of bounds: " . after_button[2])
+        ExitApp()
+    }
     upload_button := Array(383, 946)
+    if (upload_button.Length < 2) {
+        MsgBox("upload_button array must have at least 2 elements")
+        ExitApp()
+    }
+    if (upload_button[1] < 0 || upload_button[1] > 1920) {
+        MsgBox("upload_button X coordinate out of bounds: " . upload_button[1])
+        ExitApp()
+    }
+    if (upload_button[2] < 0 || upload_button[2] > 1080) {
+        MsgBox("upload_button Y coordinate out of bounds: " . upload_button[2])
+        ExitApp()
+    }
     FAQ_button := Array(32, 1002)
+    if (FAQ_button.Length < 2) {
+        MsgBox("FAQ_button array must have at least 2 elements")
+        ExitApp()
+    }
+    if (FAQ_button[1] < 0 || FAQ_button[1] > 1920) {
+        MsgBox("FAQ_button X coordinate out of bounds: " . FAQ_button[1])
+        ExitApp()
+    }
+    if (FAQ_button[2] < 0 || FAQ_button[2] > 1080) {
+        MsgBox("FAQ_button Y coordinate out of bounds: " . FAQ_button[2])
+        ExitApp()
+    }
     logs_button := Array(76, 1002)
     website_button := Array(689, 1002)
     if (website_button.Length < 2) {
