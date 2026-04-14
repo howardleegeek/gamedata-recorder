@@ -83,9 +83,13 @@ impl ApiClient {
             .timeout(std::time::Duration::from_secs(300))
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()
-            .unwrap_or_else(|_| {
-                tracing::warn!("Failed to build client with timeouts, falling back to default");
-                reqwest::Client::new()
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to build client with timeouts, using minimal fallback: {e}");
+                // Fallback with at least timeout protection to prevent hangs during uploads
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(300))
+                    .build()
+                    .expect("Failed to build even minimal HTTP client")
             });
         Self { client }
     }
