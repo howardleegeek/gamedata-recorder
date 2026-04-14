@@ -517,8 +517,13 @@ impl RecorderState {
 
         self.last_video_encoder_type = Some(encoder_type);
 
-        // Listen for signals to pass onto the event stream
+        // Reset was_hooked at the start of each recording session to prevent
+        // race conditions when recording the same game again immediately after stopping.
+        // Without this reset, the signal handler thread may incorrectly use stale state
+        // from the previous recording, causing duplicate or incorrect HOOK_START events.
         self.was_hooked.store(false, Ordering::Relaxed);
+
+        // Listen for signals to pass onto the event stream
         std::thread::spawn({
             let event_stream = request.event_stream;
             let was_hooked = self.was_hooked.clone();
