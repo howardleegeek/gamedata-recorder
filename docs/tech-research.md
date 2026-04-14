@@ -734,6 +734,6 @@ session_{id}/
 |------|------|
 | `GameData_Labs_Plan_v3.docx` | 原始 Business Plan |
 | `GameData_Labs_Tech_Research.md` | 本文: 技术选型总报告 |
-| `gamedata-labs-architecture.md` | 后端 Pipeline 详细架构 |
+| `backend-architecture.md` | 后端 Pipeline 详细架构 |
 | *(pending)* | 定价 & 单位经济详细模型 |
-| `gamedata-labs-engine-plugin-research.md` | 引擎插件详细研究 |
+| `engine-plugin-research.md` | 引擎插件详细研究 |
