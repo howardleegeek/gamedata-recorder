@@ -28,6 +28,7 @@ impl std::fmt::Display for VideoEncoderType {
     }
 }
 impl VideoEncoderType {
+    /// Returns the encoder identifier string used in configuration
     pub fn id(&self) -> &str {
         match self {
             VideoEncoderType::X264 => "x264",
