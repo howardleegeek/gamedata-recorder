@@ -26,7 +26,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 ; Modern UI
 WizardStyle=modern
 ; Auto-run after install
-SetupIconFile=..\assets\icon_idle.ico
+SetupIconFile=..\assets\owl-logo.png
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
