@@ -304,11 +304,19 @@ impl ApiClient {
             .send()
             .await?;
 
-        Ok(
-            check_for_response_success(response, "Abort upload request failed")
-                .await?
-                .json()
-                .await?,
-        )
+        let response = check_for_response_success(response, "Abort upload request failed")
+            .await?
+            .json::<AbortMultipartUploadResponse>()
+            .await?;
+
+        if !response.success {
+            return Err(ApiError::ApiFailure {
+                context: "Abort upload request failed".into(),
+                error: response.message.clone(),
+                status: None,
+            });
+        }
+
+        Ok(response)
     }
 }
