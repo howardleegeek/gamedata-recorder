@@ -65,13 +65,33 @@ fi
 # 7. Verify
 echo
 echo "=== Verification ==="
-echo "Bun:      $(bun --version 2>/dev/null || echo MISSING)"
-echo "OpenCode: $(~/.opencode/bin/opencode --version 2>/dev/null || echo MISSING)"
-echo "Cargo:    $(cargo --version 2>/dev/null || echo MISSING)"
-echo "jq:       $(jq --version 2>/dev/null || echo MISSING)"
-echo "Repo:     $(git -C ~/gamedata-recorder log -1 --oneline 2>/dev/null || echo MISSING)"
-echo "Memory:   $(free -h | awk '/^Mem:/{print $2}')"
+BUN_VERSION=$(bun --version 2>/dev/null || echo "MISSING")
+OPENCODE_VERSION=$(~/.opencode/bin/opencode --version 2>/dev/null || echo "MISSING")
+CARGO_VERSION=$(cargo --version 2>/dev/null || echo "MISSING")
+JQ_VERSION=$(jq --version 2>/dev/null || echo "MISSING")
+REPO_STATUS=$(git -C ~/gamedata-recorder log -1 --oneline 2>/dev/null || echo "MISSING")
+echo "Bun:      $BUN_VERSION"
+echo "OpenCode: $OPENCODE_VERSION"
+echo "Cargo:    $CARGO_VERSION"
+echo "jq:       $JQ_VERSION"
+echo "Repo:     $REPO_STATUS"
+echo "Memory:   $(free -h 2>/dev/null | awk '/^Mem:/{print $2}' || echo "N/A")"
 echo "CPUs:     $(nproc)"
+
+# Check critical tools are present
+CRITICAL_MISSING=""
+if [ "$BUN_VERSION" = "MISSING" ]; then
+    CRITICAL_MISSING="$CRITICAL_MISSING bun"
+fi
+if [ "$OPENCODE_VERSION" = "MISSING" ]; then
+    CRITICAL_MISSING="$CRITICAL_MISSING opencode"
+fi
+if [ -n "$CRITICAL_MISSING" ]; then
+    echo
+    echo "Error: Critical tools missing:$CRITICAL_MISSING"
+    exit 1
+fi
+
 echo
 echo "Setup complete. Ready to run autoresearch."
 echo
