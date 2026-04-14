@@ -99,9 +99,9 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                     }
                 }
 
-                // Accumulate movement
-                cursor_x += dx;
-                cursor_y += dy;
+                // Accumulate movement with saturation to prevent overflow on prolonged movement
+                cursor_x = cursor_x.saturating_add(*dx);
+                cursor_y = cursor_y.saturating_add(*dy);
                 let dist = ((*dx as f64).powi(2) + (*dy as f64).powi(2)).sqrt();
                 total_distance += dist;
                 event_count += 1;
