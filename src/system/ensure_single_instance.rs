@@ -12,8 +12,8 @@ use color_eyre::eyre;
 #[cfg(target_os = "windows")]
 pub fn ensure_single_instance() -> eyre::Result<()> {
     use windows::{
-        Win32::{Foundation::ERROR_ALREADY_EXISTS, System::Threading::CreateMutexW},
         core::PCWSTR,
+        Win32::{Foundation::ERROR_ALREADY_EXISTS, System::Threading::CreateMutexW},
     };
 
     let mutex_name = "GameData-Recorder-SingleInstance";
@@ -46,8 +46,12 @@ pub fn ensure_single_instance() -> eyre::Result<()> {
                 std::mem::forget(_handle);
             }
             Err(e) => {
-                tracing::warn!("Failed to create mutex for single instance check: {e}");
-                // Fail open — allow the instance to run
+                // Fail closed — prevent multiple instances from corrupting recordings.
+                // Mutex failure (permissions, anti-cheat, resource exhaustion) is fatal
+                // to ensure recording integrity and prevent OBS hook conflicts.
+                eyre::bail!(
+                    "Failed to create single-instance mutex (recording integrity safeguard): {e}"
+                );
             }
         }
     }
