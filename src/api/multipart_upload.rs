@@ -1,3 +1,4 @@
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 
 use crate::api::{API_BASE_URL, ApiClient, ApiError, check_for_response_success};
@@ -229,10 +230,11 @@ impl ApiClient {
         api_key: &str,
         upload_id: &str,
     ) -> Result<AbortMultipartUploadResponse, ApiError> {
+        let encoded_upload_id = utf8_percent_encode(upload_id, NON_ALPHANUMERIC).to_string();
         let response = self
             .client
             .delete(format!(
-                "{}/tracker/upload/game_control/multipart/abort/{upload_id}",
+                "{}/tracker/upload/game_control/multipart/abort/{encoded_upload_id}",
                 API_BASE_URL.as_str()
             ))
             .header("X-API-Key", api_key)
