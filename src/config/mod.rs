@@ -278,7 +278,7 @@ where
         return Err(Error::custom("Hotkey cannot be empty or whitespace-only"));
     }
 
-    if key.len() > MAX_HOTKEY_LENGTH {
+    if key.chars().count() > MAX_HOTKEY_LENGTH {
         return Err(Error::custom(format!(
             "Hotkey exceeds maximum length of {} characters",
             MAX_HOTKEY_LENGTH
