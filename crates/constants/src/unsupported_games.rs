@@ -88,7 +88,7 @@ pub fn detect_installed_games() -> Vec<InstalledGame> {
         };
         for app in library.apps() {
             let Ok(app) = app else {
-                tracing::warn!("Failed to read app");
+                tracing::warn!("Failed to read Steam app from library");
                 continue;
             };
             if let Some(name) = app.name {
@@ -96,6 +96,8 @@ pub fn detect_installed_games() -> Vec<InstalledGame> {
                     name,
                     steam_app_id: app.app_id,
                 });
+            } else {
+                tracing::debug!(app_id = app.app_id, "Skipping Steam app with missing name");
             }
         }
     }
