@@ -30,6 +30,14 @@ InitUIVars() {
         MsgBox("logout_button array must have at least 2 elements")
         ExitApp()
     }
+    if (logout_button[1] < 0 || logout_button[1] > 1920) {
+        MsgBox("logout_button X coordinate out of bounds: " . logout_button[1])
+        ExitApp()
+    }
+    if (logout_button[2] < 0 || logout_button[2] > 1080) {
+        MsgBox("logout_button Y coordinate out of bounds: " . logout_button[2])
+        ExitApp()
+    }
 
     ;   Keyboard Shortcuts
     hotkey_button := Array(412, 186)
@@ -37,9 +45,25 @@ InitUIVars() {
         MsgBox("hotkey_button array must have at least 2 elements")
         ExitApp()
     }
+    if (hotkey_button[1] < 0 || hotkey_button[1] > 1920) {
+        MsgBox("hotkey_button X coordinate out of bounds: " . hotkey_button[1])
+        ExitApp()
+    }
+    if (hotkey_button[2] < 0 || hotkey_button[2] > 1080) {
+        MsgBox("hotkey_button Y coordinate out of bounds: " . hotkey_button[2])
+        ExitApp()
+    }
     hotkey_stop := Array(412, 216)
     if (hotkey_stop.Length < 2) {
         MsgBox("hotkey_stop array must have at least 2 elements")
+        ExitApp()
+    }
+    if (hotkey_stop[1] < 0 || hotkey_stop[1] > 1920) {
+        MsgBox("hotkey_stop X coordinate out of bounds: " . hotkey_stop[1])
+        ExitApp()
+    }
+    if (hotkey_stop[2] < 0 || hotkey_stop[2] > 1080) {
+        MsgBox("hotkey_stop Y coordinate out of bounds: " . hotkey_stop[2])
         ExitApp()
     }
     stop_button := Array(225, 223)
