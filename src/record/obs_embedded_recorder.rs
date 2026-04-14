@@ -248,7 +248,13 @@ fn recorder_thread(
     >,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        recorder_thread_impl(adapter_index, rx, init_success_tx);
+        // Create a dedicated Tokio runtime for this thread to avoid executor mismatch
+        // between futures::executor and tokio primitives (channels, select!)
+        let rt = tokio::runtime::Runtime::new()
+            .expect("Failed to create Tokio runtime for OBS recorder thread");
+        rt.block_on(async move {
+            recorder_thread_impl(adapter_index, rx, init_success_tx).await;
+        });
     }));
     if let Err(e) = result {
         tracing::error!("OBS recorder thread panicked: {e:?}");
@@ -256,7 +262,7 @@ fn recorder_thread(
     }
 }
 
-fn recorder_thread_impl(
+async fn recorder_thread_impl(
     adapter_index: usize,
     mut rx: tokio::sync::mpsc::Receiver<RecorderMessage>,
     init_success_tx: tokio::sync::oneshot::Sender<
@@ -534,9 +540,10 @@ impl RecorderState {
 
             move || {
                 let initial_time = Instant::now();
-                futures::executor::block_on(async {
-                    // Seems a bit dubious to use a tokio::select with
-                    // a tokio oneshot in a non-Tokio context, but it seems to work
+                // Use the current Tokio runtime (from recorder_thread) instead of futures executor
+                // to ensure tokio::select! and tokio channels work correctly
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(async {
                     loop {
                         tokio::select! {
                             r = start_signal_rx.recv() => {
