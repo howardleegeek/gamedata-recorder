@@ -75,7 +75,7 @@ gamedata-recorder/
 
 | 问题 | 位置 | 风险等级 | 建议修复 |
 |------|------|----------|----------|
-| **unsafe代码块** | `game-process/src/lib.rs` | 🟡 中 | 多处使用Windows FFI unsafe，已封装但需审计 |
+| **unsafe代码块** | `crates/game-process/src/lib.rs` | 🟡 中 | 多处使用Windows FFI unsafe，已封装但需审计 |
 | **输入验证不足** | `backend/main.py` | 🟡 中 | 部分端点缺少严格的输入验证 |
 | **日志敏感信息** | `src/config.rs` | 🟢 低 | 确保日志不记录API密钥 |
 
