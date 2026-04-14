@@ -283,7 +283,7 @@ pub fn initialize_thread(
 
                 // Only update metadata on first encounter to reduce lock contention
                 // - gamepad info rarely changes after connection
-                let _needs_registration = {
+                let is_new = {
                     let mut gamepads_guard = match gamepads.write() {
                         Ok(guard) => guard,
                         Err(e) => {
@@ -293,8 +293,8 @@ pub fn initialize_thread(
                             break;
                         }
                     };
-                    let is_new = !gamepads_guard.contains_key(&gamepad_id);
-                    if is_new {
+                    let needs_insert = !gamepads_guard.contains_key(&gamepad_id);
+                    if needs_insert {
                         gamepads_guard.insert(
                             gamepad_id,
                             GamepadMetadata {
@@ -305,21 +305,25 @@ pub fn initialize_thread(
                         );
                     }
                     drop(gamepads_guard);
-                    is_new
+                    needs_insert
                 };
 
-                let captured_guard = match already_captured_by_xinput.read() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        tracing::error!("Captured lock poisoned (wgi), stopping capture: {e}");
-                        break;
+                // Skip processing if this gamepad is already captured by xinput
+                // or if it's a known gamepad that was previously captured
+                if !is_new {
+                    let captured_guard = match already_captured_by_xinput.read() {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            tracing::error!("Captured lock poisoned (wgi), stopping capture: {e}");
+                            break;
+                        }
+                    };
+                    let is_captured = captured_guard.contains(&gamepad_name);
+                    drop(captured_guard);
+
+                    if is_captured {
+                        continue;
                     }
-                };
-                let is_captured = captured_guard.contains(&gamepad_name);
-                drop(captured_guard);
-
-                if is_captured {
-                    continue;
                 }
 
                 let Some(event) = map_event_wgi(GamepadId::WGI(id.into()), event) else {
