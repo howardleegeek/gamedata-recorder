@@ -411,11 +411,11 @@ impl Config {
         let mut config =
             serde_json::from_str::<Config>(&contents).context("Failed to parse config file")?;
 
-        // Ensure hotkeys have default values if not set
-        if config.preferences.start_recording_key.is_empty() {
+        // Ensure hotkeys have default values if not set (including whitespace-only)
+        if config.preferences.start_recording_key.trim().is_empty() {
             config.preferences.start_recording_key = default_start_key();
         }
-        if config.preferences.stop_recording_key.is_empty() {
+        if config.preferences.stop_recording_key.trim().is_empty() {
             config.preferences.stop_recording_key = default_stop_key();
         }
 
