@@ -13,6 +13,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Optional, List
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 
 import boto3
 from fastapi import FastAPI, HTTPException, Header, Depends, Request
@@ -58,7 +59,7 @@ if not DATABASE_URL:
     DB_PORT = os.getenv("DB_PORT", "5432")
     DB_NAME = os.getenv("DB_NAME", "gamedata")
     DATABASE_URL = (
-        f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+        f"postgresql+asyncpg://{DB_USER}:{quote(DB_PASSWORD, safe='')}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     )
 
 # Create database engine and session factory
