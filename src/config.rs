@@ -1,6 +1,8 @@
 use color_eyre::eyre::{eyre, Context, Result};
 use constants::encoding::VideoEncoderType;
 use serde::{Deserialize, Deserializer, Serialize};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{collections::HashMap, fs, path::PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -189,6 +191,12 @@ pub fn get_persistent_dir() -> Result<PathBuf> {
         .ok_or_else(|| eyre!("Could not find user data directory"))?
         .join("GameData Recorder");
     fs::create_dir_all(&dir)?;
+    // Set restrictive permissions on Unix to protect sensitive config data (API keys)
+    #[cfg(unix)]
+    {
+        let permissions = fs::Permissions::from_mode(0o700);
+        fs::set_permissions(&dir, permissions)?;
+    }
     tracing::debug!("Persistent dir: {:?}", dir);
     Ok(dir)
 }
