@@ -187,7 +187,8 @@ impl HighPrecisionTimer {
         let current_msg_time = unsafe { GetMessageTime() };
         // Calculate message time delta (time passed according to GetMessageTime)
         let msg_delta_ms = current_msg_time.wrapping_sub(self.msg_time_offset_ms);
-        let elapsed = self.elapsed_ms() as i32;
+        // Use saturating cast to prevent truncation for timers running >24 days
+        let elapsed = self.elapsed_ms().min(i32::MAX as u64) as i32;
         // Drift is QPC elapsed time minus message time delta
         elapsed - msg_delta_ms
     }
