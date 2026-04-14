@@ -1,4 +1,4 @@
-use color_eyre::eyre::{Context, Result, eyre};
+use color_eyre::eyre::{eyre, Context, Result};
 use constants::encoding::VideoEncoderType;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
@@ -292,18 +292,24 @@ impl EncoderSettings {
     ) -> color_eyre::Result<libobs_wrapper::data::ObsData> {
         // Apply common settings shared by all encoders
         let mut updater = data.bulk_update();
+
+        // HEVC encoders use "main" profile, H.264 encoders use "high" profile
+        let profile = if self.encoder.is_hevc() {
+            constants::encoding::HEVC_VIDEO_PROFILE
+        } else {
+            constants::encoding::H264_VIDEO_PROFILE
+        };
+
         updater = updater
             .set_int("bitrate", constants::encoding::BITRATE)
             .set_string("rate_control", constants::encoding::RATE_CONTROL)
-            .set_string("profile", constants::encoding::VIDEO_PROFILE)
+            .set_string("profile", profile)
             .set_int("bf", constants::encoding::B_FRAMES)
             .set_bool("psycho_aq", constants::encoding::PSYCHO_AQ)
             .set_bool("lookahead", constants::encoding::LOOKAHEAD);
 
         updater = match self.encoder {
-            VideoEncoderType::X264 => {
-                self.x264.apply_to_data_updater(updater)
-            }
+            VideoEncoderType::X264 => self.x264.apply_to_data_updater(updater),
             VideoEncoderType::NvEncHevc | VideoEncoderType::NvEnc => {
                 self.nvenc.apply_to_data_updater(updater)
             }
