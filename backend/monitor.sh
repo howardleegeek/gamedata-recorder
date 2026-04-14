@@ -121,9 +121,9 @@ main() {
     local failed=0
     
     # 执行检查
-    check_process || ((failed++))
-    check_health || ((failed++))
-    check_disk_space || ((failed++))
+    check_process || ((failed++)) || true
+    check_health || ((failed++)) || true
+    check_disk_space || ((failed++)) || true
     check_log_size
     
     # 如果有检查失败，尝试重启
