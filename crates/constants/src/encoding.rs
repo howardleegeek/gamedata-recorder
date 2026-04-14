@@ -44,9 +44,7 @@ impl VideoEncoderType {
     pub fn is_hevc(&self) -> bool {
         matches!(
             self,
-            VideoEncoderType::NvEncHevc
-                | VideoEncoderType::AmfHevc
-                | VideoEncoderType::QsvHevc
+            VideoEncoderType::NvEncHevc | VideoEncoderType::AmfHevc | VideoEncoderType::QsvHevc
         )
     }
 
