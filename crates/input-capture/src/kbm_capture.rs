@@ -193,7 +193,6 @@ impl KbmCapture {
     /// Parse raw input from GetRawInputBuffer batch reading.
     /// Includes message time for latency tracking.
     #[allow(dead_code)]
-    #[allow(clippy::unnecessary_unsafe)]
     fn parse_raw_input(
         &mut self,
         rawinput: &RAWINPUT,

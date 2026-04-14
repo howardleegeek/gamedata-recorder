@@ -4,7 +4,7 @@ use color_eyre::{
     Result,
     eyre::{WrapErr as _, eyre},
 };
-use input_capture::InputCapture;
+use input_capture::{HighPrecisionTimer, InputCapture};
 use serde::Serialize;
 use tokio::{fs::File, io::AsyncWriteExt as _, sync::mpsc};
 
@@ -33,16 +33,16 @@ impl From<&InputEvent> for JsonInputEvent {
 #[derive(Clone)]
 pub(crate) struct InputEventStream {
     tx: mpsc::UnboundedSender<InputEvent>,
+    timer: HighPrecisionTimer,
 }
 
 impl InputEventStream {
-    /// Send a timestamped input event at current time. This is the only supported send
-    /// since now that we rely on the rx queue to flush outputs to file, we also want this
-    /// queue to be populated in chronological order, so arbitrary timestamp writing
-    /// shouldn't be supported anyway.
+    /// Send a timestamped input event at current time. Uses HighPrecisionTimer for
+    /// sub-microsecond accuracy to ensure frame timestamp alignment with video.
     pub(crate) fn send(&self, event: InputEventType) -> Result<()> {
+        let timestamp = self.timer.elapsed_ns() as f64 / 1_000_000_000.0;
         self.tx
-            .send(InputEvent::new_at_now(event))
+            .send(InputEvent::new(timestamp, event))
             .map_err(|_| eyre!("input event stream receiver was closed"))?;
         Ok(())
     }
@@ -51,6 +51,7 @@ impl InputEventStream {
 pub(crate) struct InputEventWriter {
     file: File,
     rx: mpsc::UnboundedReceiver<InputEvent>,
+    timer: HighPrecisionTimer,
 }
 
 impl InputEventWriter {
@@ -62,15 +63,28 @@ impl InputEventWriter {
             .await
             .wrap_err_with(|| eyre!("failed to create and open {path:?}"))?;
 
+        // Use HighPrecisionTimer for accurate frame-aligned timestamps
+        let timer = HighPrecisionTimer::new();
         let (tx, rx) = mpsc::unbounded_channel();
-        let stream = InputEventStream { tx };
-        let mut writer = Self { file, rx };
+        let stream = InputEventStream {
+            tx,
+            timer: timer.clone(),
+        };
+        let mut writer = Self {
+            file,
+            rx,
+            timer: timer.clone(),
+        };
 
         // No header needed for JSON Lines format — each line is self-describing
+        let start_timestamp = timer.elapsed_ns() as f64 / 1_000_000_000.0;
         writer
-            .write_entry(InputEvent::new_at_now(InputEventType::Start {
-                inputs: input_capture.active_input(),
-            }))
+            .write_entry(InputEvent::new(
+                start_timestamp,
+                InputEventType::Start {
+                    inputs: input_capture.active_input(),
+                },
+            ))
             .await?;
 
         Ok((writer, stream))
@@ -85,14 +99,8 @@ impl InputEventWriter {
     }
 
     pub(crate) async fn stop(mut self, input_capture: &InputCapture) -> Result<()> {
-        // Most accurate possible timestamp of exactly when the stop input recording was called
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or_else(|_| {
-                tracing::warn!("System time is before UNIX epoch, using 0");
-                0.0
-            });
+        // Use HighPrecisionTimer for consistent timestamp with other events
+        let timestamp = self.timer.elapsed_ns() as f64 / 1_000_000_000.0;
 
         // Flush any remaining events
         self.flush().await?;
