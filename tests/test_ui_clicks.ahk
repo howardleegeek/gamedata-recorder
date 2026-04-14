@@ -83,7 +83,31 @@ InitUIVars() {
 
     ;   Recorder Customization
     location_button := Array(277, 324, 4)
+    if (location_button.Length < 2) {
+        MsgBox("location_button array must have at least 2 elements")
+        ExitApp()
+    }
+    if (location_button[1] < 0 || location_button[1] > 1920) {
+        MsgBox("location_button X coordinate out of bounds: " . location_button[1])
+        ExitApp()
+    }
+    if (location_button[2] < 0 || location_button[2] > 1080) {
+        MsgBox("location_button Y coordinate out of bounds: " . location_button[2])
+        ExitApp()
+    }
     opacity_button := Array(702, 353)
+    if (opacity_button.Length < 2) {
+        MsgBox("opacity_button array must have at least 2 elements")
+        ExitApp()
+    }
+    if (opacity_button[1] < 0 || opacity_button[1] > 1920) {
+        MsgBox("opacity_button X coordinate out of bounds: " . opacity_button[1])
+        ExitApp()
+    }
+    if (opacity_button[2] < 0 || opacity_button[2] > 1080) {
+        MsgBox("opacity_button Y coordinate out of bounds: " . opacity_button[2])
+        ExitApp()
+    }
     honk_button := Array(224, 384)
     if (honk_button.Length < 2) {
         MsgBox("honk_button array must have at least 2 elements")
@@ -99,7 +123,31 @@ InitUIVars() {
     }
     honk_toggled := PixelGetColor(honk_button[1], honk_button[2])
     encoder_button := Array(293, 410, 3)
+    if (encoder_button.Length < 2) {
+        MsgBox("encoder_button array must have at least 2 elements")
+        ExitApp()
+    }
+    if (encoder_button[1] < 0 || encoder_button[1] > 1920) {
+        MsgBox("encoder_button X coordinate out of bounds: " . encoder_button[1])
+        ExitApp()
+    }
+    if (encoder_button[2] < 0 || encoder_button[2] > 1080) {
+        MsgBox("encoder_button Y coordinate out of bounds: " . encoder_button[2])
+        ExitApp()
+    }
     settings_button := Array(456, 410)
+    if (settings_button.Length < 2) {
+        MsgBox("settings_button array must have at least 2 elements")
+        ExitApp()
+    }
+    if (settings_button[1] < 0 || settings_button[1] > 1920) {
+        MsgBox("settings_button X coordinate out of bounds: " . settings_button[1])
+        ExitApp()
+    }
+    if (settings_button[2] < 0 || settings_button[2] > 1080) {
+        MsgBox("settings_button Y coordinate out of bounds: " . settings_button[2])
+        ExitApp()
+    }
 
     ; Upload Manager
     move_button := Array(651, 468)
