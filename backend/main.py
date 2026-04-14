@@ -285,7 +285,11 @@ def verify_token(token: str) -> Optional[str]:
         return None
 
     # Token valid for 30 days - use constant-time comparison to prevent timing attacks
-    token_age = int(time.time()) - int(timestamp)
+    try:
+        ts = int(timestamp)
+    except ValueError:
+        return None
+    token_age = int(time.time()) - ts
     max_age = 30 * 86400
     # Use comparison that doesn't leak timing information about token age
     if token_age > max_age or token_age < 0:  # Also check for future timestamps
