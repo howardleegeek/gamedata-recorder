@@ -182,6 +182,14 @@ fn validate_files(
         .map(|event| event.timestamp)
         .unwrap_or(0.0);
 
+    // Validate timeline consistency to prevent empty filtered events and confusing errors
+    if start_time > end_time {
+        return Err(vec![format!(
+            "Invalid timeline: start_time ({}) is after end_time ({})",
+            start_time, end_time
+        )]);
+    }
+
     let filtered_events: Vec<_> = events
         .iter()
         .filter(|event| event.timestamp >= start_time && event.timestamp <= end_time)
