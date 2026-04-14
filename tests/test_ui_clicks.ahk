@@ -163,6 +163,12 @@ InitUIVars() {
         MsgBox("move_button Y coordinate out of bounds: " . move_button[2])
         ExitApp()
     }
+    if (move_button.Length >= 3) {
+        if (move_button[3] < 1 || move_button[3] > 100) {
+            MsgBox("move_button option count out of bounds: " . move_button[3])
+            ExitApp()
+        }
+    }
     open_button := Array(706, 468)
     if (open_button.Length < 2) {
         MsgBox("open_button array must have at least 2 elements")
