@@ -82,7 +82,9 @@ impl<K: Eq + Hash> Default for AnalogDebouncer<K> {
 impl<K: Eq + Hash> AnalogDebouncer<K> {
     /// Returns whether or not a sufficient amount of time has passed since the last change.
     pub(crate) fn debounce(&mut self, key: K) -> bool {
-        const MAX_ANALOGUE_SAMPLING_MICROSECONDS: u64 = (1_000_000.0 / (FPS as f32 * 2.0)) as u64;
+        // Properly round the floating-point result to avoid truncation errors
+        const MAX_ANALOGUE_SAMPLING_MICROSECONDS: u64 =
+            (1_000_000.0 / (FPS as f32 * 2.0)).round() as u64;
 
         let now = std::time::Instant::now();
         let Some(last_change) = self.last_change.get(&key) else {
