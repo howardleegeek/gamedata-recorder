@@ -213,7 +213,7 @@ TODO/FIXME 统计:
 
 **风险评估**:
 - ⚠️ `libobs-wrapper` 使用Git依赖，版本不稳定
-- ⚠️ `egui` 使用fork版本 (`Overworldai/catppuccin-egui`)
+- ⚠️ `egui` 使用fork版本 (`OverworldAI/catppuccin-egui`)
 - ✅ 其他依赖均为crates.io标准库
 
 #### 6.2 Python 依赖 (requirements.txt)
