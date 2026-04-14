@@ -358,10 +358,14 @@ impl KbmCapture {
             let header_size = size_of::<RAWINPUTHEADER>() as u32;
 
             if GetRawInputData(hrawinput, RID_INPUT, None, &mut pcbsize, header_size) == u32::MAX {
+                use windows::Win32::Foundation::GetLastError;
+                let error = GetLastError();
+                tracing::error!("GetRawInputData size query failed: {:?}", error);
                 return Vec::new();
             }
 
             if pcbsize == 0 {
+                tracing::warn!("GetRawInputData returned zero buffer size, skipping input");
                 return Vec::new();
             }
 
@@ -378,6 +382,14 @@ impl KbmCapture {
             // If result differs from pcbsize, buffer may contain uninitialized memory,
             // which would cause undefined behavior when accessing RAWINPUT fields.
             if result == u32::MAX || result == 0 || result != pcbsize {
+                use windows::Win32::Foundation::GetLastError;
+                let error = GetLastError();
+                tracing::error!(
+                    "GetRawInputData failed or returned unexpected size (result={}, expected={}): {:?}",
+                    result,
+                    pcbsize,
+                    error
+                );
                 return Vec::new();
             }
 
