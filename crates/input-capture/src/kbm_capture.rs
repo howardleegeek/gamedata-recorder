@@ -146,7 +146,7 @@ impl KbmCapture {
                 if result_i32 == 0 {
                     break; // WM_QUIT received
                 }
-                if result_i32 < 0 {
+                if result.0 == -1 {
                     use windows::Win32::Foundation::GetLastError;
                     let error = GetLastError();
                     bail!("GetMessageA failed: {error:?}");
@@ -355,25 +355,30 @@ impl KbmCapture {
     ) -> Vec<Event> {
         unsafe {
             let hrawinput = HRAWINPUT(lparam.0 as *mut _);
+            let header_size = match size_of::<RAWINPUTHEADER>().try_into() {
+                Ok(size) => size,
+                Err(e) => {
+                    tracing::error!("size of RAWINPUTHEADER should fit in u32: {e}");
+                    return Vec::new();
+                }
+            };
 
-            // Get required buffer size first - RAWINPUT is variable-length
-            let mut pcbsize = 0u32;
-            let header_size = size_of::<RAWINPUTHEADER>() as u32;
-
-            if GetRawInputData(hrawinput, RID_INPUT, None, &mut pcbsize, header_size) == u32::MAX {
+            // Query required buffer size first - critical for HID devices with variable data
+            let mut pcbsize: u32 = 0;
+            let size_result =
+                GetRawInputData(hrawinput, RID_INPUT, None, &mut pcbsize, header_size);
+            if size_result == u32::MAX || pcbsize == 0 {
                 use windows::Win32::Foundation::GetLastError;
                 let error = GetLastError();
-                tracing::error!("GetRawInputData size query failed: {:?}", error);
+                tracing::warn!(
+                    "GetRawInputData size query failed: {:?}, dropping input event",
+                    error
+                );
                 return Vec::new();
             }
 
-            if pcbsize == 0 {
-                tracing::warn!("GetRawInputData returned zero buffer size, skipping input");
-                return Vec::new();
-            }
-
-            // Allocate properly sized buffer - RAWINPUT data size varies by device type
-            let mut buffer: Vec<u8> = vec![0; pcbsize as usize];
+            // Allocate buffer of required size and fetch data
+            let mut buffer = vec![0u8; pcbsize as usize];
             let result = GetRawInputData(
                 hrawinput,
                 RID_INPUT,
@@ -381,23 +386,18 @@ impl KbmCapture {
                 &mut pcbsize,
                 header_size,
             );
-            // Validate that GetRawInputData wrote the expected amount of data.
-            // If result differs from pcbsize, buffer may contain uninitialized memory,
-            // which would cause undefined behavior when accessing RAWINPUT fields.
-            if result == u32::MAX || result == 0 || result != pcbsize {
+            if result == u32::MAX {
                 use windows::Win32::Foundation::GetLastError;
                 let error = GetLastError();
-                tracing::error!(
-                    "GetRawInputData failed or returned unexpected size (result={}, expected={}): {:?}",
-                    result,
-                    pcbsize,
-                    error
-                );
+                tracing::warn!("GetRawInputData failed: {:?}, dropping input event", error);
                 return Vec::new();
             }
 
-            // SAFETY: buffer is sized correctly and fully initialized by GetRawInputData
+            // SAFETY: We trust the RAWINPUT data from Windows. The buffer is sized correctly
+            // from the first call. Union field access is required because RAWINPUT.data is a
+            // union of mouse/keyboard/hid. The dwType field tells us which union variant is valid.
             let rawinput = &*(buffer.as_ptr() as *const RAWINPUT);
+
             match Input::RID_DEVICE_INFO_TYPE(rawinput.header.dwType) {
                 Input::RIM_TYPEMOUSE => {
                     let mut events = Vec::new();

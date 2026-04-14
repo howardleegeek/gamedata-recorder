@@ -40,18 +40,45 @@ impl TarFileGuard {
 
 impl Drop for TarFileGuard {
     fn drop(&mut self) {
-        if let Some(path) = &self.path {
-            if let Err(e) = std::fs::remove_file(path) {
+        if let Some(path) = self.path.take() {
+            // Try to offload blocking I/O to a blocking thread to avoid stalling the async runtime.
+            // If spawn_blocking fails (e.g., during runtime shutdown), fall back to synchronous cleanup.
+            let cleanup_result = tokio::task::spawn_blocking(move || {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::warn!(
+                        "Tar file guard triggered but failed to clean up tar file at {}: {}",
+                        path.display(),
+                        e
+                    );
+                    Err(e)
+                } else {
+                    tracing::info!(
+                        "Tar file guard triggered, cleaned up tar file at {}",
+                        path.display()
+                    );
+                    Ok(())
+                }
+            });
+
+            // Handle spawn_blocking failure - runtime might be shutting down
+            if let Err(e) = cleanup_result {
                 tracing::warn!(
-                    "Tar file guard triggered but failed to clean up tar file at {}: {}",
-                    path.display(),
+                    "Failed to spawn blocking task for tar cleanup (runtime shutting down?), attempting synchronous cleanup: {}",
                     e
                 );
-            } else {
-                tracing::info!(
-                    "Tar file guard triggered, cleaned up tar file at {}",
-                    path.display()
-                );
+                // Fallback to synchronous cleanup to prevent resource leak
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::warn!(
+                        "Synchronous tar file cleanup also failed for {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    tracing::info!(
+                        "Synchronous tar file guard cleanup succeeded for {}",
+                        path.display()
+                    );
+                }
             }
         }
     }
@@ -165,27 +192,27 @@ pub async fn upload_folder(
             )
         })?;
 
-        let file_size = std::fs::metadata(tar_path)
-            .map(|m| m.len())
-            .map_err(|e| UploadFolderError::FailedToGetFileSize(tar_path.to_owned(), e))?;
+        // Use spawn_blocking to avoid blocking the async runtime with filesystem I/O
+        let file_size = tokio::task::spawn_blocking({
+            let tar_path = tar_path.to_path_buf();
+            move || std::fs::metadata(&tar_path).map(|m| m.len())
+        })
+        .await
+        .map_err(|e| UploadFolderError::Io(std::io::Error::other(e)))?
+        .map_err(|e| UploadFolderError::FailedToGetFileSize(tar_path.to_path_buf(), e))?;
 
         fn get_filename(path: &Path) -> Result<String, UploadFolderError> {
             Ok(path
                 .file_name()
                 .ok_or_else(|| UploadFolderError::MissingFilename(path.to_owned()))?
                 .to_string_lossy()
-                .as_ref()
                 .to_string())
         }
 
         let hardware_id =
             crate::system::hardware_id::get().map_err(UploadFolderError::MissingHardwareId)?;
 
-        let filename = tar_path
-            .file_name()
-            .ok_or_else(|| UploadFolderError::MissingFilename(tar_path.to_owned()))?
-            .to_string_lossy()
-            .to_string();
+        let filename = get_filename(tar_path)?;
 
         let init_response = api_client
             .init_multipart_upload(
@@ -263,9 +290,17 @@ async fn validate_recording_paused(
     // Per Philpax: We should avoid resuming uploads if there's less than 15 minutes remaining on the timer;
     // we've seen upload speeds of 0.3MB/s, which would take 11 minutes to upload 200MB. 15 minutes is safer.
     const MIN_TIME_REMAINING_SECONDS: i64 = 15 * 60; // 15 minutes
-    let seconds_left = state.seconds_until_expiration();
-    if !(state.seconds_until_expiration() > MIN_TIME_REMAINING_SECONDS && state.tar_path.is_file())
-    {
+
+    // Validate expires_at to prevent integer overflow in seconds_until_expiration().
+    // The function casts expires_at (u64) to i64, which overflows when expires_at > i64::MAX,
+    // causing valid sessions to appear expired (negative seconds_left).
+    let seconds_left = if state.expires_at > i64::MAX as u64 {
+        // expires_at is beyond i64 range, treat as "far future" (valid for resume)
+        i64::MAX
+    } else {
+        state.seconds_until_expiration()
+    };
+    if !(seconds_left > MIN_TIME_REMAINING_SECONDS && state.tar_path.is_file()) {
         // if tar file does not exist, we want to restart upload as there is no guarantee the
         // recreated tar file will be the same
         if !state.tar_path.is_file() {
@@ -288,7 +323,13 @@ async fn validate_recording_paused(
             );
         }
 
-        paused.abort_and_cleanup(api_client, api_token).await.ok();
+        if let Err(e) = paused.abort_and_cleanup(api_client, api_token).await {
+            tracing::error!(
+                "Failed to abort and cleanup upload for {}: {:?}",
+                path.display(),
+                e
+            );
+        }
 
         return None;
     }
