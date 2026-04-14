@@ -70,8 +70,8 @@ impl<K: Eq + Hash> KeyDebouncer<K> {
 }
 
 /// Maximum time between analog input samples, computed at compile time to avoid
-/// recalculating on every debounce call.
-const MAX_ANALOGUE_SAMPLING_MICROSECONDS: u64 = (1_000_000.0 / (FPS as f32 * 2.0)) as u64;
+/// recalculating on every debounce call. Uses integer math to avoid float operations.
+const MAX_ANALOGUE_SAMPLING_MICROSECONDS: u64 = 1_000_000 / ((FPS as u64) * 2);
 
 struct AnalogDebouncer<K: Eq + Hash> {
     last_change: HashMap<K, std::time::Instant>,
