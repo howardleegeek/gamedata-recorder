@@ -125,11 +125,11 @@ impl InputEventWriter {
         ))
         .await?;
 
-        // Ensure all data is flushed to disk to prevent data loss on crash
+        // Ensure data is physically written to disk for crash durability
         self.file
             .sync_all()
             .await
-            .wrap_err("failed to sync input events file to disk")
+            .wrap_err("failed to sync input file to disk")
     }
 
     async fn write_entry(&mut self, event: InputEvent) -> Result<()> {

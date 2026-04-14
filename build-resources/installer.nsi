@@ -37,7 +37,7 @@
 !insertmacro MUI_PAGE_INSTFILES
 
 ; Finish page
-!define MUI_FINISHPAGE_RUN "$INSTDIR\GameData Recorder.exe"
+!define MUI_FINISHPAGE_RUN "$INSTDIR\gamedata-recorder.exe"
 !insertmacro MUI_PAGE_FINISH
 
 ; Uninstaller pages
@@ -104,17 +104,28 @@ Section "MainSection" SEC01
   ${ifNot} ${FileExists} "$SYSDIR\msvcp140.dll"
     DetailPrint "Installing Visual C++ Redistributable..."
     File /oname=$PLUGINSDIR\vc_redist.x64.exe "downloads\vc_redist.x64.exe"
-    ExecWait '"$PLUGINSDIR\vc_redist.x64.exe" /norestart'
+    ExecWait '"$PLUGINSDIR\vc_redist.x64.exe" /norestart' $0
+    IntCmp $0 0 vc_redist_success
+    IntCmp $0 3010 vc_redist_success_reboot
+    vc_redist_failed:
+      DetailPrint "Visual C++ Redistributable installation failed with exit code $0"
+      Abort "Installation failed: Visual C++ Redistributable could not be installed."
+    vc_redist_success_reboot:
+      DetailPrint "Visual C++ Redistributable installed successfully (reboot required)"
+      Goto vc_redist_done
+    vc_redist_success:
+      DetailPrint "Visual C++ Redistributable installed successfully"
+    vc_redist_done:
   ${endIf}
 
   ; Copy all files and folders from dist directory
   File /r /x "GameData-Recorder-Setup-*.exe" "..\dist\*.*"
-  File "gamedata-logo.ico"
+  File "owl-logo.ico"
 
   ; Create shortcuts
   CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
-  CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\GameData Recorder.exe" "" "$INSTDIR\gamedata-logo.ico" 0
-  CreateShortcut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\GameData Recorder.exe" "" "$INSTDIR\gamedata-logo.ico" 0
+  CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\gamedata-recorder.exe" "" "$INSTDIR\owl-logo.ico" 0
+  CreateShortcut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\gamedata-recorder.exe" "" "$INSTDIR\owl-logo.ico" 0
   CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk" "$INSTDIR\uninst.exe"
 SectionEnd
 
@@ -127,10 +138,10 @@ Section -Post
   WriteUninstaller "$INSTDIR\uninst.exe"
 
   ; Registry keys
-  WriteRegStr HKCU "${PRODUCT_DIR_REGKEY}" "" "$INSTDIR\GameData Recorder.exe"
+  WriteRegStr HKCU "${PRODUCT_DIR_REGKEY}" "" "$INSTDIR\gamedata-recorder.exe"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayName" "$(^Name)"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "UninstallString" "$INSTDIR\uninst.exe"
-  WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\OWL Control.exe"
+  WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\gamedata-recorder.exe"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "URLInfoAbout" "${PRODUCT_WEB_SITE}"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
