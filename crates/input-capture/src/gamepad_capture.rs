@@ -259,26 +259,35 @@ pub fn initialize_thread(
             // Examine new events
             while let Some(gilrs_wgi::Event { id, event, .. }) = gilrs.next_event_blocking(None) {
                 let gamepad = gilrs.gamepad(id);
-
-                // Handle poisoned locks gracefully: if another thread panicked while
-                // holding the lock, log the error and break rather than crashing.
-                let mut gamepads_guard = match gamepads.write() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        tracing::error!("Gamepads RwLock poisoned (wgi), stopping capture: {e}");
-                        break;
-                    }
-                };
+                let gamepad_id = GamepadId::WGI(id.into());
                 let gamepad_name = sanitize_gamepad_name(gamepad.name(), id.into());
-                gamepads_guard.insert(
-                    GamepadId::WGI(id.into()),
-                    GamepadMetadata {
-                        name: gamepad_name.clone(),
-                        vendor_id: gamepad.vendor_id(),
-                        product_id: gamepad.product_id(),
-                    },
-                );
-                drop(gamepads_guard);
+
+                // Only update metadata on first encounter to reduce lock contention
+                // - gamepad info rarely changes after connection
+                let _needs_registration = {
+                    let mut gamepads_guard = match gamepads.write() {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            tracing::error!(
+                                "Gamepads RwLock poisoned (wgi), stopping capture: {e}"
+                            );
+                            break;
+                        }
+                    };
+                    let is_new = !gamepads_guard.contains_key(&gamepad_id);
+                    if is_new {
+                        gamepads_guard.insert(
+                            gamepad_id,
+                            GamepadMetadata {
+                                name: gamepad_name.clone(),
+                                vendor_id: gamepad.vendor_id(),
+                                product_id: gamepad.product_id(),
+                            },
+                        );
+                    }
+                    drop(gamepads_guard);
+                    is_new
+                };
 
                 let captured_guard = match already_captured_by_xinput.read() {
                     Ok(guard) => guard,
