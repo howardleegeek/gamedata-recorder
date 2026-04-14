@@ -14,6 +14,7 @@ use windows::Win32::{
 /// High-precision timer based on QueryPerformanceCounter (Windows)
 /// or std::time::Instant (other platforms).
 /// Optionally integrates GetMessageTime for Windows message correlation.
+#[derive(Clone)]
 pub struct HighPrecisionTimer {
     #[cfg(target_os = "windows")]
     frequency: i64,

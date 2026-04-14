@@ -4,7 +4,7 @@ use color_eyre::{
     eyre::{eyre, WrapErr as _},
     Result,
 };
-use input_capture::InputCapture;
+use input_capture::{HighPrecisionTimer, InputCapture};
 use serde::Serialize;
 use tokio::{fs::File, io::AsyncWriteExt as _, sync::mpsc};
 
@@ -37,37 +37,26 @@ impl From<&InputEvent> for JsonInputEvent {
 /// Stream for sending timestamped input events to the writer
 #[derive(Clone)]
 pub(crate) struct InputEventStream {
-    tx: mpsc::Sender<InputEvent>,
+    tx: mpsc::UnboundedSender<InputEvent>,
+    timer: HighPrecisionTimer,
 }
 
 impl InputEventStream {
-    /// Send a timestamped input event at current time. This is the only supported send
-    /// since now that we rely on the rx queue to flush outputs to file, we also want this
-    /// queue to be populated in chronological order, so arbitrary timestamp writing
-    /// shouldn't be supported anyway.
-    ///
-    /// Uses try_send with bounded channel to prevent unbounded memory growth.
-    /// If the channel is full, the oldest events are dropped to maintain chronological
-    /// order while ensuring the recording remains stable.
+    /// Send a timestamped input event at current time. Uses HighPrecisionTimer for
+    /// sub-microsecond accuracy to ensure frame timestamp alignment with video.
     pub(crate) fn send(&self, event: InputEventType) -> Result<()> {
-        match self.tx.try_send(InputEvent::new_at_now(event)) {
-            Ok(_) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                // Channel is full - drop the event to prevent memory exhaustion.
-                // This maintains recording stability over completeness.
-                tracing::warn!("Input event channel full, dropping event to prevent memory growth");
-                Ok(())
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                Err(eyre!("input event stream receiver was closed"))
-            }
-        }
+        let timestamp = self.timer.elapsed_ns() as f64 / 1_000_000_000.0;
+        self.tx
+            .send(InputEvent::new(timestamp, event))
+            .map_err(|_| eyre!("input event stream receiver was closed"))?;
+        Ok(())
     }
 }
 
 pub(crate) struct InputEventWriter {
     file: File,
-    rx: mpsc::Receiver<InputEvent>,
+    rx: mpsc::UnboundedReceiver<InputEvent>,
+    timer: HighPrecisionTimer,
 }
 
 impl InputEventWriter {
@@ -79,15 +68,28 @@ impl InputEventWriter {
             .await
             .wrap_err_with(|| eyre!("failed to create and open {path:?}"))?;
 
-        let (tx, rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
-        let stream = InputEventStream { tx };
-        let mut writer = Self { file, rx };
+        // Use HighPrecisionTimer for accurate frame-aligned timestamps
+        let timer = HighPrecisionTimer::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let stream = InputEventStream {
+            tx,
+            timer: timer.clone(),
+        };
+        let mut writer = Self {
+            file,
+            rx,
+            timer: timer.clone(),
+        };
 
         // No header needed for JSON Lines format — each line is self-describing
+        let start_timestamp = timer.elapsed_ns() as f64 / 1_000_000_000.0;
         writer
-            .write_entry(InputEvent::new_at_now(InputEventType::Start {
-                inputs: input_capture.active_input(),
-            }))
+            .write_entry(InputEvent::new(
+                start_timestamp,
+                InputEventType::Start {
+                    inputs: input_capture.active_input(),
+                },
+            ))
             .await?;
 
         Ok((writer, stream))
@@ -102,21 +104,8 @@ impl InputEventWriter {
     }
 
     pub(crate) async fn stop(mut self, input_capture: &InputCapture) -> Result<()> {
-        // Capture inputs before flush to get most accurate state
-        let end_inputs = input_capture.active_input();
-
-        // Flush any remaining events first to ensure proper ordering
-        self.flush().await?;
-
-        // Capture timestamp AFTER flush to eliminate drift between
-        // last input event and End marker (metadata serialization gap fix)
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or_else(|_| {
-                tracing::warn!("System time is before UNIX epoch, using 0");
-                0.0
-            });
+        // Use HighPrecisionTimer for consistent timestamp with other events
+        let timestamp = self.timer.elapsed_ns() as f64 / 1_000_000_000.0;
 
         // Write the end marker with timestamp captured after flush
         self.write_entry(InputEvent::new(

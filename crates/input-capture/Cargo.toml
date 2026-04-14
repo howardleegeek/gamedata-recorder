@@ -9,6 +9,7 @@ compression = ["dep:zstd"]
 
 [dependencies]
 tracing.workspace = true
+zstd = { version = "0.13", optional = true }
 windows = { workspace = true, features = [
     "Win32_System_SystemInformation",
     "Win32_System_LibraryLoader",
