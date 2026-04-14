@@ -4,7 +4,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use color_eyre::{Result, eyre};
+use color_eyre::{eyre, Result};
 use egui_wgpu::wgpu;
 use serde::{Deserialize, Serialize};
 
@@ -69,8 +69,21 @@ impl UploadProgressState {
         self.expires_at as i64 - now as i64
     }
 
+    /// Maximum file size for progress files (10 MB) to prevent memory exhaustion
+    const MAX_PROGRESS_FILE_SIZE: u64 = 10 * 1024 * 1024;
+
     /// Load progress state from a file
     pub fn load_from_file(path: &Path) -> eyre::Result<Self> {
+        // Check file size before reading to prevent memory exhaustion
+        let metadata = std::fs::metadata(path)?;
+        if metadata.len() > Self::MAX_PROGRESS_FILE_SIZE {
+            return Err(eyre::eyre!(
+                "Progress file too large: {} bytes (max: {})",
+                metadata.len(),
+                Self::MAX_PROGRESS_FILE_SIZE
+            ));
+        }
+
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
         let mut stream =
