@@ -125,7 +125,13 @@ impl InputCapture {
             }
         });
         // Wait for the thread to start and get its thread ID for shutdown signaling
-        let raw_input_thread_id = thread_id_rx.recv().unwrap_or(0);
+        let raw_input_thread_id = match thread_id_rx.recv() {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!("Failed to receive raw input thread ID: {}", e);
+                0
+            }
+        };
 
         tracing::debug!("Initializing gamepad capture threads");
         let active_gamepad = Arc::new(Mutex::new(gamepad_capture::ActiveGamepads::default()));
