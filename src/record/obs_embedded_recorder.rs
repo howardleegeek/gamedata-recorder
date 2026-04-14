@@ -757,7 +757,7 @@ fn prepare_source(
         );
         if let Some(source) = last_source.take() {
             tracing::info!("Removing old source");
-            dbg!(scene.remove_source(&source))?;
+            scene.remove_source(&source)?;
             tracing::info!("Old source removed");
         }
     }
