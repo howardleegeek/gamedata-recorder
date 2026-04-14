@@ -216,6 +216,7 @@ impl LocalRecordingPaused {
         serde_json::to_writer(&mut file, &chunk)?;
         use std::io::Write;
         writeln!(&mut file)?;
+        file.sync_all()?; // Ensure chunk completion is durable before acknowledging
 
         Ok(())
     }
