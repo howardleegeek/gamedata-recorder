@@ -90,14 +90,14 @@ pub fn get_hardware_specs(gpus: Vec<GpuSpecs>) -> Result<HardwareSpecs> {
 /// Returns the resolution of the primary monitor
 pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
     use windows::{
+        core::PCWSTR,
         Win32::{
             Foundation::POINT,
             Graphics::Gdi::{
-                DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW,
-                MONITORINFO, MONITORINFOEXW, MonitorFromPoint,
+                EnumDisplaySettingsW, GetMonitorInfoW, MonitorFromPoint, DEVMODEW,
+                ENUM_CURRENT_SETTINGS, MONITORINFO, MONITORINFOEXW,
             },
         },
-        core::PCWSTR,
     };
 
     // Get the primary monitor handle
@@ -125,7 +125,6 @@ pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
             &mut monitor_info as *mut _ as *mut MONITORINFO,
         )
     }
-    .ok()
     .ok()?;
 
     // Get the display mode
@@ -140,7 +139,6 @@ pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
             &mut devmode,
         )
     }
-    .ok()
     .ok()?;
 
     Some((devmode.dmPelsWidth, devmode.dmPelsHeight))
