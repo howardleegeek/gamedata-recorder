@@ -271,8 +271,8 @@ pub fn get_recording_base_resolution(hwnd: HWND) -> Result<(u32, u32)> {
             // Bounds check: prevent underflow if rect has invalid coordinates
             let width = rect.right.saturating_sub(rect.left);
             let height = rect.bottom.saturating_sub(rect.top);
-            // Ensure non-negative before casting to u32
-            if width < 0 || height < 0 {
+            // Reject zero-sized windows (invalid capture target)
+            if width == 0 || height == 0 {
                 return None;
             }
             Some((width as u32, height as u32))
