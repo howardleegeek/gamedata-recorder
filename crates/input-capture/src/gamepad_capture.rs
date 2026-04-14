@@ -161,6 +161,7 @@ pub fn initialize_thread(
             while let Some(gilrs_xinput::Event { id, event, .. }) = gilrs.next_event_blocking(None)
             {
                 let gamepad = gilrs.gamepad(id);
+                let gamepad_name = gamepad.name().to_string();
 
                 // Handle poisoned locks gracefully: if another thread panicked while
                 // holding the lock, log the error and break rather than crashing.
@@ -174,7 +175,7 @@ pub fn initialize_thread(
                 gamepads_guard.insert(
                     GamepadId::XInput(id.into()),
                     GamepadMetadata {
-                        name: gamepad.name().to_string(),
+                        name: gamepad_name.clone(),
                         vendor_id: gamepad.vendor_id(),
                         product_id: gamepad.product_id(),
                     },
@@ -188,7 +189,7 @@ pub fn initialize_thread(
                         break;
                     }
                 };
-                captured_guard.insert(gamepad.name().to_string());
+                captured_guard.insert(gamepad_name);
                 drop(captured_guard);
 
                 let Some(event) = map_event_xinput(GamepadId::XInput(id.into()), event) else {
@@ -230,6 +231,7 @@ pub fn initialize_thread(
             // Examine new events
             while let Some(gilrs_wgi::Event { id, event, .. }) = gilrs.next_event_blocking(None) {
                 let gamepad = gilrs.gamepad(id);
+                let gamepad_name = gamepad.name().to_string();
 
                 // Handle poisoned locks gracefully: if another thread panicked while
                 // holding the lock, log the error and break rather than crashing.
@@ -243,7 +245,7 @@ pub fn initialize_thread(
                 gamepads_guard.insert(
                     GamepadId::WGI(id.into()),
                     GamepadMetadata {
-                        name: gamepad.name().to_string(),
+                        name: gamepad_name.clone(),
                         vendor_id: gamepad.vendor_id(),
                         product_id: gamepad.product_id(),
                     },
@@ -257,7 +259,7 @@ pub fn initialize_thread(
                         break;
                     }
                 };
-                let is_captured = captured_guard.contains(&gamepad.name().to_string());
+                let is_captured = captured_guard.contains(&gamepad_name);
                 drop(captured_guard);
 
                 if is_captured {
