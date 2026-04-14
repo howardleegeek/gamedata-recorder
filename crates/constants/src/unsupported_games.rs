@@ -87,9 +87,9 @@ pub fn detect_installed_games() -> Vec<InstalledGame> {
                 tracing::warn!("Failed to read app");
                 continue;
             };
-            if let Some(name) = &app.name {
+            if let Some(name) = app.name {
                 installed.push(InstalledGame {
-                    name: name.clone(),
+                    name,
                     steam_app_id: app.app_id,
                 });
             }
