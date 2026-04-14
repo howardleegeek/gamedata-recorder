@@ -77,43 +77,61 @@ pub async fn create_tar_file(
             );
 
             let start_time = std::time::Instant::now();
-            let mut tar = tar::Builder::new(std::fs::File::create(&tar_path)?);
-            for (_label, path) in &source_files {
-                tar.append_file(
-                    path.file_name()
-                        .ok_or_else(|| CreateTarError::InvalidFilename((*path).to_owned()))?,
-                    &mut std::fs::File::open(path)?,
-                )?;
-            }
-            // Explicitly finish the tar to ensure proper closure
-            tar.finish()?;
 
-            // Log final tar file size and creation time
-            let elapsed = start_time.elapsed();
-            match std::fs::metadata(&tar_path) {
-                Ok(meta) => {
-                    let tar_size = meta.len();
-                    tracing::info!(
-                        "Tar file created: {} bytes ({:.2} MB) in {:.2}s",
-                        tar_size,
-                        tar_size as f64 / (1024.0 * 1024.0),
-                        elapsed.as_secs_f64()
-                    );
-                    // Warn if tar is significantly larger than source files (shouldn't happen)
-                    if tar_size > total_source_size + 1024 * 1024 {
-                        tracing::warn!(
-                            "Tar file ({} bytes) is larger than expected based on source files ({} bytes)",
+            // Create the tar file and ensure cleanup on error
+            let result = (|| -> Result<PathBuf, CreateTarError> {
+                let mut tar = tar::Builder::new(std::fs::File::create(&tar_path)?);
+                for (_label, path) in &source_files {
+                    tar.append_file(
+                        path.file_name()
+                            .ok_or_else(|| CreateTarError::InvalidFilename((*path).to_owned()))?,
+                        &mut std::fs::File::open(path)?,
+                    )?;
+                }
+                // Explicitly finish the tar to ensure proper closure
+                tar.finish()?;
+                Ok(tar_path.clone())
+            })();
+
+            // Clean up partial tar file on error
+            if result.is_err() && tar_path.exists() {
+                tracing::warn!(
+                    "Tar creation failed, cleaning up partial tar file at {}",
+                    tar_path.display()
+                );
+                if let Err(e) = std::fs::remove_file(&tar_path) {
+                    tracing::warn!("Failed to remove partial tar file {}: {}", tar_path.display(), e);
+                }
+            }
+
+            // Log final tar file size and creation time on success
+            if result.is_ok() {
+                let elapsed = start_time.elapsed();
+                match std::fs::metadata(&tar_path) {
+                    Ok(meta) => {
+                        let tar_size = meta.len();
+                        tracing::info!(
+                            "Tar file created: {} bytes ({:.2} MB) in {:.2}s",
                             tar_size,
-                            total_source_size
+                            tar_size as f64 / (1024.0 * 1024.0),
+                            elapsed.as_secs_f64()
                         );
+                        // Warn if tar is significantly larger than source files (shouldn't happen)
+                        if tar_size > total_source_size + 1024 * 1024 {
+                            tracing::warn!(
+                                "Tar file ({} bytes) is larger than expected based on source files ({} bytes)",
+                                tar_size,
+                                total_source_size
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to get tar file size: {}", e);
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to get tar file size: {}", e);
-                }
             }
 
-            Ok(tar_path)
+            result
         }
     })
     .await?
