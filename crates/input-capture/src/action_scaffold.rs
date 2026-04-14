@@ -53,7 +53,7 @@ pub enum ActionType {
         screen_y: i32,
     },
     /// Keyboard key press
-    KeyPress { key: u16, key_name: String },
+    KeyPress { key: u16, key_name: &'static str },
     /// Scroll wheel
     Scroll { delta: i16 },
 }
@@ -99,13 +99,10 @@ pub fn build_actions(
                 screen_x: cursor_x,
                 screen_y: cursor_y,
             }),
-            super::trajectory::RawEventKind::KeyDown { vkey, .. } => {
-                let key_name = super::vkey_names::vkey_to_name(*vkey).to_string();
-                Some(ActionType::KeyPress {
-                    key: *vkey,
-                    key_name,
-                })
-            }
+            super::trajectory::RawEventKind::KeyDown { vkey, .. } => Some(ActionType::KeyPress {
+                key: *vkey,
+                key_name: super::vkey_names::vkey_to_name(*vkey),
+            }),
             super::trajectory::RawEventKind::Scroll { delta } => {
                 Some(ActionType::Scroll { delta: *delta })
             }
