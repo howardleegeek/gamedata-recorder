@@ -742,11 +742,11 @@ async def upload_complete(
     db: AsyncSession = Depends(get_db),
 ):
     """Complete upload and calculate earnings."""
-    # Find upload
+    # Find upload with row lock to prevent race conditions on concurrent completion attempts
     result = await db.execute(
-        select(Upload).where(
-            and_(Upload.id == req.upload_id, Upload.user_id == current_user.id)
-        )
+        select(Upload)
+        .where(and_(Upload.id == req.upload_id, Upload.user_id == current_user.id))
+        .with_for_update()
     )
     upload = result.scalar_one_or_none()
 
