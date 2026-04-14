@@ -152,9 +152,18 @@ impl VideoRecorder for ObsEmbeddedRecorder {
     }
 
     async fn poll(&mut self) -> PollUpdate {
-        self.obs_tx.send(RecorderMessage::Poll).await.ok();
-        PollUpdate {
-            active_fps: Some(unsafe { libobs_wrapper::sys::obs_get_active_fps() }),
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        if self
+            .obs_tx
+            .send(RecorderMessage::Poll { result_tx })
+            .await
+            .is_err()
+        {
+            return PollUpdate::default();
+        }
+        match result_rx.await {
+            Ok(fps) => PollUpdate { active_fps: fps },
+            Err(_) => PollUpdate::default(),
         }
     }
 
@@ -184,7 +193,9 @@ enum RecorderMessage {
     StopRecording {
         result_tx: tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
     },
-    Poll,
+    Poll {
+        result_tx: tokio::sync::oneshot::Sender<Option<f64>>,
+    },
     CheckHookTimeout {
         result_tx: tokio::sync::oneshot::Sender<bool>,
     },
@@ -289,10 +300,13 @@ fn recorder_thread_impl(
                     .send(state.stop_recording(last_shutdown_tx.take()))
                     .ok();
             }
-            RecorderMessage::Poll => {
+            RecorderMessage::Poll { result_tx } => {
                 if let Err(e) = state.poll() {
                     tracing::error!("Failed to poll OBS embedded recorder: {e}");
                 }
+                // Get FPS from the OBS thread to avoid race conditions
+                let fps = unsafe { libobs_wrapper::sys::obs_get_active_fps() };
+                result_tx.send(Some(fps)).ok();
             }
             RecorderMessage::CheckHookTimeout { result_tx } => {
                 result_tx.send(state.check_hook_timeout()).ok();
