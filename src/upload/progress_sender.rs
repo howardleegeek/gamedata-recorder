@@ -45,7 +45,7 @@ impl ProgressSender {
     }
 
     pub fn increment_bytes_uploaded(&mut self, bytes: u64) {
-        self.set_bytes_uploaded(self.bytes_uploaded + bytes);
+        self.set_bytes_uploaded(self.bytes_uploaded.saturating_add(bytes));
     }
 
     pub fn bytes_uploaded(&self) -> u64 {
