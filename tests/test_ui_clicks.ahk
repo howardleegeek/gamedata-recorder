@@ -91,6 +91,10 @@ if WinExist("ahk_exe OWL Control.exe") {
 
     if (stop_toggle == checked_true) {
         y := stop_button[2] + option_offset
+        if (y < 0 || y > 1200) {
+            MsgBox("Calculated Y coordinate out of bounds: " . y)
+            ExitApp()
+        }
         MouseClick "left", stop_button[1], y
     }
 
@@ -116,10 +120,18 @@ if WinExist("ahk_exe OWL Control.exe") {
             loop repeat {
                 MouseClick "left", coords[1], coords[2]
                 y := (coords[2] + (A_Index) * option_offset) - collapse_offset
+                if (y < 0 || y > 1200) {
+                    MsgBox("Calculated Y coordinate out of bounds in loop: " . y)
+                    ExitApp()
+                }
                 MouseClick "left", coords[1], y
             }
         } else {
             y := coords[2] - collapse_offset
+            if (y < 0 || y > 1200) {
+                MsgBox("Calculated Y coordinate out of bounds: " . y)
+                ExitApp()
+            }
             MouseClick "left", coords[1], y
         }
     }
