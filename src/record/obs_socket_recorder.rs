@@ -74,7 +74,9 @@ impl VideoRecorder for ObsSocketRecorder {
         let recording_path = dummy_video_path
             .parent()
             .ok_or_eyre("Video path must have a parent directory")?;
-        let recording_path = std::fs::canonicalize(recording_path)
+        // Use dunce::canonicalize which handles non-existent paths better than std::fs::canonicalize
+        // (std::fs::canonicalize requires the path to exist, which may not be true for new recordings)
+        let recording_path = dunce::canonicalize(recording_path)
             .wrap_err("Failed to get absolute path for recording directory")?;
 
         // Pull out sub-APIs for easier access
