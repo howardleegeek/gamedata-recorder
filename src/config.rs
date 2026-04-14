@@ -35,7 +35,10 @@ pub struct Preferences {
     pub recording_backend: RecordingBackend,
     #[serde(default)]
     pub encoder: EncoderSettings,
-    #[serde(default = "default_recording_location")]
+    #[serde(
+        default = "default_recording_location",
+        deserialize_with = "validate_recording_path"
+    )]
     pub recording_location: std::path::PathBuf,
     /// Per-game configuration settings, keyed by executable name (e.g., "hl2")
     #[serde(default)]
@@ -149,6 +152,37 @@ fn default_honk_volume() -> u8 {
 }
 fn default_recording_location() -> std::path::PathBuf {
     std::path::PathBuf::from("./data_dump/games")
+}
+
+/// Validates that the recording path doesn't contain path traversal sequences
+/// that could allow writing to unintended system locations. Returns an error
+/// if the path contains suspicious patterns like absolute paths or parent directory
+/// references that could escape the intended directory structure.
+fn validate_recording_path<'de, D>(deserializer: D) -> Result<std::path::PathBuf, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    let path = PathBuf::deserialize(deserializer)?;
+
+    // Reject absolute paths which could target any system location
+    if path.is_absolute() {
+        return Err(Error::custom(
+            "Recording location must be a relative path, not absolute",
+        ));
+    }
+
+    // Check for parent directory references that could escape the intended directory
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(Error::custom(
+            "Recording location cannot contain parent directory references (..)",
+        ));
+    }
+
+    Ok(path)
 }
 
 // For some reason, previous electron configs saved hasConsented as a string instead of a boolean? So now we need a custom deserializer
