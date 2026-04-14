@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::Deserialize;
 
-use crate::api::{API_BASE_URL, ApiClient, ApiError, check_for_response_success};
+use crate::api::{check_for_response_success, ApiClient, ApiError, API_BASE_URL};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -77,10 +77,14 @@ impl ApiClient {
         );
         let mut query_params = Vec::new();
         if let Some(start) = start_date {
-            query_params.push(format!("start_date={}", start.format("%Y-%m-%d")));
+            let date_str = start.format("%Y-%m-%d").to_string();
+            let encoded_date = utf8_percent_encode(&date_str, NON_ALPHANUMERIC).to_string();
+            query_params.push(format!("start_date={}", encoded_date));
         }
         if let Some(end) = end_date {
-            query_params.push(format!("end_date={}", end.format("%Y-%m-%d")));
+            let date_str = end.format("%Y-%m-%d").to_string();
+            let encoded_date = utf8_percent_encode(&date_str, NON_ALPHANUMERIC).to_string();
+            query_params.push(format!("end_date={}", encoded_date));
         }
         if !query_params.is_empty() {
             url.push('?');
