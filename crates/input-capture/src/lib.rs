@@ -80,7 +80,7 @@ pub struct InputCapture {
 impl InputCapture {
     pub fn new() -> Result<(Self, mpsc::Receiver<Event>)> {
         tracing::debug!("InputCapture::new() called");
-        let (input_tx, input_rx) = mpsc::channel(10);
+        let (input_tx, input_rx) = mpsc::channel(1000);
 
         tracing::debug!("Spawning raw input thread for keyboard/mouse capture");
         let active_keys = Arc::new(Mutex::new(kbm_capture::ActiveKeys::default()));
@@ -132,14 +132,18 @@ impl InputCapture {
         let active_keys = match self.active_keys.lock() {
             Ok(guard) => guard,
             Err(e) => {
-                tracing::error!("ActiveKeys mutex poisoned, returning empty keyboard/mouse state: {e}");
+                tracing::error!(
+                    "ActiveKeys mutex poisoned, returning empty keyboard/mouse state: {e}"
+                );
                 return ActiveInput::default();
             }
         };
         let active_gamepad = match self.active_gamepad.lock() {
             Ok(guard) => guard,
             Err(e) => {
-                tracing::error!("ActiveGamepads mutex poisoned, returning empty gamepad state: {e}");
+                tracing::error!(
+                    "ActiveGamepads mutex poisoned, returning empty gamepad state: {e}"
+                );
                 return ActiveInput {
                     keyboard: active_keys.keyboard.clone(),
                     mouse: active_keys.mouse.clone(),
