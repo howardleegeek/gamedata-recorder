@@ -67,9 +67,9 @@ var
   ResultCode: Integer;
   ExecSuccess: Boolean;
 begin
-  // Query tasklist to check if process exists - returns 0 if found, 1 if not found
+  // Query tasklist via cmd to handle PATH/WOW64 issues - returns 0 if found, 1 if not found
   // If tasklist itself fails to execute, assume process is not running to be safe
-  ExecSuccess := Exec('tasklist', '/FI "IMAGENAME eq {#MyAppExeName}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  ExecSuccess := Exec(ExpandConstant('{cmd}'), '/C tasklist /FI "IMAGENAME eq {#MyAppExeName}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if not ExecSuccess then
     Result := False
   else
