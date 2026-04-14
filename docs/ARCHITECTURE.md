@@ -45,7 +45,7 @@
 - **Layer 2 (Trajectory):** Mouse movements grouped into strokes by click/key/pause — `trajectories.jsonl`
 - **Layer 3 (Action Scaffold):** Discrete actions with VLM annotation placeholders — `actions.jsonl`
 
-Inspired by github.com/Hunterbacon111/Mouse-Keyboard-Time-Series
+Inspired by [github.com/Hunterbacon111/Mouse-Keyboard-Time-Series](https://github.com/Hunterbacon111/Mouse-Keyboard-Time-Series)
 
 ### Game Detection: Multi-Signal Confidence Scoring
 **Signals (additive):**
