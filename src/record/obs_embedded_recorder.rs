@@ -890,34 +890,27 @@ impl ObsLogger for TracingObsLogger {
 }
 
 fn parse_skipped_frames(msg: &str) -> Option<SkippedFrames> {
-    // Find the colon and start from there
-    let after_colon = msg.split(':').nth(1)?;
-    let mut chars = after_colon.chars();
+    // Extract "X/Y" pattern where X and Y are digits (handles numbers like 0)
+    let slash_idx = msg.find('/')?;
 
-    // Skip to first digit and parse number (skipped frames)
-    while let Some(c) = chars.next() {
-        if !c.is_ascii_digit() {
-            continue;
-        }
-        let mut num_str = c.to_string();
-        num_str.extend(chars.by_ref().take_while(|c| c.is_ascii_digit()));
-        let skipped = num_str.parse::<usize>().ok()?;
+    // Find the number before '/' (skipped frames)
+    let before_slash = &msg[..slash_idx];
+    let skipped_start = before_slash.rfind(|c: char| !c.is_ascii_digit())?;
+    let skipped_str = &before_slash[skipped_start + 1..];
+    let skipped = skipped_str.parse::<usize>().ok()?;
 
-        // Skip to next digit and parse number (total frames)
-        while let Some(c) = chars.next() {
-            if !c.is_ascii_digit() {
-                continue;
-            }
+    // Find the number after '/' (total frames)
+    let after_slash = &msg[slash_idx + 1..];
+    let total_end = after_slash.find(|c: char| !c.is_ascii_digit()).unwrap_or(after_slash.len());
+    let total_str = &after_slash[..total_end];
+    let total = total_str.parse::<usize>().ok()?;
 
-            let mut num_str = c.to_string();
-            num_str.extend(chars.by_ref().take_while(|c| c.is_ascii_digit()));
-            let total = num_str.parse::<usize>().ok()?;
-
-            return Some(SkippedFrames { skipped, total });
-        }
+    // Validate: total should be >= skipped and both should be non-zero for valid data
+    if total == 0 || skipped > total {
+        return None;
     }
 
-    None
+    Some(SkippedFrames { skipped, total })
 }
 
 #[cfg(test)]
