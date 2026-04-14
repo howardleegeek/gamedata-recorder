@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, AtomicBool, Mutex, RwLock, atomic::Ordering},
-    time::Duration,
+    sync::{Arc, Mutex, RwLock},
 };
 
 use tokio::sync::mpsc;
@@ -61,16 +60,10 @@ impl std::str::FromStr for GamepadId {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if let Some(id) = s.strip_prefix("XInput:") {
-            return id
-                .parse::<usize>()
-                .map(GamepadId::XInput)
-                .map_err(|e| format!("Invalid XInput id: {e}"));
+            return Ok(GamepadId::XInput(id.parse::<usize>().unwrap()));
         }
         if let Some(id) = s.strip_prefix("WGI:") {
-            return id
-                .parse::<usize>()
-                .map(GamepadId::WGI)
-                .map_err(|e| format!("Invalid WGI id: {e}"));
+            return Ok(GamepadId::WGI(id.parse::<usize>().unwrap()));
         }
         Err(format!("Invalid gamepad id: {s}"))
     }
@@ -125,25 +118,6 @@ pub struct GamepadMetadata {
 pub struct GamepadThreads {
     _xinput_thread: std::thread::JoinHandle<()>,
     _wgi_thread: std::thread::JoinHandle<()>,
-    shutdown: Arc<AtomicBool>,
-}
-
-impl GamepadThreads {
-    /// Signal the gamepad capture threads to shut down gracefully.
-    /// This sets an atomic flag that the threads check between event polling.
-    pub fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::SeqCst);
-    }
-}
-
-/// Sanitize gamepad name to ensure it's never empty.
-/// Empty names can cause deduplication issues and aren't useful for debugging.
-fn sanitize_gamepad_name(name: &str, id: usize) -> String {
-    if name.trim().is_empty() {
-        format!("Unknown Gamepad {}", id)
-    } else {
-        name.to_string()
-    }
 }
 
 pub fn initialize_thread(
@@ -152,10 +126,6 @@ pub fn initialize_thread(
     gamepads: Arc<RwLock<HashMap<GamepadId, GamepadMetadata>>>,
 ) -> GamepadThreads {
     let already_captured_by_xinput = Arc::new(RwLock::new(HashSet::new()));
-    // Shared shutdown flag for clean thread termination
-    let shutdown = Arc::new(AtomicBool::new(false));
-    // Polling interval for checking shutdown signal (100ms)
-    const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
     // We use both the `xinput` and `wgi` versions of gilrs so that we can capture Xbox controllers
     // (which only work with `xinput`) and PS controllers (which only work with `wgi`).
@@ -172,141 +142,31 @@ pub fn initialize_thread(
         let gamepads = gamepads.clone();
         let input_tx = input_tx.clone();
         let active_gamepads = active_gamepads.clone();
-        let shutdown = shutdown.clone();
         move || {
-            let mut gilrs = match gilrs_xinput::Gilrs::new() {
-                Ok(g) => g,
-                Err(e) => {
-                    tracing::warn!("Failed to initialize XInput gamepad capture: {e}");
-                    return;
-                }
-            };
+            let mut gilrs = gilrs_xinput::Gilrs::new().unwrap();
 
             // Examine new events
             while let Some(gilrs_xinput::Event { id, event, .. }) = gilrs.next_event_blocking(None)
             {
                 let gamepad = gilrs.gamepad(id);
-                let gamepad_name = gamepad.name().to_string();
-
-                // Handle poisoned locks gracefully: if another thread panicked while
-                // holding the lock, log the error and break rather than crashing.
-                let mut gamepads_guard = match gamepads.write() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        tracing::error!("Gamepads RwLock poisoned (xinput), stopping capture: {e}");
-                        break;
-                    }
-                };
-                gamepads_guard.insert(
+                gamepads.write().unwrap().insert(
                     GamepadId::XInput(id.into()),
                     GamepadMetadata {
-                        name: gamepad_name.clone(),
+                        name: gamepad.name().to_string(),
                         vendor_id: gamepad.vendor_id(),
                         product_id: gamepad.product_id(),
                     },
                 );
-                drop(gamepads_guard);
 
-                let mut captured_guard = match already_captured_by_xinput.write() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        tracing::error!("Captured lock poisoned (xinput), stopping capture: {e}");
-                        break;
-                    }
-                };
-                captured_guard.insert(gamepad_name);
-                drop(captured_guard);
+                already_captured_by_xinput
+                    .write()
+                    .unwrap()
+                    .insert(gamepad.name().to_string());
 
                 let Some(event) = map_event_xinput(GamepadId::XInput(id.into()), event) else {
                     continue;
                 };
-                let gamepad = gilrs.gamepad(id);
-                let gamepad_id = GamepadId::XInput(id.into());
-                let gamepad_name = sanitize_gamepad_name(gamepad.name(), id.into());
-
-                // Handle disconnection events to clean up stale state
-                if matches!(
-                    event,
-                    gilrs_xinput::EventType::Disconnected | gilrs_xinput::EventType::Dropped
-                ) {
-                    let mut active_guard = match active_gamepads.lock() {
-                        Ok(guard) => guard,
-                        Err(e) => {
-                            tracing::error!(
-                                "Active gamepads lock poisoned (xinput), stopping capture: {e}"
-                            );
-                            break;
-                        }
-                    };
-                    active_guard.devices.remove(&gamepad_id);
-                    drop(active_guard);
-
-                    // Also clean up stale metadata to prevent memory growth
-                    if let Ok(mut gamepads_guard) = gamepads.write() {
-                        gamepads_guard.remove(&gamepad_id);
-                    }
-                    continue;
-                }
-
-                // Map the event first to ensure we only mark gamepads as captured
-                // if they produce useful events (not Connected/Disconnected/Dropped etc.)
-                let Some(event) = map_event_xinput(gamepad_id, event) else {
-                    continue;
-                };
-
-                // Only update metadata and captured set on first encounter to reduce
-                // lock contention - gamepad info rarely changes after connection
-                let needs_registration = {
-                    let mut gamepads_guard = match gamepads.write() {
-                        Ok(guard) => guard,
-                        Err(e) => {
-                            tracing::error!(
-                                "Gamepads RwLock poisoned (xinput), stopping capture: {e}"
-                            );
-                            break;
-                        }
-                    };
-                    let is_new = !gamepads_guard.contains_key(&gamepad_id);
-                    if is_new {
-                        gamepads_guard.insert(
-                            gamepad_id,
-                            GamepadMetadata {
-                                name: gamepad_name,
-                                vendor_id: gamepad.vendor_id(),
-                                product_id: gamepad.product_id(),
-                            },
-                        );
-                    }
-                    drop(gamepads_guard);
-                    is_new
-                };
-
-                if needs_registration {
-                    let mut captured_guard = match already_captured_by_xinput.write() {
-                        Ok(guard) => guard,
-                        Err(e) => {
-                            tracing::error!(
-                                "Captured lock poisoned (xinput), stopping capture: {e}"
-                            );
-                            break;
-                        }
-                    };
-                    captured_guard.insert(gamepad_name);
-                    drop(captured_guard);
-                }
-
-                let mut active_guard = match active_gamepads.lock() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        tracing::error!(
-                            "Active gamepads lock poisoned (xinput), stopping capture: {e}"
-                        );
-                        break;
-                    }
-                };
-                update_active_gamepad(&mut active_guard, event);
-                drop(active_guard);
-
+                update_active_gamepad(&mut active_gamepads.lock().unwrap(), event);
                 if input_tx.blocking_send(event).is_err() {
                     tracing::warn!("Gamepad input tx closed, stopping gamepad capture");
                     break;
@@ -318,139 +178,32 @@ pub fn initialize_thread(
     // wgi
     let _wgi_thread = std::thread::spawn({
         let already_captured_by_xinput = already_captured_by_xinput.clone();
-        let shutdown = shutdown.clone();
         move || {
-            let mut gilrs = match gilrs_wgi::Gilrs::new() {
-                Ok(g) => g,
-                Err(e) => {
-                    tracing::warn!("Failed to initialize WGI gamepad capture: {e}");
-                    return;
-                }
-            };
+            let mut gilrs = gilrs_wgi::Gilrs::new().unwrap();
 
-            // Examine new events with periodic shutdown checks
-            loop {
-                if shutdown.load(Ordering::SeqCst) {
-                    tracing::debug!("WGI gamepad capture shutting down");
-                    break;
-                }
-
-                let event_opt = gilrs.next_event_blocking(Some(POLL_INTERVAL));
-                let Some(gilrs_wgi::Event { id, event, .. }) = event_opt else {
-                    continue;
-                };
+            // Examine new events
+            while let Some(gilrs_wgi::Event { id, event, .. }) = gilrs.next_event_blocking(None) {
                 let gamepad = gilrs.gamepad(id);
-                let gamepad_name = gamepad.name().to_string();
-
-                // Handle disconnection events to clean up stale state
-                if matches!(
-                    event,
-                    gilrs_wgi::EventType::Disconnected | gilrs_wgi::EventType::Dropped
-                ) {
-                    let mut active_guard = match active_gamepads.lock() {
-                        Ok(guard) => guard,
-                        Err(e) => {
-                            tracing::error!(
-                                "Active gamepads lock poisoned (wgi), stopping capture: {e}"
-                            );
-                            break;
-                        }
-                    };
-                    active_guard.devices.remove(&gamepad_id);
-                    drop(active_guard);
-
-                    // Also clean up stale metadata to prevent memory growth
-                    if let Ok(mut gamepads_guard) = gamepads.write() {
-                        gamepads_guard.remove(&gamepad_id);
-                    }
-                };
-                gamepads_guard.insert(
+                gamepads.write().unwrap().insert(
                     GamepadId::WGI(id.into()),
                     GamepadMetadata {
-                        name: gamepad_name.clone(),
+                        name: gamepad.name().to_string(),
                         vendor_id: gamepad.vendor_id(),
                         product_id: gamepad.product_id(),
                     },
                 );
-                drop(gamepads_guard);
-
-                let captured_guard = match already_captured_by_xinput.read() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        tracing::error!("Captured lock poisoned (wgi), stopping capture: {e}");
-                        break;
-                    }
-                };
-                let is_captured = captured_guard.contains(&gamepad_name);
-                drop(captured_guard);
-
-                if is_captured {
+                if already_captured_by_xinput
+                    .read()
+                    .unwrap()
+                    .contains(&gamepad.name().to_string())
+                {
                     continue;
                 }
 
-                let gamepad_name = sanitize_gamepad_name(gamepad.name(), id.into());
-
-                // Only update metadata on first encounter to reduce lock contention
-                // - gamepad info rarely changes after connection
-                let is_new = {
-                    let mut gamepads_guard = match gamepads.write() {
-                        Ok(guard) => guard,
-                        Err(e) => {
-                            tracing::error!(
-                                "Gamepads RwLock poisoned (wgi), stopping capture: {e}"
-                            );
-                            break;
-                        }
-                    };
-                    let needs_insert = !gamepads_guard.contains_key(&gamepad_id);
-                    if needs_insert {
-                        gamepads_guard.insert(
-                            gamepad_id,
-                            GamepadMetadata {
-                                name: gamepad_name.clone(),
-                                vendor_id: gamepad.vendor_id(),
-                                product_id: gamepad.product_id(),
-                            },
-                        );
-                    }
-                    drop(gamepads_guard);
-                    needs_insert
-                };
-
-                // Skip processing if this gamepad is already captured by xinput
-                // or if it's a known gamepad that was previously captured
-                if !is_new {
-                    let captured_guard = match already_captured_by_xinput.read() {
-                        Ok(guard) => guard,
-                        Err(e) => {
-                            tracing::error!("Captured lock poisoned (wgi), stopping capture: {e}");
-                            break;
-                        }
-                    };
-                    let is_captured = captured_guard.contains(&gamepad_name);
-                    drop(captured_guard);
-
-                    if is_captured {
-                        continue;
-                    }
-                }
-
-                let Some(event) = map_event_wgi(gamepad_id, event) else {
+                let Some(event) = map_event_wgi(GamepadId::WGI(id.into()), event) else {
                     continue;
                 };
-
-                let mut active_guard = match active_gamepads.lock() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        tracing::error!(
-                            "Active gamepads lock poisoned (wgi), stopping capture: {e}"
-                        );
-                        break;
-                    }
-                };
-                update_active_gamepad(&mut active_guard, event);
-                drop(active_guard);
-
+                update_active_gamepad(&mut active_gamepads.lock().unwrap(), event);
                 if input_tx.blocking_send(event).is_err() {
                     tracing::warn!("Gamepad input tx closed, stopping gamepad capture");
                     break;
@@ -487,7 +240,6 @@ pub fn initialize_thread(
     GamepadThreads {
         _xinput_thread,
         _wgi_thread,
-        shutdown,
     }
 }
 
@@ -516,7 +268,12 @@ macro_rules! generate_map_functions {
                     axis: $map_axis(axis),
                     value,
                 }),
-                _ => None,
+                EventType::ButtonRepeated(..)
+                | EventType::Connected
+                | EventType::Disconnected
+                | EventType::Dropped
+                | EventType::ForceFeedbackEffectCompleted
+                | _ => None,
             }
         }
 
