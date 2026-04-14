@@ -732,7 +732,7 @@ session_{id}/
 
 | 文件 | 内容 |
 |------|------|
-| `GameData_Labs_Tech_Research.md` | 本文: 技术选型总报告 |
+| `tech-research.md` | 本文: 技术选型总报告 |
 | `backend-architecture.md` | 后端 Pipeline 详细架构 |
 | *(pending)* | 定价 & 单位经济详细模型 |
 | `engine-plugin-research.md` | 引擎插件详细研究 |
