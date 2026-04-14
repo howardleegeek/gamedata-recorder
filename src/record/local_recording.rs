@@ -637,14 +637,14 @@ impl LocalRecording {
 
 /// Calculate the total size of all files in a folder (recursively)
 fn folder_size(path: &Path) -> Result<u64, std::io::Error> {
-    let mut size = 0;
+    let mut size = 0u64;
     for entry in path.read_dir()? {
         let entry = entry?;
         let path = entry.path();
         if path.is_file() && path.extension().unwrap_or_default() != "tar" {
-            size += path.metadata()?.len();
+            size = size.saturating_add(path.metadata()?.len());
         } else if path.is_dir() {
-            size += folder_size(&path)?;
+            size = size.saturating_add(folder_size(&path)?);
         }
     }
     Ok(size)
