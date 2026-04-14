@@ -6,9 +6,14 @@ use std::sync::LazyLock;
 
 use crate::api::{API_BASE_URL, ApiClient, ApiError, check_for_response_success};
 
-/// Regex for validating user_id contains only safe characters (alphanumeric, hyphen, underscore)
+/// Regex pattern for validating user_id contains only safe characters (alphanumeric, hyphen, underscore)
 /// This prevents injection attacks and ensures the ID can be safely used in URLs
-static USER_ID_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap());
+const USER_ID_PATTERN: &str = r"^[a-zA-Z0-9_-]+$";
+
+/// Compiled regex for user_id validation. Uses expect with descriptive message for debugging.
+static USER_ID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(USER_ID_PATTERN).expect("Failed to compile USER_ID_REGEX pattern - this is a bug, the pattern should always be valid")
+});
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
