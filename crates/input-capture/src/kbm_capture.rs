@@ -147,9 +147,9 @@ impl KbmCapture {
                     break; // WM_QUIT received
                 }
                 if result.0 == -1 {
-                    use windows::Win32::Foundation::GetLastError;
-                    let error = GetLastError();
-                    bail!("GetMessageA failed: {error:?}");
+                    // Log error but continue - don't stop capture on transient Windows errors
+                    tracing::error!("GetMessageA failed, continuing capture");
+                    continue;
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageA(&msg);

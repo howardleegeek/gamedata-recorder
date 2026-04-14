@@ -77,7 +77,10 @@ impl ApiClient {
     pub fn new() -> Self {
         tracing::debug!("ApiClient::new() called");
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .expect("Failed to build HTTP client"),
         }
     }
 
@@ -94,9 +97,23 @@ impl ApiClient {
         let client = &self.client;
 
         // Validate input
-        if api_key.is_empty() || api_key.trim().is_empty() {
+        if api_key.trim().is_empty() {
             return Err(ApiError::ApiKeyValidationFailure(
                 "API key cannot be empty".into(),
+            ));
+        }
+
+        // Check maximum length to prevent potential DoS via header size limits
+        if api_key.len() > 256 {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "API key exceeds maximum length".into(),
+            ));
+        }
+
+        // Check for control characters to prevent HTTP header injection
+        if api_key.chars().any(|c| c.is_ascii_control()) {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "API key contains invalid control characters".into(),
             ));
         }
 
@@ -144,11 +161,31 @@ async fn check_for_response_success(
 
     let status = response.status();
     if !status.is_success() {
-        let text = response.text().await?;
+        // Read response body, but don't fail immediately if that fails - preserve the HTTP status
+        let text = match response.text().await {
+            Ok(body) => body,
+            Err(e) => {
+                tracing::error!("API error (HTTP {status}) and failed to read response body: {e}");
+                return Err(ApiError::ApiFailure {
+                    context: context.into(),
+                    error: format!("HTTP {status}, failed to read response body: {e}"),
+                    status: Some(status),
+                });
+            }
+        };
         tracing::error!("API error response (HTTP {status}): {text}");
 
         // if 502 this will return None, then APIError must fallback to using just the text
-        let value = serde_json::from_str::<StructuredError>(&text).ok();
+        let value = match serde_json::from_str::<StructuredError>(&text) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to parse API error response as structured JSON: {}",
+                    e
+                );
+                None
+            }
+        };
 
         return Err(match value {
             Some(StructuredError::ServerInvalidation { detail }) => {
