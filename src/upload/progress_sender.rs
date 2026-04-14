@@ -93,7 +93,8 @@ impl ProgressSender {
                 total_bytes: self.file_size,
                 speed_mbps: bps / (1024.0 * 1024.0),
                 eta_seconds: if bps > 0.0 {
-                    self.file_size.saturating_sub(self.bytes_uploaded) as f64 / bps
+                    // Cap ETA at 24 hours to prevent unrealistic values when bps is very small
+                    (self.file_size.saturating_sub(self.bytes_uploaded) as f64 / bps).min(86400.0)
                 } else {
                     0.0
                 },
