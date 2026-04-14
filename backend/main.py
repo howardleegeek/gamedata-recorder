@@ -10,12 +10,10 @@ import uuid
 import time
 import hmac
 import hashlib
-import json
 import re
 import secrets
 import traceback
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional, List
 from contextlib import asynccontextmanager
 from urllib.parse import quote_plus
@@ -25,7 +23,7 @@ from botocore.config import Config as BotoConfig
 from fastapi import FastAPI, HTTPException, Header, Depends, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer
 from pydantic import BaseModel, EmailStr, Field, validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func, and_
