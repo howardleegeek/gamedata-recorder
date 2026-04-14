@@ -582,6 +582,8 @@ async def upload_init(
 
     # Generate S3 presigned URLs if configured
     chunk_urls = []
+    s3_upload_id = None
+    s3_key = None
     if AWS_ACCESS_KEY and AWS_SECRET_KEY:
         try:
             s3 = boto3.client(
@@ -594,9 +596,10 @@ async def upload_init(
             # Create multipart upload with sanitized filename
             s3_key = f"uploads/{current_user.id}/{upload_id}/{safe_filename}"
             mpu = s3.create_multipart_upload(Bucket=S3_BUCKET, Key=s3_key)
+            s3_upload_id = mpu["UploadId"]
 
             upload.s3_key = s3_key
-            upload.s3_upload_id = mpu["UploadId"]
+            upload.s3_upload_id = s3_upload_id
             await db.commit()
 
             # Generate presigned URLs for each chunk
@@ -606,7 +609,7 @@ async def upload_init(
                     Params={
                         "Bucket": S3_BUCKET,
                         "Key": s3_key,
-                        "UploadId": mpu["UploadId"],
+                        "UploadId": s3_upload_id,
                         "PartNumber": i,
                     },
                     ExpiresIn=3600,
@@ -614,6 +617,15 @@ async def upload_init(
                 chunk_urls.append({"chunk_number": i, "upload_url": url})
         except Exception as e:
             logger.error(f"S3 error: {e}")
+            # Abort orphaned multipart upload to prevent resource leak
+            if s3_upload_id and s3_key:
+                try:
+                    s3.abort_multipart_upload(
+                        Bucket=S3_BUCKET, Key=s3_key, UploadId=s3_upload_id
+                    )
+                    logger.info(f"Aborted orphaned S3 multipart upload: {s3_upload_id}")
+                except Exception as abort_err:
+                    logger.warning(f"Failed to abort S3 multipart upload: {abort_err}")
             # Continue with local storage fallback
 
     logger.info(f"Upload initialized: {upload_id} for user {current_user.id}")
