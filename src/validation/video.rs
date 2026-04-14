@@ -7,6 +7,12 @@ use crate::output_types::Metadata;
 pub fn validate(video_path: &Path, metadata: &Metadata) -> Vec<String> {
     let mut invalid_reasons = vec![];
 
+    // Validate duration is finite and non-negative before conversion
+    if !metadata.duration.is_finite() || metadata.duration < 0.0 {
+        invalid_reasons.push(format!("Video duration is invalid: {}", metadata.duration));
+        return invalid_reasons;
+    }
+
     let duration = Duration::from_secs_f64(metadata.duration);
     if duration < MIN_FOOTAGE {
         invalid_reasons.push(format!("Video length {} too short.", metadata.duration));
