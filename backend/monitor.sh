@@ -64,15 +64,19 @@ check_process() {
 check_log_size() {
     local log_file="$HOME/gamedata-backend/server.log"
     if [ -f "$log_file" ]; then
-        local size_mb
+        local size_bytes
         # Cross-platform stat: macOS uses -f%z, Linux uses -c%s
         if [[ "$OSTYPE" == "darwin"* ]]; then
-            size_mb=$(stat -f%z "$log_file" 2>/dev/null | awk '{print $1/1024/1024}' || echo "0")
+            size_bytes=$(stat -f%z "$log_file" 2>/dev/null) || size_bytes=0
         else
-            size_mb=$(stat -c%s "$log_file" 2>/dev/null | awk '{print $1/1024/1024}' || echo "0")
+            size_bytes=$(stat -c%s "$log_file" 2>/dev/null) || size_bytes=0
         fi
-        if (( $(echo "$size_mb > 100" | bc) )); then
-            log "⚠️ Log file size is ${size_mb}MB (>100MB), consider rotation"
+        # Validate size_bytes is numeric before converting to MB
+        if [[ "$size_bytes" =~ ^[0-9]+$ ]]; then
+            local size_mb=$(awk "BEGIN {printf \"%.2f\", $size_bytes/1024/1024}")
+            if (( $(echo "$size_mb > 100" | bc) )); then
+                log "⚠️ Log file size is ${size_mb}MB (>100MB), consider rotation"
+            fi
         fi
     fi
 }
