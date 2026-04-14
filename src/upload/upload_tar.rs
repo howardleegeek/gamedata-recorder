@@ -421,7 +421,7 @@ pub async fn run(
                 .lock()
                 .map(|s| s.bytes_uploaded())
                 .unwrap_or_default();
-            let mut retries = 0u32;
+            let retries = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
 
             // Should be about 5-6 retries
             let backoff = ExponentialBackoff {
@@ -433,6 +433,7 @@ pub async fn run(
                 ..Default::default()
             };
 
+            let retries_for_notify = retries.clone();
             let etag = retry_notify(
                 backoff,
                 || async {
@@ -479,8 +480,8 @@ pub async fn run(
 
                     Ok(etag)
                 },
-                |err, dur| {
-                    retries += 1;
+                move |err, dur| {
+                    retries_for_notify.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     tracing::warn!(
                         "Failed to upload chunk {chunk_number}/{total_chunks}, retrying in {dur:?}: {err:?}"
                     );
@@ -490,7 +491,7 @@ pub async fn run(
             .map_err(|e| UploadTarError::FailedToUploadChunk {
                 chunk_number,
                 total_chunks,
-                retries,
+                retries: retries.load(std::sync::atomic::Ordering::Relaxed),
                 error: e,
             })?;
 
