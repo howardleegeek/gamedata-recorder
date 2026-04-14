@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote_plus
 
 import boto3
+from botocore.config import Config as BotoConfig
 from fastapi import FastAPI, HTTPException, Header, Depends, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -76,6 +77,13 @@ S3_BUCKET = os.getenv("S3_BUCKET", "gamedata-recordings")
 S3_REGION = os.getenv("S3_REGION", "us-east-1")
 AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+
+# S3 client timeout configuration (prevents hanging requests)
+S3_TIMEOUT_CONFIG = BotoConfig(
+    connect_timeout=10,  # seconds to establish connection
+    read_timeout=30,     # seconds to read data
+    retries={"max_attempts": 3, "mode": "adaptive"}
+)
 
 # CORS configuration
 ALLOWED_ORIGINS = os.getenv(
@@ -618,6 +626,7 @@ async def upload_init(
                 region_name=S3_REGION,
                 aws_access_key_id=AWS_ACCESS_KEY,
                 aws_secret_access_key=AWS_SECRET_KEY,
+                config=S3_TIMEOUT_CONFIG,
             )
 
             # Create multipart upload with sanitized filename
@@ -722,6 +731,7 @@ async def upload_chunk(
                 region_name=S3_REGION,
                 aws_access_key_id=AWS_ACCESS_KEY,
                 aws_secret_access_key=AWS_SECRET_KEY,
+                config=S3_TIMEOUT_CONFIG,
             )
             upload_url = s3.generate_presigned_url(
                 "upload_part",
