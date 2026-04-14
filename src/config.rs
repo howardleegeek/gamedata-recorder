@@ -115,11 +115,33 @@ impl std::fmt::Display for OverlayLocation {
     }
 }
 
+/// Validates that the audio cue filename doesn't contain path traversal sequences.
+/// Returns an error if the filename contains parent directory references (..) or
+/// path separators that could escape the intended cues directory.
+fn validate_audio_cue_filename<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    let filename = String::deserialize(deserializer)?;
+
+    // Reject filenames containing parent directory references or path separators
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return Err(Error::custom(
+            "Audio cue filename cannot contain path traversal sequences or directory separators",
+        ));
+    }
+
+    Ok(filename)
+}
+
 /// Audio cue settings for recording events
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AudioCues {
+    #[serde(deserialize_with = "validate_audio_cue_filename")]
     pub start_recording: String,
+    #[serde(deserialize_with = "validate_audio_cue_filename")]
     pub stop_recording: String,
 }
 impl Default for AudioCues {
