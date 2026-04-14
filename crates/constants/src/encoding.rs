@@ -63,6 +63,18 @@ impl VideoEncoderType {
 /// https://github.com/obsproject/obs-studio/blob/5ec3af3f6d6465122dc2b0abff9661cbe64b406b/plugins/obs-x264/obs-x264.c
 pub const X264_PRESETS: &[&str] = &["fast", "faster", "veryfast"];
 
+/// https://github.com/obsproject/obs-studio/blob/5ec3af3f6d6465122dc2b0abff9661cbe64b406b/plugins/obs-x264/obs-x264.c#L213-L221
+pub const X264_TUNE_OPTIONS: &[&str] = &[
+    "film",
+    "animation",
+    "grain",
+    "stillimage",
+    "psnr",
+    "ssim",
+    "fastdecode",
+    "zerolatency",
+];
+
 /// https://github.com/obsproject/obs-studio/blob/0b1229632063a13dfd26cf1cd9dd43431d8c68f6/plugins/obs-nvenc/nvenc-properties.c#L145
 pub const NVENC_PRESETS: &[&str] = &["p7", "p6", "p5", "p4", "p3", "p2", "p1"];
 
@@ -92,6 +104,11 @@ pub const NVENC_TUNE_OPTIONS: &[&str] = &["hq", "ll", "ull"];
 /// Validates x264 preset setting
 pub fn is_valid_x264_preset(value: &str) -> bool {
     X264_PRESETS.contains(&value)
+}
+
+/// Validates x264 tune setting
+pub fn is_valid_x264_tune(value: &str) -> bool {
+    X264_TUNE_OPTIONS.contains(&value)
 }
 
 /// Validates NVENC preset setting
