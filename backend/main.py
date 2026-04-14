@@ -455,8 +455,11 @@ async def health(db: AsyncSession = Depends(get_db)):
 @app.post("/api/v1/auth/register")
 async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     """Register new user account."""
+    # Normalize email to lowercase for consistent lookup
+    normalized_email = req.email.lower()
+
     # Check if email already exists
-    result = await db.execute(select(User).where(User.email == req.email))
+    result = await db.execute(select(User).where(User.email == normalized_email))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
 
@@ -464,7 +467,7 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     user_id = f"user_{uuid.uuid4().hex[:12]}"
     user = User(
         id=user_id,
-        email=req.email,
+        email=normalized_email,
         password_hash=hash_password(req.password),
         display_name=req.display_name,
         status=UserStatus.PENDING_VERIFICATION,
@@ -477,12 +480,12 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     # Generate token
     token = generate_token(user_id)
 
-    logger.info(f"New user registered: {user_id} ({req.email})")
+    logger.info(f"New user registered: {user_id} ({normalized_email})")
 
     return {
         "token": token,
         "user_id": user_id,
-        "email": req.email,
+        "email": normalized_email,
         "message": "Registration successful. Please verify your email.",
     }
 
@@ -493,10 +496,13 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
 
+    # Normalize email to lowercase for consistent lookup
+    normalized_email = req.email.lower()
+
     # Find user by email with row lock to prevent TOCTOU race on status check
     result = await db.execute(
         select(User)
-        .where(User.email == req.email)
+        .where(User.email == normalized_email)
         .with_for_update()
     )
     user = result.scalar_one_or_none()
