@@ -194,9 +194,12 @@ impl HighPrecisionTimer {
     #[cfg(target_os = "windows")]
     pub fn time_drift_ms(&self) -> i32 {
         let current_msg_time = unsafe { GetMessageTime() };
-        let elapsed = self.elapsed_ms() as i32;
-        let expected_msg_time = self.msg_time_offset_ms + elapsed;
-        current_msg_time - expected_msg_time
+        // Use i64 for calculation to prevent overflow when elapsed_ms exceeds i32::MAX (~24.8 days)
+        let elapsed = self.elapsed_ms() as i64;
+        let expected_msg_time = self.msg_time_offset_ms as i64 + elapsed;
+        let drift = current_msg_time as i64 - expected_msg_time;
+        // Clamp to i32 range to avoid overflow on return
+        drift.clamp(i32::MIN as i64, i32::MAX as i64) as i32
     }
 }
 
