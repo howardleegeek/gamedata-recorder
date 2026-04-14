@@ -126,6 +126,13 @@ impl ApiClient {
             upload_timestamp: &'a str,
         }
 
+        // Validate total_size_bytes is non-zero to prevent useless API calls
+        if args.total_size_bytes == 0 {
+            return Err(ApiError::ApiKeyValidationFailure(
+                "Total size must be greater than 0".into(),
+            ));
+        }
+
         // Store timestamp in a variable to prevent dangling reference
         let timestamp = chrono::Local::now().to_rfc3339();
         let response = self
