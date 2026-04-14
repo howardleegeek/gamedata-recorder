@@ -610,6 +610,7 @@ async def upload_init(
     chunk_urls = []
     s3_upload_id = None
     s3_key = None
+    s3 = None
     if AWS_ACCESS_KEY and AWS_SECRET_KEY:
         try:
             s3 = boto3.client(
@@ -644,7 +645,7 @@ async def upload_init(
         except Exception as e:
             logger.error(f"S3 error: {e}")
             # Abort orphaned multipart upload to prevent resource leak
-            if s3_upload_id and s3_key:
+            if s3_upload_id and s3_key and s3:
                 try:
                     s3.abort_multipart_upload(
                         Bucket=S3_BUCKET, Key=s3_key, UploadId=s3_upload_id
@@ -658,6 +659,9 @@ async def upload_init(
             upload.s3_upload_id = None
             await db.commit()
             # Continue with local storage fallback
+        finally:
+            if s3:
+                s3.close()
 
     logger.info(f"Upload initialized: {upload_id} for user {current_user.id}")
 
