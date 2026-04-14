@@ -57,8 +57,13 @@ fn validate_folder_impl(path: &Path) -> Result<ValidationResult, Vec<String>> {
     let Some(mp4_path) = path
         .read_dir()
         .map_err(|e| vec![e.to_string()])?
-        .flatten()
-        .map(|e| e.path())
+        .filter_map(|e| match e {
+            Ok(entry) => Some(entry.path()),
+            Err(e) => {
+                tracing::warn!("Error reading directory entry in {}: {}", path.display(), e);
+                None
+            }
+        })
         .find(|e| e.extension().and_then(|e| e.to_str()) == Some("mp4"))
     else {
         return Err(vec![format!("No MP4 file found in {}", path.display())]);
