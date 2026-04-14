@@ -195,12 +195,19 @@ impl HighPrecisionTimer {
     pub fn time_drift_ms(&self) -> i32 {
         // Capture both timestamps atomically to prevent measurement jitter
         let mut current_qpc = 0i64;
-        let current_msg_time = unsafe {
+        let (qpc_ok, current_msg_time) = unsafe {
             // Query QPC first, then GetMessageTime immediately after
             // to minimize time delta between the two measurements
-            let _ = QueryPerformanceCounter(&mut current_qpc);
-            GetMessageTime()
+            let qpc_result = QueryPerformanceCounter(&mut current_qpc);
+            let msg_time = GetMessageTime();
+            (qpc_result.is_ok(), msg_time)
         };
+
+        // Handle QPC failure gracefully - return 0 to indicate no drift measurable
+        if !qpc_ok {
+            tracing::error!("QueryPerformanceCounter failed in time_drift_ms");
+            return 0;
+        }
         // Use i64 for calculation to prevent overflow when elapsed_ms exceeds i32::MAX (~24.8 days)
         let elapsed_ticks = current_qpc - self.start_counter;
         let elapsed_ms = ((elapsed_ticks as u128 * 1000) / self.frequency as u128) as i64;
