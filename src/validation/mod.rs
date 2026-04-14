@@ -196,6 +196,14 @@ fn validate_files(
         .map(|event| event.timestamp)
         .unwrap_or(0.0);
 
+    // Validate timeline values are finite to prevent NaN/Infinity from contaminating calculations
+    if !start_time.is_finite() || !end_time.is_finite() {
+        eyre::bail!(
+            "Invalid timeline: start_time ({}) or end_time ({}) is not finite",
+            start_time, end_time
+        );
+    }
+
     // Validate timeline consistency to prevent empty filtered events and confusing errors
     if start_time > end_time {
         eyre::bail!(
