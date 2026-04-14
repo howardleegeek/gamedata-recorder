@@ -514,6 +514,46 @@ where
     Ok(tune)
 }
 
+/// Validates that the QSV target_usage value is one of the valid options from
+/// QSV_TARGET_USAGES. Returns an error if the target_usage is not in the allowed list.
+fn validate_qsv_target_usage<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    let target_usage = String::deserialize(deserializer)?;
+
+    if !constants::encoding::QSV_TARGET_USAGES.contains(&target_usage.as_str()) {
+        return Err(Error::custom(format!(
+            "Invalid QSV target_usage '{}'. Valid options are: {:?}",
+            target_usage,
+            constants::encoding::QSV_TARGET_USAGES
+        )));
+    }
+
+    Ok(target_usage)
+}
+
+/// Validates that the AMF preset value is one of the valid options from
+/// AMF_PRESETS. Returns an error if the preset is not in the allowed list.
+fn validate_amf_preset<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    let preset = String::deserialize(deserializer)?;
+
+    if !constants::encoding::AMF_PRESETS.contains(&preset.as_str()) {
+        return Err(Error::custom(format!(
+            "Invalid AMF preset '{}'. Valid options are: {:?}",
+            preset,
+            constants::encoding::AMF_PRESETS
+        )));
+    }
+
+    Ok(preset)
+}
+
 /// OBS x264 (CPU) encoder specific settings
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -573,6 +613,7 @@ impl FfmpegNvencSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ObsQsvSettings {
+    #[serde(deserialize_with = "validate_qsv_target_usage")]
     pub target_usage: String,
 }
 impl Default for ObsQsvSettings {
@@ -595,6 +636,7 @@ impl ObsQsvSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ObsAmfSettings {
+    #[serde(deserialize_with = "validate_amf_preset")]
     pub preset: String,
 }
 impl Default for ObsAmfSettings {
