@@ -175,6 +175,22 @@ impl ApiClient {
             .json::<InitMultipartUploadResponse>()
             .await?;
 
+        // Validate expires_at to prevent integer overflow when cast to i64 in downstream code
+        if response.expires_at > i64::MAX as u64 {
+            return Err(ApiError::ServerInvalidation(format!(
+                "Server returned expires_at too large: {} (max: {})",
+                response.expires_at,
+                i64::MAX as u64
+            )));
+        }
+
+        // Validate total_chunks is non-zero to prevent downstream divide-by-zero issues
+        if response.total_chunks == 0 {
+            return Err(ApiError::ServerInvalidation(
+                "Server returned invalid total_chunks: 0".into(),
+            ));
+        }
+
         // Validate chunk_size_bytes is reasonable to prevent downstream issues
         const MIN_CHUNK_SIZE: u64 = 1024; // 1KB minimum
         const MAX_CHUNK_SIZE: u64 = 512 * 1024 * 1024; // 512MB maximum
