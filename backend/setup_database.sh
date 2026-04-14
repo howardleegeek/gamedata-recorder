@@ -53,7 +53,9 @@ if psql -h "$DB_HOST" -p "$DB_PORT" -U postgres -tc "SELECT 1 FROM pg_roles WHER
     echo "⚠️  User '$DB_USER' already exists"
 else
     echo "   Creating user '$DB_USER'..."
-    psql -h "$DB_HOST" -p "$DB_PORT" -U postgres -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASSWORD';"
+    # Escape single quotes in password for SQL (PostgreSQL uses '' to escape ')
+    DB_PASSWORD_ESCAPED=$(echo "$DB_PASSWORD" | sed "s/'/''/g")
+    psql -h "$DB_HOST" -p "$DB_PORT" -U postgres -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASSWORD_ESCAPED';"
 fi
 
 # Grant privileges
