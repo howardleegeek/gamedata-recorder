@@ -143,9 +143,11 @@ impl Recording {
             GetWindowTextLengthW, GetWindowTextW,
         };
 
-        // Maximum reasonable window title length (prevents DoS from malicious windows)
-        const MAX_TITLE_LEN: i32 = 4096;
-
+        // GetWindowTextLengthW returns 0 for both empty titles AND on error.
+        // Clear last error first, then check GetLastError() to distinguish.
+        unsafe {
+            windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::ERROR_SUCCESS)
+        };
         let title_len = unsafe { GetWindowTextLengthW(self.hwnd) };
         // Bounds check: title_len must be positive and within reasonable limits
         if title_len > 0 && title_len < MAX_TITLE_LEN {
@@ -162,7 +164,11 @@ impl Recording {
             // Check if 0 means error or truly empty title
             let last_error = unsafe { windows::Win32::Foundation::GetLastError() };
             if last_error.0 != 0 {
-                tracing::warn!("GetWindowTextLengthW failed for hwnd {:?}: error {}", self.hwnd, last_error.0);
+                tracing::warn!(
+                    "GetWindowTextLengthW failed for hwnd {:?}: error {}",
+                    self.hwnd,
+                    last_error.0
+                );
             }
         }
         None
@@ -178,9 +184,9 @@ impl Recording {
     }
 
     pub(crate) fn update_fps(&mut self, fps: f64) {
-        // Guard against invalid FPS values from video recorder
-        if !fps.is_finite() {
-            tracing::warn!("Ignoring non-finite FPS value: {}", fps);
+        // Validate FPS is a finite positive number
+        if !fps.is_finite() || fps <= 0.0 {
+            tracing::warn!("Ignoring invalid FPS value: {}", fps);
             return;
         }
         // True cumulative average (not exponential decay which biases toward recent samples)

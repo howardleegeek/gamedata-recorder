@@ -91,6 +91,9 @@ impl InputCapture {
 
     pub fn new() -> Result<(Self, mpsc::Receiver<Event>)> {
         tracing::debug!("InputCapture::new() called");
+        // High capacity channel (1000) to prevent dropped input events during
+        // high-frequency gaming input (e.g., 1000Hz mice, rapid key mashing).
+        // Previous 10-slot capacity caused dropped events under load.
         let (input_tx, input_rx) = mpsc::channel(1000);
 
         tracing::debug!("Spawning raw input thread for keyboard/mouse capture");

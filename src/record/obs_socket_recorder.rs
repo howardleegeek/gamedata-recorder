@@ -376,16 +376,20 @@ fn get_obs_window_encoding(hwnd: HWND, game_exe: &str) -> String {
         // Check if 0 means error or truly empty title
         let last_error = unsafe { windows::Win32::Foundation::GetLastError() };
         if last_error.0 != 0 {
-            tracing::warn!("GetWindowTextLengthW failed for hwnd {:?}: error {}", hwnd, last_error.0);
+            tracing::warn!(
+                "GetWindowTextLengthW failed for hwnd {:?}: error {}",
+                hwnd,
+                last_error.0
+            );
         }
     }
 
     // Get window class
     let mut class_buf = [0u16; 256];
     let class_len = unsafe { GetClassNameW(hwnd, &mut class_buf) };
-    // Check GetLastError to distinguish empty class name from API failure
+    // GetClassNameW returns i32; negative values indicate error
     let class = if class_len > 0 {
-        String::from_utf16_lossy(&class_buf[..class_len as usize])
+        String::from_utf16_lossy(&class_buf[..class_len.unsigned_abs() as usize])
     } else {
         let err = unsafe { GetLastError() };
         if err.0 != 0 {

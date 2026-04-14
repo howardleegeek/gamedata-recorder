@@ -29,6 +29,15 @@ pub fn validate(video_path: &Path, metadata: &Metadata) -> Vec<String> {
         }
     };
 
+    // Validate duration is positive to prevent division by zero
+    if metadata.duration <= 0.0 {
+        invalid_reasons.push(format!(
+            "Video duration must be positive, got {}",
+            metadata.duration
+        ));
+        return invalid_reasons;
+    }
+
     let size_mbytes = size_bytes as f64 / (1024.0 * 1024.0);
     let size_mbits = size_mbytes * 8.0;
 

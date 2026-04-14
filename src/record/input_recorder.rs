@@ -106,20 +106,20 @@ impl InputEventWriter {
         // This ensures chronological ordering: all flushed events have earlier timestamps
         self.flush().await?;
 
-        // Write the end marker with timestamp captured after flush for consistency
-        // Using new_at_now to match Start event pattern and ensure proper ordering
-        self.write_entry(InputEvent::new_at_now(InputEventType::End {
-            inputs: input_capture.active_input(),
-        }))
+        // Write the end marker
+        self.write_entry(InputEvent::new(
+            timestamp,
+            InputEventType::End {
+                inputs: input_capture.active_input(),
+            },
+        ))
         .await?;
 
-        // Sync file to disk for crash durability - ensures all buffered data is written
-        // before the file handle is dropped. This protects against data loss if the
-        // system crashes immediately after recording stops.
+        // Ensure all data is flushed to disk to prevent data loss on crash
         self.file
             .sync_all()
             .await
-            .wrap_err("failed to sync input file to disk")
+            .wrap_err("failed to sync input events file to disk")
     }
 
     async fn write_entry(&mut self, event: InputEvent) -> Result<()> {

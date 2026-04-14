@@ -290,16 +290,7 @@ async fn validate_recording_paused(
     // Per Philpax: We should avoid resuming uploads if there's less than 15 minutes remaining on the timer;
     // we've seen upload speeds of 0.3MB/s, which would take 11 minutes to upload 200MB. 15 minutes is safer.
     const MIN_TIME_REMAINING_SECONDS: i64 = 15 * 60; // 15 minutes
-
-    // Validate expires_at to prevent integer overflow in seconds_until_expiration().
-    // The function casts expires_at (u64) to i64, which overflows when expires_at > i64::MAX,
-    // causing valid sessions to appear expired (negative seconds_left).
-    let seconds_left = if state.expires_at > i64::MAX as u64 {
-        // expires_at is beyond i64 range, treat as "far future" (valid for resume)
-        i64::MAX
-    } else {
-        state.seconds_until_expiration()
-    };
+    let seconds_left = state.seconds_until_expiration();
     if !(seconds_left > MIN_TIME_REMAINING_SECONDS && state.tar_path.is_file()) {
         // if tar file does not exist, we want to restart upload as there is no guarantee the
         // recreated tar file will be the same

@@ -121,7 +121,15 @@ impl PlayTimeTracker {
 
     pub fn save(&self) -> Result<()> {
         let state = SerializedState::from(self);
-        std::fs::write(Self::file_path()?, serde_json::to_string_pretty(&state)?)?;
+        let path = Self::file_path()?;
+        let temp_path = path.with_extension("tmp");
+        // Write to temp file first for atomicity
+        let file = std::fs::File::create(&temp_path)?;
+        std::io::Write::write_all(&file, serde_json::to_string_pretty(&state)?.as_bytes())?;
+        // Sync to disk to prevent data loss on system crash
+        file.sync_all()?;
+        // Atomic rename ensures we never have a partial file
+        std::fs::rename(&temp_path, &path)?;
         Ok(())
     }
 

@@ -46,7 +46,7 @@ impl FpsLogger {
     /// Records the inter-frame interval for FPS calculation.
     pub fn on_frame(&mut self) {
         let now = std::time::Instant::now();
-        let elapsed_seconds = now.duration_since(self.start_instant).as_secs();
+        let elapsed_seconds = now.saturating_duration_since(self.start_instant).as_secs();
 
         // If we've moved to a new second, finalize all intervening seconds
         // including empty ones (0 fps) to prevent gaps in the FPS log
@@ -130,9 +130,24 @@ impl FpsLogger {
         let path = session_dir.join(constants::filename::recording::FPS_LOG);
         let json = serde_json::to_string_pretty(&self.entries)?;
 
-        // Atomic write: write to temp file then rename for crash durability
+        // Atomic write pattern: write to temp file, sync, then rename
+        // This prevents corruption if the process crashes during write
         let temp_path = path.with_extension("tmp");
         tokio::fs::write(&temp_path, json).await?;
+
+        // Sync to disk to prevent data loss on system crash
+        tokio::task::spawn_blocking({
+            let temp_path = temp_path.clone();
+            move || {
+                let file = std::fs::File::open(&temp_path)?;
+                file.sync_all()?;
+                Ok::<(), std::io::Error>(())
+            }
+        })
+        .await
+        .map_err(|e| std::io::Error::other(format!("spawn_blocking failed: {e}")))??;
+
+        // Atomic rename ensures we never have a partial file
         tokio::fs::rename(&temp_path, &path).await?;
 
         tracing::info!(

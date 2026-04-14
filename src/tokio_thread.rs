@@ -186,7 +186,10 @@ async fn main(
                     continue;
                 }
 
-                let listening_for_new_hotkey = *app_state.listening_for_new_hotkey.read().unwrap();
+                let listening_for_new_hotkey = *app_state
+                    .listening_for_new_hotkey
+                    .read()
+                    .map_err(|_| color_eyre::eyre::eyre!("listening_for_new_hotkey lock poisoned"))?;
                 match listening_for_new_hotkey {
                     ListeningForNewHotkey::Listening { target } => {
                         if let Some(key) = e.key_press_keycode() { *app_state.listening_for_new_hotkey.write().unwrap() = ListeningForNewHotkey::Captured { target, key } }
@@ -647,11 +650,14 @@ async fn main(
 
                                 // Get first interval and schedule retry
                                 if let Some(delay) = backoff.next_backoff() {
-                                    let next_retry_time = SystemTime::now()
+                                    let now_secs = SystemTime::now()
                                         .duration_since(UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_secs()
-                                        + delay.as_secs();
+                                        .map(|d| d.as_secs())
+                                        .unwrap_or_else(|_| {
+                                            tracing::warn!("System time before UNIX epoch, using 0");
+                                            0
+                                        });
+                                    let next_retry_time = now_secs + delay.as_secs();
 
                                     app_state.offline.backoff_active.store(true, Ordering::SeqCst);
                                     app_state.offline.next_retry_time.store(next_retry_time, Ordering::SeqCst);
@@ -705,11 +711,14 @@ async fn main(
                                         let next_delay = offline_backoff.as_mut().and_then(|b| b.next_backoff());
 
                                         if let Some(delay) = next_delay {
-                                            let next_retry_time = SystemTime::now()
+                                            let now_secs = SystemTime::now()
                                                 .duration_since(UNIX_EPOCH)
-                                                .unwrap()
-                                                .as_secs()
-                                                + delay.as_secs();
+                                                .map(|d| d.as_secs())
+                                                .unwrap_or_else(|_| {
+                                                    tracing::warn!("System time before UNIX epoch, using 0");
+                                                    0
+                                                });
+                                            let next_retry_time = now_secs + delay.as_secs();
                                             app_state.offline.next_retry_time.store(next_retry_time, Ordering::SeqCst);
 
                                             // Schedule next retry

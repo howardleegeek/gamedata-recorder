@@ -378,15 +378,21 @@ fn update_overlay_position_based_on_location(
             window.set_pos(OFFSET, OFFSET);
         }
         OverlayLocation::TopRight => {
-            window.set_pos((monitor_width - width - OFFSET).max(OFFSET), OFFSET);
+            window.set_pos(
+                monitor_width.saturating_sub(width).saturating_sub(OFFSET),
+                OFFSET,
+            );
         }
         OverlayLocation::BottomLeft => {
-            window.set_pos(OFFSET, (monitor_height - height - OFFSET).max(OFFSET));
+            window.set_pos(
+                OFFSET,
+                monitor_height.saturating_sub(height).saturating_sub(OFFSET),
+            );
         }
         OverlayLocation::BottomRight => {
             window.set_pos(
-                (monitor_width - width - OFFSET).max(OFFSET),
-                (monitor_height - height - OFFSET).max(OFFSET),
+                monitor_width.saturating_sub(width).saturating_sub(OFFSET),
+                monitor_height.saturating_sub(height).saturating_sub(OFFSET),
             );
         }
     }
