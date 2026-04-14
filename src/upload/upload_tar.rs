@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use backoff::{Error as BackoffError, ExponentialBackoff, future::retry_notify};
+use backoff::{future::retry_notify, Error as BackoffError, ExponentialBackoff};
 
 use futures::TryStreamExt as _;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
@@ -397,24 +397,6 @@ pub async fn run(
                 Err(e) => return Err(e),
             };
 
-            // Check if upload has been paused (user-initiated pause)
-            if pause_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                // Ensure the latest progress is saved for resume
-                if let Some(paused) = guard.paused() {
-                    if let Err(e) = paused.save_upload_progress() {
-                        tracing::error!("Failed to save upload progress on pause: {:?}", e);
-                    }
-                }
-                // Disarm by taking the paused recording - keeps server/session state for resume
-                if let Some(paused) = guard.take_paused() {
-                    return Ok(UploadTarOutput::Paused(LocalRecording::Paused(paused)));
-                }
-                return Err(UploadTarError::Io(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "Paused recording not available",
-                )));
-            }
-
             // Check if upload session is about to expire
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -545,6 +527,26 @@ pub async fn run(
             tracing::info!(
                 "Uploaded chunk {chunk_number}/{total_chunks} for upload_id {upload_id}"
             );
+
+            // Check if upload has been paused (user-initiated pause)
+            // This check MUST happen AFTER recording chunk completion to prevent race condition
+            // where a chunk is uploaded but its ETag is lost if pause occurs during final chunk.
+            if pause_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                // Ensure the latest progress is saved for resume
+                if let Some(paused) = guard.paused() {
+                    if let Err(e) = paused.save_upload_progress() {
+                        tracing::error!("Failed to save upload progress on pause: {:?}", e);
+                    }
+                }
+                // Disarm by taking the paused recording - keeps server/session state for resume
+                if let Some(paused) = guard.take_paused() {
+                    return Ok(UploadTarOutput::Paused(LocalRecording::Paused(paused)));
+                }
+                return Err(UploadTarError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Paused recording not available",
+                )));
+            }
         }
 
         // Ensure producer and signer tasks didn't crash
