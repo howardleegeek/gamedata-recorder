@@ -274,6 +274,18 @@ InitUIVars() {
         ExitApp()
     }
     logs_button := Array(76, 1002)
+    if (logs_button.Length < 2) {
+        MsgBox("logs_button array must have at least 2 elements")
+        ExitApp()
+    }
+    if (logs_button[1] < 0 || logs_button[1] > 1920) {
+        MsgBox("logs_button X coordinate out of bounds: " . logs_button[1])
+        ExitApp()
+    }
+    if (logs_button[2] < 0 || logs_button[2] > 1080) {
+        MsgBox("logs_button Y coordinate out of bounds: " . logs_button[2])
+        ExitApp()
+    }
     website_button := Array(689, 1002)
     if (website_button.Length < 2) {
         MsgBox("website_button array must have at least 2 elements")
