@@ -52,9 +52,13 @@ pub struct KbmCapture {
 impl Drop for KbmCapture {
     fn drop(&mut self) {
         unsafe {
-            DestroyWindow(self.hwnd).expect("failed to destroy window");
-            UnregisterClassA(self.class_name, Some(self.h_instance))
-                .expect("failed to unregister class");
+            // Ignore errors during cleanup to prevent panics in Drop
+            if let Err(e) = DestroyWindow(self.hwnd) {
+                tracing::warn!("failed to destroy window during cleanup: {e}");
+            }
+            if let Err(e) = UnregisterClassA(self.class_name, Some(self.h_instance)) {
+                tracing::warn!("failed to unregister class during cleanup: {e}");
+            }
         }
     }
 }
