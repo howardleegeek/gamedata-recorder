@@ -7,8 +7,8 @@ use crate::output_types::Metadata;
 pub fn validate(video_path: &Path, metadata: &Metadata) -> Vec<String> {
     let mut invalid_reasons = vec![];
 
-    // Validate duration is finite and non-negative before conversion
-    if !metadata.duration.is_finite() || metadata.duration < 0.0 {
+    // Validate duration is finite and positive before conversion
+    if !metadata.duration.is_finite() || metadata.duration <= 0.0 {
         invalid_reasons.push(format!("Video duration is invalid: {}", metadata.duration));
         return invalid_reasons;
     }
@@ -19,11 +19,6 @@ pub fn validate(video_path: &Path, metadata: &Metadata) -> Vec<String> {
     }
     if duration > MAX_FOOTAGE.mul_f32(1.5) {
         invalid_reasons.push(format!("Video length {} too long.", metadata.duration));
-    }
-    // Prevent division by zero in subsequent calculations
-    if metadata.duration == 0.0 {
-        invalid_reasons.push("Video duration is zero, cannot validate bitrate".to_string());
-        return invalid_reasons;
     }
 
     let size_bytes = match std::fs::metadata(video_path).map(|m| m.len()) {
