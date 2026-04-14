@@ -91,10 +91,13 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                             TrajectoryTerminator::Pause { gap_ms },
                         ));
                         traj_index += 1;
-                        current_path.clear();
-                        total_distance = 0.0;
-                        event_count = 0;
-                        current_start_ns = None;
+                        reset_trajectory_state(
+                            &mut current_path,
+                            &mut total_distance,
+                            &mut event_count,
+                            &mut current_start_ns,
+                            &mut last_move_ns,
+                        );
                     }
                 }
 
@@ -129,10 +132,13 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                     ));
                     traj_index += 1;
                 }
-                current_path.clear();
-                total_distance = 0.0;
-                event_count = 0;
-                current_start_ns = None;
+                reset_trajectory_state(
+                    &mut current_path,
+                    &mut total_distance,
+                    &mut event_count,
+                    &mut current_start_ns,
+                    &mut last_move_ns,
+                );
             }
 
             RawEventKind::KeyDown { vkey, .. } => {
@@ -149,10 +155,13 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                     ));
                     traj_index += 1;
                 }
-                current_path.clear();
-                total_distance = 0.0;
-                event_count = 0;
-                current_start_ns = None;
+                reset_trajectory_state(
+                    &mut current_path,
+                    &mut total_distance,
+                    &mut event_count,
+                    &mut current_start_ns,
+                    &mut last_move_ns,
+                );
             }
 
             RawEventKind::Scroll { delta } => {
@@ -168,10 +177,13 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
                     ));
                     traj_index += 1;
                 }
-                current_path.clear();
-                total_distance = 0.0;
-                event_count = 0;
-                current_start_ns = None;
+                reset_trajectory_state(
+                    &mut current_path,
+                    &mut total_distance,
+                    &mut event_count,
+                    &mut current_start_ns,
+                    &mut last_move_ns,
+                );
             }
 
             _ => {} // Key up, mouse button up — don't terminate trajectories
@@ -194,6 +206,23 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
     }
 
     trajectories
+}
+
+/// Reset trajectory state after finalizing a trajectory.
+/// Ensures all state variables are consistently cleared to prevent
+/// timestamp drift in gap calculations for the next trajectory.
+fn reset_trajectory_state(
+    current_path: &mut Vec<[i32; 2]>,
+    total_distance: &mut f64,
+    event_count: &mut u32,
+    current_start_ns: &mut Option<u64>,
+    last_move_ns: &mut u64,
+) {
+    current_path.clear();
+    *total_distance = 0.0;
+    *event_count = 0;
+    *current_start_ns = None;
+    *last_move_ns = 0; // Reset to prevent timestamp drift in next trajectory
 }
 
 fn build_trajectory(
