@@ -90,14 +90,14 @@ pub fn get_hardware_specs(gpus: Vec<GpuSpecs>) -> Result<HardwareSpecs> {
 /// Returns the resolution of the primary monitor
 pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
     use windows::{
+        core::PCWSTR,
         Win32::{
             Foundation::POINT,
             Graphics::Gdi::{
-                DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW,
-                MONITORINFO, MONITORINFOEXW, MonitorFromPoint,
+                EnumDisplaySettingsW, GetMonitorInfoW, MonitorFromPoint, DEVMODEW,
+                ENUM_CURRENT_SETTINGS, MONITORINFO, MONITORINFOEXW,
             },
         },
-        core::PCWSTR,
     };
 
     // Get the primary monitor handle
@@ -120,13 +120,14 @@ pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
         ..Default::default()
     };
     unsafe {
-        GetMonitorInfoW(
+        if let Err(e) = GetMonitorInfoW(
             primary_monitor,
             &mut monitor_info as *mut _ as *mut MONITORINFO,
-        )
+        ) {
+            tracing::warn!("GetMonitorInfoW failed: {:?}", e);
+            return None;
+        }
     }
-    .ok()
-    .ok()?;
 
     // Get the display mode
     let mut devmode = DEVMODEW {
@@ -134,14 +135,19 @@ pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
         ..Default::default()
     };
     unsafe {
-        EnumDisplaySettingsW(
+        if let Err(e) = EnumDisplaySettingsW(
             PCWSTR(monitor_info.szDevice.as_ptr()),
             ENUM_CURRENT_SETTINGS,
             &mut devmode,
-        )
+        ) {
+            tracing::warn!(
+                "EnumDisplaySettingsW failed for device {:?}: {:?}",
+                monitor_info.szDevice,
+                e
+            );
+            return None;
+        }
     }
-    .ok()
-    .ok()?;
 
     Some((devmode.dmPelsWidth, devmode.dmPelsHeight))
 }
