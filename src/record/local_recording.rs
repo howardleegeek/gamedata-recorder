@@ -4,7 +4,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use color_eyre::{eyre, Result};
+use color_eyre::{Result, eyre};
 use egui_wgpu::wgpu;
 use serde::{Deserialize, Serialize};
 
@@ -143,7 +143,9 @@ impl UploadProgressState {
 
     /// Cleans up the tar file associated with this upload progress.
     pub fn cleanup_tar_file(&self) {
-        std::fs::remove_file(&self.tar_path).ok();
+        if let Err(e) = std::fs::remove_file(&self.tar_path) {
+            tracing::warn!("Failed to cleanup tar file at {:?}: {}", self.tar_path, e);
+        }
     }
 }
 
