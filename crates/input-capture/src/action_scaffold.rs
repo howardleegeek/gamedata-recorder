@@ -67,6 +67,8 @@ pub fn build_actions(
     trajectories: &[Trajectory],
     fps: f64,
 ) -> Vec<Action> {
+    // Guard against non-positive FPS to prevent divide-by-zero or invalid frame calculations
+    let fps = fps.max(1.0);
     let frame_interval_ns = (1_000_000_000.0 / fps) as u64;
     let mut actions = Vec::new();
     let mut action_index: u32 = 0;
