@@ -74,6 +74,16 @@ pub const QSV_TARGET_USAGES: &[&str] = &[
 /// https://github.com/obsproject/obs-studio/blob/c025f210d36ada93c6b9ef2affd0f671b34c9775/plugins/obs-ffmpeg/texture-amf.cpp#L1276-L1284
 pub const AMF_PRESETS: &[&str] = &["quality", "balanced", "speed"];
 
+/// Validates QSV target_usage setting
+pub fn is_valid_qsv_target_usage(value: &str) -> bool {
+    QSV_TARGET_USAGES.contains(&value)
+}
+
+/// Validates AMF preset setting
+pub fn is_valid_amf_preset(value: &str) -> bool {
+    AMF_PRESETS.contains(&value)
+}
+
 /// ffmpeg-nvenc: https://github.com/obsproject/obs-studio/blob/0b1229632063a13dfd26cf1cd9dd43431d8c68f6/plugins/obs-ffmpeg/obs-ffmpeg-nvenc.c#L504
 /// obs-nvenc: https://github.com/obsproject/obs-studio/blob/0b1229632063a13dfd26cf1cd9dd43431d8c68f6/plugins/obs-nvenc/nvenc-properties.c#L159
 /// both are the same
