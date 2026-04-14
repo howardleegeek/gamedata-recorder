@@ -101,6 +101,9 @@ pub struct InstalledGame {
 /// Maximum number of installed games to detect (prevents memory exhaustion from huge libraries)
 const MAX_INSTALLED_GAMES: usize = 10_000;
 
+/// Maximum length for a game name (prevents memory exhaustion from malicious/broken app names)
+const MAX_GAME_NAME_LEN: usize = 1024;
+
 pub fn detect_installed_games() -> Vec<InstalledGame> {
     let Ok(steam_dir) = steamlocate::SteamDir::locate() else {
         tracing::warn!("Steam installation not found");
@@ -131,6 +134,14 @@ pub fn detect_installed_games() -> Vec<InstalledGame> {
                 return installed;
             }
             if let Some(name) = app.name {
+                if name.len() > MAX_GAME_NAME_LEN {
+                    tracing::warn!(
+                        app_id = app.app_id,
+                        name_len = name.len(),
+                        "Skipping Steam app with excessively long name"
+                    );
+                    continue;
+                }
                 installed.push(InstalledGame {
                     name,
                     steam_app_id: app.app_id,
