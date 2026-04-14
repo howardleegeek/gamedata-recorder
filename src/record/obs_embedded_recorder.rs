@@ -162,14 +162,22 @@ impl VideoRecorder for ObsEmbeddedRecorder {
             // Channel closed - OBS thread likely panicked, return None for FPS
             return PollUpdate { active_fps: None };
         }
-        // Wait for poll to complete before reading FPS
-        if result_rx.await.is_err() {
-            // OBS thread panicked during poll
-            return PollUpdate { active_fps: None };
-        }
-        PollUpdate {
-            active_fps: Some(unsafe { libobs_wrapper::sys::obs_get_active_fps() }),
-        }
+        // Wait for poll to complete, receiving is_recording status
+        let is_recording = match result_rx.await {
+            Ok(status) => status,
+            Err(_) => {
+                // OBS thread panicked during poll
+                return PollUpdate { active_fps: None };
+            }
+        };
+        // Only read FPS if recording is active, otherwise return None
+        // This prevents displaying meaningless 0.0 FPS when not recording
+        let active_fps = if is_recording {
+            Some(unsafe { libobs_wrapper::sys::obs_get_active_fps() })
+        } else {
+            None
+        };
+        PollUpdate { active_fps }
     }
 
     fn is_window_capturable(&self, hwnd: HWND) -> bool {
@@ -201,7 +209,7 @@ enum RecorderMessage {
         result_tx: tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
     },
     Poll {
-        result_tx: tokio::sync::oneshot::Sender<()>,
+        result_tx: tokio::sync::oneshot::Sender<bool>, // returns is_recording status
     },
     CheckHookTimeout {
         result_tx: tokio::sync::oneshot::Sender<bool>,
@@ -311,7 +319,7 @@ fn recorder_thread_impl(
                 if let Err(e) = state.poll() {
                     tracing::error!("Failed to poll OBS embedded recorder: {e}");
                 }
-                result_tx.send(()).ok();
+                result_tx.send(state.is_recording).ok();
             }
             RecorderMessage::CheckHookTimeout { result_tx } => {
                 result_tx.send(state.check_hook_timeout()).ok();
