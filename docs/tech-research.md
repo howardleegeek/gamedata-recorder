@@ -37,7 +37,7 @@
 | FFmpeg ddagrab | ~0% | ❌ 不支持 | ✅ 安全 | ✅ ffmpeg-next | ⭐⭐⭐ |
 | NVFBC | ~0% | ✅ 支持 | ✅ 安全 | ❌ 消费级 GPU 锁定 | ❌ 不可用 |
 
-**结论：** windows-capture (WGC 主 + DXGI DD 备)。放弃全屏独占支持——现代游戏默认都是 borderless fullscreen。
+**结论：** windows-capture (WGC 主 + DXGI DD 备)。放弃全屏独占支持 — 现代游戏默认都是 borderless fullscreen。
 
 ### 2.2 输入捕获：Raw Input API
 
