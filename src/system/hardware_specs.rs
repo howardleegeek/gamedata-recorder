@@ -54,7 +54,7 @@ pub struct HardwareSpecs {
 
 pub fn get_hardware_specs(gpus: Vec<GpuSpecs>) -> Result<HardwareSpecs> {
     let mut sys = System::new_all();
-    // System::new_all() already refreshes all information, no need for separate refresh_all()
+    sys.refresh_all();
 
     // CPU info
     let cpu_info = sys
@@ -76,9 +76,6 @@ pub fn get_hardware_specs(gpus: Vec<GpuSpecs>) -> Result<HardwareSpecs> {
         os_version: System::os_version().unwrap_or_else(|| "Unknown".to_string()),
         kernel_version: System::kernel_version().unwrap_or_else(|| "Unknown".to_string()),
         hostname: System::host_name().unwrap_or_else(|| "Unknown".to_string()),
-        // Convert to f64 with minimal precision loss. Divide by 1024 first to reduce the value
-        // magnitude, preventing precision loss for large u64 values (>2^53 bytes ~ 9PB).
-        // Then convert to f64 and complete the division to get GB.
         total_memory_gb: sys.total_memory() as f64 / (1024.0 * 1024.0 * 1024.0),
     };
 
@@ -111,9 +108,6 @@ pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
         )
     };
     if primary_monitor.is_invalid() {
-        // MonitorFromPoint does not set last error per Windows docs;
-        // invalid handle indicates no monitor found at the point
-        tracing::warn!("Failed to get primary monitor handle: invalid monitor returned");
         return None;
     }
 
@@ -125,57 +119,29 @@ pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
         },
         ..Default::default()
     };
-    if let Err(e) = unsafe {
+    unsafe {
         GetMonitorInfoW(
             primary_monitor,
             &mut monitor_info as *mut _ as *mut MONITORINFO,
         )
-    } {
-        let last_error = windows::Win32::Foundation::GetLastError();
-        tracing::warn!(
-            "Failed to get monitor info: {e} (GetLastError: {:?})",
-            last_error.to_hresult()
-        );
-        return None;
     }
+    .ok()
+    .ok()?;
 
     // Get the display mode
     let mut devmode = DEVMODEW {
         dmSize: std::mem::size_of::<DEVMODEW>() as u16,
         ..Default::default()
     };
-    // Ensure device name is null-terminated to prevent buffer overread.
-    // szDevice is [u16; 32] but may not be null-terminated if the name fills the buffer.
-    let device_name = match monitor_info.szDevice.iter().position(|&c| c == 0) {
-        Some(len) => &monitor_info.szDevice[..=len], // Include null terminator
-        None => {
-            // No null terminator found - device name fills entire buffer
-            // This shouldn't happen with valid Windows data, but handle gracefully
-            return None;
-        }
-    };
-    if let Err(e) = unsafe {
+    unsafe {
         EnumDisplaySettingsW(
-            PCWSTR(device_name.as_ptr()),
+            PCWSTR(monitor_info.szDevice.as_ptr()),
             ENUM_CURRENT_SETTINGS,
             &mut devmode,
         )
-    } {
-        let last_error = windows::Win32::Foundation::GetLastError();
-        tracing::warn!(
-            "Failed to get display settings: {e} (GetLastError: {:?})",
-            last_error.to_hresult()
-        );
-        return None;
     }
+    .ok()
+    .ok()?;
 
-    // Validate resolution values to prevent downstream issues
-    let width = devmode.dmPelsWidth;
-    let height = devmode.dmPelsHeight;
-    if width == 0 || height == 0 {
-        tracing::warn!("Invalid monitor resolution returned: {}x{}", width, height);
-        return None;
-    }
-
-    Some((width, height))
+    Some((devmode.dmPelsWidth, devmode.dmPelsHeight))
 }

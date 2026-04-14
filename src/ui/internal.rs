@@ -63,11 +63,7 @@ impl WgpuState {
             // if u use AutoNoVsync instead it will fix tearing behaviour when resizing, but at cost of significantly higher CPU usage
             present_mode: wgpu::PresentMode::AutoVsync,
             desired_maximum_frame_latency: 2,
-            alpha_mode: swapchain_capabilities
-                .alpha_modes
-                .first()
-                .copied()
-                .unwrap_or(wgpu::CompositeAlphaMode::Auto),
+            alpha_mode: swapchain_capabilities.alpha_modes[0],
             view_formats: vec![],
         };
 
@@ -110,17 +106,20 @@ impl WgpuState {
 
         let surface_texture = self.surface.get_current_texture();
 
-        let surface_texture = match surface_texture {
+        match surface_texture {
             Err(SurfaceError::Outdated) => {
                 // Ignoring outdated to allow resizing and minimization
                 return;
             }
-            Err(e) => {
-                tracing::error!("Failed to acquire next swap chain texture: {e}");
+            Err(_) => {
+                surface_texture.expect("Failed to acquire next swap chain texture");
                 return;
             }
-            Ok(t) => t,
+            Ok(_) => {}
         };
+
+        let surface_texture = surface_texture.unwrap();
+
         let surface_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());

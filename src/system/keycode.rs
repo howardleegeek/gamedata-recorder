@@ -141,7 +141,7 @@ static VIRTUAL_KEYCODE_TO_NAME_ARRAY: &[(u16, &str)] = &[
     (0xB5, "Select Media"),
     (0xB6, "Start Application 1"),
     (0xB7, "Start Application 2"),
-    (0xBA, "Semicolon/Colon (ANSI)"),
+    (0xBA, "Semiсolon/Colon (ANSI)"),
     (0xBB, "Equals/Plus"),
     (0xBC, "Comma/Less Than"),
     (0xBD, "Dash/Underscore"),
@@ -167,11 +167,13 @@ pub(crate) fn virtual_keycode_to_name(keycode: u16) -> Option<&'static str> {
     VIRTUAL_KEYCODE_TO_NAME.get(&keycode).copied()
 }
 
-pub(crate) fn name_to_virtual_keycode(key: &str) -> Option<u16> {
-    // Avoid allocation by doing case-insensitive comparison directly.
-    // All key names are ASCII, so we can use eq_ignore_ascii_case.
+static NAME_TO_VIRTUAL_KEYCODE: LazyLock<HashMap<String, u16>> = LazyLock::new(|| {
     VIRTUAL_KEYCODE_TO_NAME_ARRAY
         .iter()
-        .find(|(_, name)| name.eq_ignore_ascii_case(key))
-        .map(|(code, _)| *code)
+        .map(|(code, key)| (key.to_lowercase(), *code))
+        .collect()
+});
+
+pub(crate) fn name_to_virtual_keycode(key: &str) -> Option<u16> {
+    NAME_TO_VIRTUAL_KEYCODE.get(&key.to_lowercase()).copied()
 }

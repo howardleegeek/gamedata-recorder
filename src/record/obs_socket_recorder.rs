@@ -15,7 +15,7 @@ use obws::{
         scenes::SceneId,
     },
 };
-use windows::Win32::Foundation::{GetLastError, HWND};
+use windows::Win32::Foundation::HWND;
 
 use crate::{
     config::EncoderSettings,
@@ -34,8 +34,6 @@ const SET_ENCODER: bool = false;
 pub struct ObsSocketRecorder {
     // Use an Option to allow it to be consumed within the destructor
     client: Option<Client>,
-    /// Handle to the shutdown task for proper cleanup in Drop
-    shutdown_handle: Option<tokio::task::JoinHandle<()>>,
 }
 impl ObsSocketRecorder {
     pub async fn new() -> Result<Self>
@@ -43,10 +41,7 @@ impl ObsSocketRecorder {
         Self: Sized,
     {
         tracing::debug!("ObsSocketRecorder::new() called");
-        Ok(Self {
-            client: None,
-            shutdown_handle: None,
-        })
+        Ok(Self { client: None })
     }
 }
 #[async_trait::async_trait(?Send)]
@@ -79,9 +74,7 @@ impl VideoRecorder for ObsSocketRecorder {
         let recording_path = dummy_video_path
             .parent()
             .ok_or_eyre("Video path must have a parent directory")?;
-        // Use dunce::canonicalize which handles non-existent paths better than std::fs::canonicalize
-        // (std::fs::canonicalize requires the path to exist, which may not be true for new recordings)
-        let recording_path = dunce::canonicalize(recording_path)
+        let recording_path = std::fs::canonicalize(recording_path)
             .wrap_err("Failed to get absolute path for recording directory")?;
 
         // Pull out sub-APIs for easier access
@@ -95,7 +88,10 @@ impl VideoRecorder for ObsSocketRecorder {
         let all_profiles = profiles.list().await.wrap_err("Failed to get profiles")?;
 
         // Create and activate OWL profile
-        if !all_profiles.profiles.iter().any(|p| p == OWL_PROFILE_NAME) {
+        if !all_profiles
+            .profiles
+            .contains(&OWL_PROFILE_NAME.to_string())
+        {
             profiles
                 .create(OWL_PROFILE_NAME)
                 .await
@@ -158,24 +154,20 @@ impl VideoRecorder for ObsSocketRecorder {
                 .wrap_err("Failed to create input")?;
         }
 
-        if let Err(e) = inputs
+        let _ = inputs
             .set_volume(InputId::Name("Mic/Aux"), Volume::Db(-100.0))
-            .await
-        {
-            tracing::warn!("Failed to mute Mic/Aux input: {e}");
-        }
-        if let Err(e) = inputs
+            .await;
+        let _ = inputs
             .set_volume(InputId::Name("Desktop Audio"), Volume::Db(-100.0))
-            .await
-        {
-            tracing::warn!("Failed to mute Desktop Audio input: {e}");
-        }
+            .await;
 
-        // Pre-convert constant to string once instead of in every loop iteration
-        let vbr_str = constants::encoding::BITRATE.to_string();
         for (category, name, value) in [
             ("SimpleOutput", "RecQuality", "Stream"),
-            ("SimpleOutput", "VBitrate", &vbr_str),
+            (
+                "SimpleOutput",
+                "VBitrate",
+                &constants::encoding::BITRATE.to_string(),
+            ),
             ("Output", "Mode", "Simple"),
             ("SimpleOutput", "RecFormat2", "mp4"),
         ] {
@@ -327,21 +319,14 @@ impl Drop for ObsSocketRecorder {
     fn drop(&mut self) {
         tracing::info!("Shutting down OBS socket recorder");
         let client = self.client.take();
-        // Use block_on to ensure recording is stopped before drop completes.
-        // This prevents race conditions where the recording continues after
-        // the recorder is dropped, causing OBS to record indefinitely.
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.block_on(async move {
-                if let Some(client) = &client {
-                    // Log, but do not explode if it fails
-                    if let Err(e) = client.recording().stop().await {
-                        tracing::error!("Failed to stop recording: {e}");
-                    }
+        tokio::spawn(async move {
+            if let Some(client) = &client {
+                // Log, but do not explode if it fails
+                if let Err(e) = client.recording().stop().await {
+                    tracing::error!("Failed to stop recording: {e}");
                 }
-            });
-        } else {
-            tracing::warn!("No tokio runtime available, cannot stop OBS recording synchronously");
-        }
+            }
+        });
     }
 }
 
@@ -351,14 +336,10 @@ fn get_obs_window_encoding(hwnd: HWND, game_exe: &str) -> String {
     };
 
     // Get window title
-    // Note: GetWindowTextLengthW returns 0 for both empty titles AND on error.
-    // We clear last error first, then check GetLastError() to distinguish between these cases.
-    unsafe { SetLastError(ERROR_SUCCESS) };
     let title_len = unsafe { GetWindowTextLengthW(hwnd) };
     let mut title = String::new();
-    // Bounds check: ensure title_len is positive and +1 won't overflow
-    if title_len > 0 && title_len < i32::MAX {
-        let mut buf = vec![0u16; (title_len as usize).saturating_add(1)];
+    if title_len > 0 {
+        let mut buf = vec![0u16; (title_len + 1) as usize];
         let copied = unsafe { GetWindowTextW(hwnd, &mut buf) };
         if copied > 0 {
             if let Some(end) = buf.iter().position(|&c| c == 0) {
@@ -367,29 +348,14 @@ fn get_obs_window_encoding(hwnd: HWND, game_exe: &str) -> String {
                 title = String::from_utf16_lossy(&buf);
             }
         }
-    } else {
-        // Check if 0 means error or truly empty title
-        let last_error = unsafe { windows::Win32::Foundation::GetLastError() };
-        if last_error.0 != 0 {
-            tracing::warn!(
-                "GetWindowTextLengthW failed for hwnd {:?}: error {}",
-                hwnd,
-                last_error.0
-            );
-        }
     }
 
     // Get window class
     let mut class_buf = [0u16; 256];
     let class_len = unsafe { GetClassNameW(hwnd, &mut class_buf) };
-    // GetClassNameW returns i32; negative values indicate error
     let class = if class_len > 0 {
-        String::from_utf16_lossy(&class_buf[..class_len.unsigned_abs() as usize])
+        String::from_utf16_lossy(&class_buf[..class_len as usize])
     } else {
-        let err = unsafe { GetLastError() };
-        if err.0 != 0 {
-            tracing::warn!("GetClassNameW failed for hwnd {:?}: error {}", hwnd, err.0);
-        }
         String::new()
     };
 

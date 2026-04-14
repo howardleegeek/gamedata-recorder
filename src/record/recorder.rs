@@ -75,7 +75,7 @@ impl Recorder {
         let backend = app_state
             .config
             .read()
-            .map_err(|_| color_eyre::eyre::eyre!("config lock poisoned"))?
+            .unwrap()
             .preferences
             .recording_backend;
         tracing::debug!("Recording backend: {:?}", backend);
@@ -89,19 +89,11 @@ impl Recorder {
         // pouring through the OBS source code and couldn't find anything of
         // note with regards to how it chooses the adapter; I might have to
         // reach out to an OBS developer if this becomes an issue again.
-        if app_state.adapter_infos.is_empty() {
-            bail!("No GPU adapters found - cannot initialize video recorder");
-        }
         let adapter_index = app_state
             .adapter_infos
             .iter()
             .position(|a| a.device_type == DeviceType::DiscreteGpu)
             .unwrap_or_default();
-
-        // Bounds check: ensure adapter_infos is not empty before indexing
-        if app_state.adapter_infos.is_empty() {
-            bail!("No graphics adapters found. Cannot initialize video recorder.");
-        }
 
         tracing::info!(
             "Initializing recorder with adapter index {adapter_index} ({:?})",
@@ -204,11 +196,7 @@ impl Recorder {
         );
 
         let params = {
-            let config = self
-                .app_state
-                .config
-                .read()
-                .map_err(|_| color_eyre::eyre::eyre!("config lock poisoned"))?;
+            let config = self.app_state.config.read().unwrap();
             RecordingParams {
                 recording_location: recording_location.clone(),
                 game_exe: game_exe.clone(),
@@ -237,16 +225,11 @@ impl Recorder {
         delete_recording_on_exit.disarm();
 
         self.recording = Some(recording);
-        *self
-            .app_state
-            .state
-            .write()
-            .map_err(|_| color_eyre::eyre::eyre!("state lock poisoned"))? =
-            RecordingStatus::Recording {
-                start_time: Instant::now(),
-                game_exe,
-                current_fps: None,
-            };
+        *self.app_state.state.write().unwrap() = RecordingStatus::Recording {
+            start_time: Instant::now(),
+            game_exe,
+            current_fps: None,
+        };
         Ok(())
     }
 
@@ -280,12 +263,7 @@ impl Recorder {
                 input_capture,
             )
             .await?;
-        *self
-            .app_state
-            .state
-            .write()
-            .map_err(|_| color_eyre::eyre::eyre!("state lock poisoned"))? =
-            RecordingStatus::Stopped;
+        *self.app_state.state.write().unwrap() = RecordingStatus::Stopped;
 
         tracing::info!("Recording stopped");
         Ok(())
@@ -294,10 +272,7 @@ impl Recorder {
     pub async fn poll(&mut self) {
         let update = self.video_recorder.poll().await;
         if let Some(fps) = update.active_fps {
-            let Ok(mut state) = self.app_state.state.write() else {
-                tracing::error!("state lock poisoned, cannot update FPS");
-                return;
-            };
+            let mut state = self.app_state.state.write().unwrap();
             if let RecordingStatus::Recording { current_fps, .. } = &mut *state {
                 *current_fps = Some(fps);
             }

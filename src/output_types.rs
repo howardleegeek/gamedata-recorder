@@ -526,12 +526,6 @@ impl std::str::FromStr for InputEvent {
                 .map_err(|_| InputEventReadError::InvalidTimestamp {
                     event: s.to_string(),
                 })?;
-        // Validate timestamp is finite to prevent NaN/Infinity propagation
-        if !timestamp.is_finite() {
-            return Err(InputEventReadError::InvalidTimestamp {
-                event: s.to_string(),
-            });
-        }
 
         // Remove quotes from event_args if present
         if event_args.starts_with('"') && event_args.ends_with('"') {

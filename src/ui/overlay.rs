@@ -217,12 +217,14 @@ impl EguiOverlay for OverlayApp {
             .show(egui_context, |ui| {
                 ui.horizontal(|ui| {
                     // Get logo bytes, using empty fallback if unavailable
-                    let logo_bytes: Arc<[u8]> = if self.rec_status.is_recording() {
+                    let logo_bytes: Vec<u8> = if self.rec_status.is_recording() {
                         get_logo_recording_bytes()
-                            .map(Arc::from)
+                            .map(|b| b.to_vec())
                             .unwrap_or_default()
                     } else {
-                        get_logo_default_bytes().map(Arc::from).unwrap_or_default()
+                        get_logo_default_bytes()
+                            .map(|b| b.to_vec())
+                            .unwrap_or_default()
                     };
                     ui.add(
                         Image::new(ImageSource::Bytes {
@@ -279,9 +281,7 @@ impl EguiOverlay for OverlayApp {
                                     job.append(
                                         &format!(
                                             " ({})",
-                                            util::format_seconds(
-                                                start_time.elapsed().as_secs_f64().round() as u64
-                                            )
+                                            util::format_seconds(start_time.elapsed().as_secs())
                                         ),
                                         0.0,
                                         TextFormat {
@@ -381,21 +381,15 @@ fn update_overlay_position_based_on_location(
             window.set_pos(OFFSET, OFFSET);
         }
         OverlayLocation::TopRight => {
-            window.set_pos(
-                monitor_width.saturating_sub(width).saturating_sub(OFFSET),
-                OFFSET,
-            );
+            window.set_pos(monitor_width - width - OFFSET, OFFSET);
         }
         OverlayLocation::BottomLeft => {
-            window.set_pos(
-                OFFSET,
-                monitor_height.saturating_sub(height).saturating_sub(OFFSET),
-            );
+            window.set_pos(OFFSET, monitor_height - height - OFFSET);
         }
         OverlayLocation::BottomRight => {
             window.set_pos(
-                monitor_width.saturating_sub(width).saturating_sub(OFFSET),
-                monitor_height.saturating_sub(height).saturating_sub(OFFSET),
+                monitor_width - width - OFFSET,
+                monitor_height - height - OFFSET,
             );
         }
     }

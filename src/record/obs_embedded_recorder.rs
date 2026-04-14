@@ -152,35 +152,10 @@ impl VideoRecorder for ObsEmbeddedRecorder {
     }
 
     async fn poll(&mut self) -> PollUpdate {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        if self
-            .obs_tx
-            .send(RecorderMessage::Poll { result_tx })
-            .await
-            .is_err()
-        {
-            return PollUpdate::default();
+        self.obs_tx.send(RecorderMessage::Poll).await.ok();
+        PollUpdate {
+            active_fps: Some(unsafe { libobs_wrapper::sys::obs_get_active_fps() }),
         }
-        match result_rx.await {
-            Ok(fps) => PollUpdate { active_fps: fps },
-            Err(_) => PollUpdate::default(),
-        }
-        // Wait for poll to complete, receiving is_recording status
-        let is_recording = match result_rx.await {
-            Ok(status) => status,
-            Err(_) => {
-                // OBS thread panicked during poll
-                return PollUpdate { active_fps: None };
-            }
-        };
-        // Only read FPS if recording is active, otherwise return None
-        // This prevents displaying meaningless 0.0 FPS when not recording
-        let active_fps = if is_recording {
-            Some(unsafe { libobs_wrapper::sys::obs_get_active_fps() })
-        } else {
-            None
-        };
-        PollUpdate { active_fps }
     }
 
     fn is_window_capturable(&self, hwnd: HWND) -> bool {
@@ -195,11 +170,9 @@ impl VideoRecorder for ObsEmbeddedRecorder {
             .await
             .is_err()
         {
-            // Channel closed - OBS thread likely panicked, treat as timeout
-            return true;
+            return false;
         }
-        // If the sender was dropped (OBS thread panic), return true to stop recording
-        result_rx.await.unwrap_or(true)
+        result_rx.await.unwrap_or(false)
     }
 }
 
@@ -211,9 +184,7 @@ enum RecorderMessage {
     StopRecording {
         result_tx: tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
     },
-    Poll {
-        result_tx: tokio::sync::oneshot::Sender<Option<f64>>,
-    },
+    Poll,
     CheckHookTimeout {
         result_tx: tokio::sync::oneshot::Sender<bool>,
     },
@@ -266,13 +237,7 @@ fn recorder_thread(
     >,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        // Create a dedicated Tokio runtime for this thread to avoid executor mismatch
-        // between futures::executor and tokio primitives (channels, select!)
-        let rt = tokio::runtime::Runtime::new()
-            .expect("Failed to create Tokio runtime for OBS recorder thread");
-        rt.block_on(async move {
-            recorder_thread_impl(adapter_index, rx, init_success_tx).await;
-        });
+        recorder_thread_impl(adapter_index, rx, init_success_tx);
     }));
     if let Err(e) = result {
         tracing::error!("OBS recorder thread panicked: {e:?}");
@@ -280,7 +245,7 @@ fn recorder_thread(
     }
 }
 
-async fn recorder_thread_impl(
+fn recorder_thread_impl(
     adapter_index: usize,
     mut rx: tokio::sync::mpsc::Receiver<RecorderMessage>,
     init_success_tx: tokio::sync::oneshot::Sender<
@@ -314,28 +279,23 @@ async fn recorder_thread_impl(
             RecorderMessage::StartRecording { request, result_tx } => {
                 let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
-                if let Err(e) = result_tx.send(state.start_recording(request, shutdown_rx)) {
-                    tracing::error!("Failed to send start_recording result: {e:?}");
-                }
+                result_tx
+                    .send(state.start_recording(request, shutdown_rx))
+                    .ok();
                 last_shutdown_tx = Some(shutdown_tx);
             }
             RecorderMessage::StopRecording { result_tx } => {
-                if let Err(e) = result_tx.send(state.stop_recording(last_shutdown_tx.take())) {
-                    tracing::error!("Failed to send stop_recording result: {e:?}");
-                }
+                result_tx
+                    .send(state.stop_recording(last_shutdown_tx.take()))
+                    .ok();
             }
-            RecorderMessage::Poll { result_tx } => {
+            RecorderMessage::Poll => {
                 if let Err(e) = state.poll() {
                     tracing::error!("Failed to poll OBS embedded recorder: {e}");
                 }
-                // Get FPS from the OBS thread to avoid race conditions
-                let fps = unsafe { libobs_wrapper::sys::obs_get_active_fps() };
-                result_tx.send(Some(fps)).ok();
             }
             RecorderMessage::CheckHookTimeout { result_tx } => {
-                if let Err(e) = result_tx.send(state.check_hook_timeout()) {
-                    tracing::error!("Failed to send check_hook_timeout result: {e:?}");
-                }
+                result_tx.send(state.check_hook_timeout()).ok();
             }
         }
     }
@@ -359,8 +319,6 @@ struct RecorderState {
     video_encoders: HashMap<VideoEncoderType, Arc<ObsVideoEncoder>>,
     // Audio encoder (created once upfront, reused always)
     audio_encoder: Arc<ObsAudioEncoder>,
-    /// Handle to the signal monitoring thread for proper cleanup
-    signal_thread_handle: Option<std::thread::JoinHandle<()>>,
 
     // This needs to be last as it needs to be dropped last
     obs_context: ObsContext,
@@ -420,7 +378,7 @@ impl RecorderState {
         // Create audio encoder upfront (will be reused for all recordings)
         tracing::info!("Creating audio encoder (one-time)");
         let mut audio_settings = obs_context.data()?;
-        audio_settings.set_int("bitrate", constants::encoding::AUDIO_BITRATE)?;
+        audio_settings.set_int("bitrate", 160)?;
         let audio_info =
             AudioEncoderInfo::new("ffmpeg_aac", "audio_encoder", Some(audio_settings), None);
         let audio_encoder =
@@ -442,7 +400,6 @@ impl RecorderState {
                 recording_start_time: None,
                 video_encoders: HashMap::new(),
                 audio_encoder,
-                signal_thread_handle: None,
                 obs_context,
             },
             available_encoders,
@@ -533,13 +490,8 @@ impl RecorderState {
 
         self.last_video_encoder_type = Some(encoder_type);
 
-        // Reset was_hooked at the start of each recording session to prevent
-        // race conditions when recording the same game again immediately after stopping.
-        // Without this reset, the signal handler thread may incorrectly use stale state
-        // from the previous recording, causing duplicate or incorrect HOOK_START events.
-        self.was_hooked.store(false, Ordering::Relaxed);
-
         // Listen for signals to pass onto the event stream
+        self.was_hooked.store(false, Ordering::Relaxed);
         std::thread::spawn({
             let event_stream = request.event_stream;
             let was_hooked = self.was_hooked.clone();
@@ -568,41 +520,34 @@ impl RecorderState {
 
             move || {
                 let initial_time = Instant::now();
-                // Use Tokio runtime handle to properly execute async code with tokio::select!
-                runtime_handle.block_on(async {
+                futures::executor::block_on(async {
+                    // Seems a bit dubious to use a tokio::select with
+                    // a tokio oneshot in a non-Tokio context, but it seems to work
                     loop {
                         tokio::select! {
                             r = start_signal_rx.recv() => {
                                 if r.is_ok() {
-                                    if last_application.as_ref().is_some_and(|a| a.0 == game_exe && a.1 .0 == hwnd.0) {
+                                    if last_application.as_ref().is_some_and(|a| a == &(game_exe.clone(), hwnd.clone())) {
                                         tracing::warn!("Video started again for last game, assuming we're already hooked");
-                                        // Only send HookStart if not already hooked (prevents race with hook_signal_rx)
-                                        if !was_hooked.swap(true, Ordering::SeqCst) {
-                                            let _ = event_stream.send(InputEventType::HookStart);
-                                        }
+                                        let _ = event_stream.send(InputEventType::HookStart);
+                                        was_hooked.store(true, Ordering::Relaxed);
                                     }
 
                                     tracing::info!("Video started at {}s", initial_time.elapsed().as_secs_f64());
-                                    if let Err(e) = event_stream.send(InputEventType::VideoStart) {
-                                        tracing::warn!("Failed to send VideoStart event: {}", e);
-                                    }
+                                    let _ = event_stream.send(InputEventType::VideoStart);
                                 }
                             }
                             r = stop_signal_rx.recv() => {
                                 if r.is_ok() {
                                     tracing::info!("Video ended at {}s", initial_time.elapsed().as_secs_f64());
                                     let _ = event_stream.send(InputEventType::VideoEnd);
-                                    // Exit thread after recording stops to prevent resource leak
-                                    break;
                                 }
                             }
                             r = hook_signal_rx.recv() => {
                                 if r.is_ok() {
                                     tracing::info!("Game hooked at {}s", initial_time.elapsed().as_secs_f64());
-                                    // Only send HookStart if not already sent (prevents duplicate with synthetic hook)
-                                    if !was_hooked.swap(true, Ordering::SeqCst) {
-                                        let _ = event_stream.send(InputEventType::HookStart);
-                                    }
+                                    let _ = event_stream.send(InputEventType::HookStart);
+                                    was_hooked.store(true, Ordering::Relaxed);
                                 }
                             }
                             _ = &mut shutdown_rx => {
@@ -614,7 +559,6 @@ impl RecorderState {
                 tracing::info!("Game hook monitoring thread closed");
             }
         });
-        self.signal_thread_handle = Some(signal_thread);
 
         // Update our last encoder settings
         self.last_encoder_settings = video_encoder_settings
@@ -671,19 +615,10 @@ impl RecorderState {
         // Send shutdown signal BEFORE checking hook status, to ensure the signal thread
         // exits cleanly even when the recording was never hooked (avoids thread leak).
         if let Some(shutdown_tx) = last_shutdown_tx {
-            if let Err(e) = shutdown_tx.send(()) {
-                tracing::warn!("Failed to send shutdown signal (receiver dropped): {e:?}");
-            }
+            shutdown_tx.send(()).ok();
         }
 
-        // Join the signal monitoring thread to ensure proper resource cleanup
-        if let Some(handle) = self.signal_thread_handle.take() {
-            if let Err(e) = handle.join() {
-                tracing::warn!("Signal monitoring thread panicked: {:?}", e);
-            }
-        }
-
-        if !self.was_hooked.load(Ordering::SeqCst) {
+        if !self.was_hooked.load(Ordering::Relaxed) {
             bail!("Application was never hooked, recording will be blank");
         }
 
@@ -738,7 +673,7 @@ impl RecorderState {
         }
 
         // If we're already hooked, no timeout
-        if self.was_hooked.load(Ordering::SeqCst) {
+        if self.was_hooked.load(Ordering::Relaxed) {
             return false;
         }
 
@@ -809,7 +744,7 @@ fn prepare_source(
         );
         if let Some(source) = last_source.take() {
             tracing::info!("Removing old source");
-            scene.remove_source(&source)?;
+            dbg!(scene.remove_source(&source))?;
             tracing::info!("Old source removed");
         }
     }
@@ -928,29 +863,34 @@ impl ObsLogger for TracingObsLogger {
 }
 
 fn parse_skipped_frames(msg: &str) -> Option<SkippedFrames> {
-    // Extract "X/Y" pattern where X and Y are digits (handles numbers like 0)
-    let slash_idx = msg.find('/')?;
+    // Find the colon and start from there
+    let after_colon = msg.split(':').nth(1)?;
+    let mut chars = after_colon.chars();
 
-    // Find the number before '/' (skipped frames)
-    let before_slash = &msg[..slash_idx];
-    let skipped_start = before_slash.rfind(|c: char| !c.is_ascii_digit())?;
-    let skipped_str = &before_slash[skipped_start + 1..];
-    let skipped = skipped_str.parse::<usize>().ok()?;
+    // Skip to first digit and parse number (skipped frames)
+    while let Some(c) = chars.next() {
+        if !c.is_ascii_digit() {
+            continue;
+        }
+        let mut num_str = c.to_string();
+        num_str.extend(chars.by_ref().take_while(|c| c.is_ascii_digit()));
+        let skipped = num_str.parse::<usize>().ok()?;
 
-    // Find the number after '/' (total frames)
-    let after_slash = &msg[slash_idx + 1..];
-    let total_end = after_slash
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(after_slash.len());
-    let total_str = &after_slash[..total_end];
-    let total = total_str.parse::<usize>().ok()?;
+        // Skip to next digit and parse number (total frames)
+        while let Some(c) = chars.next() {
+            if !c.is_ascii_digit() {
+                continue;
+            }
 
-    // Validate: total should be >= skipped and both should be non-zero for valid data
-    if total == 0 || skipped > total {
-        return None;
+            let mut num_str = c.to_string();
+            num_str.extend(chars.by_ref().take_while(|c| c.is_ascii_digit()));
+            let total = num_str.parse::<usize>().ok()?;
+
+            return Some(SkippedFrames { skipped, total });
+        }
     }
 
-    Some(SkippedFrames { skipped, total })
+    None
 }
 
 #[cfg(test)]
@@ -961,12 +901,7 @@ mod tests {
     fn test_parse_skipped_frames_basic() {
         let msg =
             "Video stopped, number of skipped frames due to encoding lag: 10758/22640 (47.5%)";
-        let result = parse_skipped_frames(msg);
-        assert!(
-            result.is_some(),
-            "parse_skipped_frames should succeed for valid input"
-        );
-        let result = result.unwrap();
+        let result = parse_skipped_frames(msg).expect("Failed to parse");
 
         assert_eq!(result.skipped, 10758);
         assert_eq!(result.total, 22640);

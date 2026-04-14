@@ -221,8 +221,8 @@ fn account_section(ui: &mut Ui, app: &mut App) {
                 let retry_count = app.app_state.offline.retry_count.load(Ordering::SeqCst);
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                    .unwrap()
+                    .as_secs();
 
                 let time_remaining = if next_retry_time > now {
                     let secs = next_retry_time - now;
@@ -436,7 +436,7 @@ fn overlay_settings_section(
         add_settings_text(ui, Label::new("Overlay Opacity:"));
         ui.scope(|ui| {
             // one day egui will make sliders respect their width properly
-            ui.spacing_mut().slider_width = (ui.available_width() - 50.0).max(0.0);
+            ui.spacing_mut().slider_width = ui.available_width() - 50.0;
             u8_percentage_slider(ui, &mut local_preferences.overlay_opacity);
         });
     });
@@ -779,9 +779,7 @@ fn recording_notice(ui: &mut Ui, app_state: &AppState) {
                         job.append(
                             &format!(
                                 " ({})",
-                                util::format_seconds(
-                                    start_time.elapsed().as_secs_f64().round() as u64
-                                )
+                                util::format_seconds(start_time.elapsed().as_secs())
                             ),
                             0.0,
                             TextFormat {
@@ -813,7 +811,9 @@ fn encoder_settings_window(
         .collapsible(false)
         .resizable(false)
         .show(ctx, |ui| match encoder_settings.encoder {
-            VideoEncoderType::X264 => encoder_settings_x264(ui, &mut encoder_settings.x264),
+            VideoEncoderType::X264 => {
+                encoder_settings_x264(ui, &mut encoder_settings.x264)
+            }
             VideoEncoderType::NvEncHevc | VideoEncoderType::NvEnc => {
                 encoder_settings_nvenc(ui, &mut encoder_settings.nvenc)
             }
@@ -934,14 +934,10 @@ fn delete_recording_confirmation_window(
                     ui.add_space(4.0);
 
                     ui.horizontal(|ui| {
-                        // Calculate widths upfront since available_width() changes after each widget
-                        let full_width = ui.available_width();
-                        let half_width = full_width / 2.0;
-
                         // Cancel button
                         if ui
                             .add_sized(
-                                vec2(half_width, 32.0),
+                                vec2(ui.available_width() / 2.0, 32.0),
                                 Button::new(RichText::new("Cancel").size(13.0)),
                             )
                             .clicked()
@@ -952,7 +948,7 @@ fn delete_recording_confirmation_window(
                         // Really Delete button
                         if ui
                             .add_sized(
-                                vec2(half_width, 32.0),
+                                vec2(ui.available_width(), 32.0),
                                 Button::new(
                                     RichText::new("Really Delete")
                                         .size(13.0)

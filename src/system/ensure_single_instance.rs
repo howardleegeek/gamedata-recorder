@@ -28,12 +28,8 @@ pub fn ensure_single_instance() -> eyre::Result<()> {
 
         match mutex_result {
             Ok(_handle) => {
-                // Check GetLastError() IMMEDIATELY after CreateMutexW, before any other
-                // operations that could overwrite the last error code. This is the correct
-                // pattern to detect if the mutex already existed (another instance running).
-                let last_error = GetLastError();
-
                 // Check if the mutex already existed (another instance created it)
+                let last_error = windows::Win32::Foundation::GetLastError();
                 if last_error == ERROR_ALREADY_EXISTS {
                     use crate::ui::notification::error_message_box;
 
@@ -50,12 +46,8 @@ pub fn ensure_single_instance() -> eyre::Result<()> {
                 std::mem::forget(_handle);
             }
             Err(e) => {
-                // Fail closed — prevent multiple instances from corrupting recordings.
-                // Mutex failure (permissions, anti-cheat, resource exhaustion) is fatal
-                // to ensure recording integrity and prevent OBS hook conflicts.
-                eyre::bail!(
-                    "Failed to create single-instance mutex (recording integrity safeguard): {e}"
-                );
+                tracing::warn!("Failed to create mutex for single instance check: {e}");
+                // Fail open — allow the instance to run
             }
         }
     }

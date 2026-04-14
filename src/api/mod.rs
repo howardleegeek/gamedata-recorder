@@ -74,24 +74,11 @@ pub struct ApiClient {
     client: reqwest::Client,
 }
 impl ApiClient {
-    /// Creates a new API client with sensible timeouts for recording operations.
-    /// Prevents indefinite hangs during uploads which could destabilize recording sessions.
     pub fn new() -> Self {
         tracing::debug!("ApiClient::new() called");
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .timeout(std::time::Duration::from_secs(300))
-            .pool_idle_timeout(std::time::Duration::from_secs(90))
-            .build()
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to build client with timeouts, using minimal fallback: {e}");
-                // Fallback with at least timeout protection to prevent hangs during uploads
-                reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(300))
-                    .build()
-                    .expect("Failed to build even minimal HTTP client")
-            });
-        Self { client }
+        Self {
+            client: reqwest::Client::new(),
+        }
     }
 
     /// Attempts to validate the API key. Returns an error if the API key is invalid or the server is unavailable.
@@ -107,23 +94,9 @@ impl ApiClient {
         let client = &self.client;
 
         // Validate input
-        if api_key.trim().is_empty() {
+        if api_key.is_empty() || api_key.trim().is_empty() {
             return Err(ApiError::ApiKeyValidationFailure(
                 "API key cannot be empty".into(),
-            ));
-        }
-
-        // Check maximum length to prevent potential DoS via header size limits
-        if api_key.len() > 256 {
-            return Err(ApiError::ApiKeyValidationFailure(
-                "API key exceeds maximum length".into(),
-            ));
-        }
-
-        // Check for control characters to prevent HTTP header injection
-        if api_key.chars().any(|c| c.is_ascii_control()) {
-            return Err(ApiError::ApiKeyValidationFailure(
-                "API key contains invalid control characters".into(),
             ));
         }
 
@@ -171,31 +144,11 @@ async fn check_for_response_success(
 
     let status = response.status();
     if !status.is_success() {
-        // Read response body, but don't fail immediately if that fails - preserve the HTTP status
-        let text = match response.text().await {
-            Ok(body) => body,
-            Err(e) => {
-                tracing::error!("API error (HTTP {status}) and failed to read response body: {e}");
-                return Err(ApiError::ApiFailure {
-                    context: context.into(),
-                    error: format!("HTTP {status}, failed to read response body: {e}"),
-                    status: Some(status),
-                });
-            }
-        };
+        let text = response.text().await?;
         tracing::error!("API error response (HTTP {status}): {text}");
 
         // if 502 this will return None, then APIError must fallback to using just the text
-        let value = match serde_json::from_str::<StructuredError>(&text) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::debug!(
-                    "Failed to parse API error response as structured JSON: {}",
-                    e
-                );
-                None
-            }
-        };
+        let value = serde_json::from_str::<StructuredError>(&text).ok();
 
         return Err(match value {
             Some(StructuredError::ServerInvalidation { detail }) => {

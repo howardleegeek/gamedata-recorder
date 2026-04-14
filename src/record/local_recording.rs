@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    io::Write,
     path::{Path, PathBuf},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -8,7 +7,6 @@ use std::{
 use color_eyre::{Result, eyre};
 use egui_wgpu::wgpu;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 
 use crate::{
     api::{ApiClient, ApiError, CompleteMultipartUploadChunk},
@@ -64,28 +62,11 @@ impl UploadProgressState {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        // Prevent overflow: if expires_at exceeds i64::MAX, treat as expired
-        if self.expires_at > i64::MAX as u64 {
-            return -1;
-        }
         self.expires_at as i64 - now as i64
     }
 
-    /// Maximum file size for progress files (10 MB) to prevent memory exhaustion
-    const MAX_PROGRESS_FILE_SIZE: u64 = 10 * 1024 * 1024;
-
     /// Load progress state from a file
     pub fn load_from_file(path: &Path) -> eyre::Result<Self> {
-        // Check file size before reading to prevent memory exhaustion
-        let metadata = std::fs::metadata(path)?;
-        if metadata.len() > Self::MAX_PROGRESS_FILE_SIZE {
-            return Err(eyre::eyre!(
-                "Progress file too large: {} bytes (max: {})",
-                metadata.len(),
-                Self::MAX_PROGRESS_FILE_SIZE
-            ));
-        }
-
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
         let mut stream =
@@ -120,9 +101,7 @@ impl UploadProgressState {
 
     /// Save progress state to a file (Snapshot + Log format)
     pub fn save_to_file(&self, path: &Path) -> eyre::Result<()> {
-        // Atomic write pattern: write to temp file, then rename for crash durability
-        let temp_path = path.with_extension("progress.tmp");
-        let file = std::fs::File::create(&temp_path)?;
+        let file = std::fs::File::create(path)?;
         let mut writer = std::io::BufWriter::new(file);
 
         // 1. Write the base state with EMPTY chunk_etags to the first line.
@@ -130,6 +109,7 @@ impl UploadProgressState {
         let mut header_state = self.clone();
         header_state.chunk_etags.clear();
         serde_json::to_writer(&mut writer, &header_state)?;
+        use std::io::Write;
         writeln!(&mut writer)?;
 
         // 2. Write all existing etags as subsequent lines
@@ -139,12 +119,6 @@ impl UploadProgressState {
         }
 
         writer.flush()?;
-        // Ensure data is durable before renaming
-        let file = writer.into_inner()?;
-        file.sync_all()?;
-
-        // Atomically rename temp file to target path
-        std::fs::rename(&temp_path, path)?;
         Ok(())
     }
 
@@ -160,14 +134,12 @@ impl UploadProgressState {
 
     /// Get the total number of bytes uploaded so far
     pub fn uploaded_bytes(&self) -> u64 {
-        (self.chunk_etags.len() as u64).saturating_mul(self.chunk_size_bytes)
+        self.chunk_etags.len() as u64 * self.chunk_size_bytes
     }
 
     /// Cleans up the tar file associated with this upload progress.
     pub fn cleanup_tar_file(&self) {
-        if let Err(e) = std::fs::remove_file(&self.tar_path) {
-            tracing::warn!("Failed to cleanup tar file at {:?}: {}", self.tar_path, e);
-        }
+        std::fs::remove_file(&self.tar_path).ok();
     }
 }
 
@@ -244,7 +216,6 @@ impl LocalRecordingPaused {
         serde_json::to_writer(&mut file, &chunk)?;
         use std::io::Write;
         writeln!(&mut file)?;
-        file.sync_all()?; // Ensure chunk completion is durable before acknowledging
 
         Ok(())
     }
@@ -638,35 +609,30 @@ impl LocalRecording {
         // Prevents corruption if the process crashes mid-write.
         let metadata_json = serde_json::to_string_pretty(&metadata)?;
         let temp_path = metadata_path.with_extension("json.tmp");
-        let mut file = tokio::fs::File::create(&temp_path).await?;
-        file.write_all(metadata_json.as_bytes()).await?;
-        file.sync_all().await?;
-        drop(file);
+        tokio::fs::write(&temp_path, &metadata_json).await?;
         tokio::fs::rename(&temp_path, &metadata_path).await?;
 
         // Validate the recording immediately after stopping to create [`constants::filename::recording::INVALID`] file if needed
         tracing::info!("Validating recording at {}", recording_location.display());
-        if let Err(e) = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             if let Err(e) = crate::validation::validate_folder(&recording_location) {
                 tracing::error!("Error validating recording on stop: {e}");
             }
         })
         .await
-        {
-            tracing::error!("Validation task panicked or was cancelled: {e}");
-        }
+        .ok();
 
         Ok(())
     }
 }
 
-/// Calculate the total size of all files in a folder (recursively)
+/// Calculate the total size of all files in a folder
 fn folder_size(path: &Path) -> Result<u64, std::io::Error> {
-    let mut size = 0u64;
+    let mut size = 0;
     for entry in path.read_dir()? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() && path.extension().and_then(|e| e.to_str()) != Some("tar") {
+        if path.is_file() && path.extension().unwrap_or_default() != "tar" {
             size += path.metadata()?.len();
         }
     }

@@ -2,7 +2,6 @@ use std::path::Path;
 
 use color_eyre::Result;
 use serde::Serialize;
-use tokio::io::AsyncWriteExt as _;
 
 /// Per-second FPS statistics entry (buyer spec requirement).
 #[derive(Debug, Serialize)]
@@ -46,27 +45,18 @@ impl FpsLogger {
     /// Records the inter-frame interval for FPS calculation.
     pub fn on_frame(&mut self) {
         let now = std::time::Instant::now();
-        let elapsed_seconds = now.saturating_duration_since(self.start_instant).as_secs();
+        let elapsed_seconds = now.duration_since(self.start_instant).as_secs();
 
-        // If we've moved to a new second, finalize all intervening seconds
-        // including empty ones (0 fps) to prevent gaps in the FPS log
+        // If we've moved to a new second, finalize the previous one
         while self.current_second < elapsed_seconds {
             self.finalize_current_second();
             self.current_second += 1;
-            // Clear frame times after finalizing - new second starts empty
-            // (will be populated below if this is the current elapsed second)
-            self.current_second_frame_times.clear();
-        }
-        // Jump to current second if we skipped more than MAX_CATCH_UP_SECONDS
-        // (discarding empty entries for time when no recording was active)
-        if self.current_second < elapsed_seconds {
-            self.current_second = elapsed_seconds;
             self.current_second_frame_times.clear();
         }
 
         // Record frame interval
         if let Some(last) = self.last_frame_time {
-            let frame_time_ms = now.saturating_duration_since(last).as_secs_f64() * 1000.0;
+            let frame_time_ms = now.duration_since(last).as_secs_f64() * 1000.0;
             self.current_second_frame_times.push(frame_time_ms);
         }
 
@@ -104,59 +94,22 @@ impl FpsLogger {
         });
     }
 
-    /// Get the current real-time FPS (frames in the last completed second,
-    /// or the current in-progress second if no completed seconds yet).
+    /// Get the current real-time FPS (frames in the last completed second).
     #[allow(dead_code)]
     pub fn current_fps(&self) -> Option<f64> {
-        // Return completed second if available
-        if let Some(entry) = self.entries.last() {
-            return Some(entry.fps as f64);
-        }
-        // Otherwise calculate from current in-progress second
-        // frame_times stores N intervals = N+1 frames, but if no intervals yet,
-        // we still have 1 frame (the first frame of the second)
-        let current_frames = if self.current_second_frame_times.is_empty() {
-            if self.last_frame_time.is_some() {
-                1 // First frame arrived, no interval recorded yet
-            } else {
-                0 // No frames at all
-            }
-        } else {
-            self.current_second_frame_times.len() + 1
-        };
-        if current_frames > 0 {
-            Some(current_frames as f64)
-        } else {
-            None
-        }
+        self.entries.last().map(|e| e.fps as f64)
     }
 
     /// Finalize and write fps_log.json to the session directory.
-    /// Uses atomic write pattern (write .tmp then rename) for crash durability.
     pub async fn save(mut self, session_dir: &Path) -> Result<()> {
-        // Calculate total elapsed seconds of the recording
-        let elapsed_seconds = std::time::Instant::now()
-            .duration_since(self.start_instant)
-            .as_secs();
-
-        // Finalize all seconds up to the recording end time, including empty ones.
-        // This ensures seconds with 0 frames (loading screens, game freezes) are
-        // recorded as 0 FPS rather than being omitted from the log.
-        while self.current_second <= elapsed_seconds {
+        // Finalize any remaining data in the current second
+        if !self.current_second_frame_times.is_empty() {
             self.finalize_current_second();
-            self.current_second += 1;
-            self.current_second_frame_times.clear();
         }
 
         let path = session_dir.join(constants::filename::recording::FPS_LOG);
-        let temp_path = path.with_extension("tmp");
         let json = serde_json::to_string_pretty(&self.entries)?;
-
-        // Atomic write: write to temp, sync, then rename for crash durability
-        tokio::fs::write(&temp_path, json).await?;
-        tokio::fs::File::open(&temp_path).await?.sync_all().await?;
-        tokio::fs::rename(&temp_path, &path).await?;
-
+        tokio::fs::write(&path, json).await?;
         tracing::info!(
             "FPS log saved: {} entries to {:?}",
             self.entries.len(),

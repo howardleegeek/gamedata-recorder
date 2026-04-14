@@ -167,7 +167,7 @@ fn game_settings_window(
     game_settings_open: &mut Option<GameSettingsTarget>,
     preferences: &mut Preferences,
 ) {
-    let Some(target) = game_settings_open.as_ref() else {
+    let Some(target) = game_settings_open.clone() else {
         return;
     };
 

@@ -1,7 +1,7 @@
 use windows::{
     Win32::UI::WindowsAndMessaging::{
         GetForegroundWindow, MB_ICONERROR, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST,
-        MessageBoxW,
+        MessageBoxW, SetForegroundWindow,
     },
     core::HSTRING,
 };
@@ -22,25 +22,31 @@ fn get_parent_window() -> Option<windows::Win32::Foundation::HWND> {
 pub fn error_message_box(body: &str) {
     unsafe {
         let parent = get_parent_window();
-        // MB_SETFOREGROUND flag makes the message box the foreground window
-        let _ = MessageBoxW(
+        // Force the message box to become the foreground window
+        let result = MessageBoxW(
             parent,
             &HSTRING::from(body),
             &HSTRING::from("GameData Recorder - Error"),
             MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND,
         );
-    }
+        // Ensure the message box window gets focus
+        let _ = SetForegroundWindow(GetForegroundWindow());
+        result
+    };
 }
 
 pub fn warning_message_box(body: &str) {
     unsafe {
         let parent = get_parent_window();
-        // MB_SETFOREGROUND flag makes the message box the foreground window
-        let _ = MessageBoxW(
+        // Force the message box to become the foreground window
+        let result = MessageBoxW(
             parent,
             &HSTRING::from(body),
             &HSTRING::from("GameData Recorder - Warning"),
             MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND,
         );
-    }
+        // Ensure the message box window gets focus
+        let _ = SetForegroundWindow(GetForegroundWindow());
+        result
+    };
 }
