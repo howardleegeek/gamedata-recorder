@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
 
 use crate::api::{API_BASE_URL, ApiClient, ApiError, check_for_response_success};
@@ -69,8 +70,9 @@ impl ApiClient {
             statistics: UserUploadStatistics,
         }
 
+        let encoded_user_id = utf8_percent_encode(user_id, NON_ALPHANUMERIC).to_string();
         let mut url = format!(
-            "{}/tracker/v2/uploads/user/{user_id}/stats",
+            "{}/tracker/v2/uploads/user/{encoded_user_id}/stats",
             API_BASE_URL.as_str()
         );
         let mut query_params = Vec::new();
@@ -120,8 +122,9 @@ impl ApiClient {
             offset: u32,
         }
 
+        let encoded_user_id = utf8_percent_encode(user_id, NON_ALPHANUMERIC).to_string();
         let mut url = format!(
-            "{}/tracker/v2/uploads/user/{user_id}/list?limit={limit}&offset={offset}",
+            "{}/tracker/v2/uploads/user/{encoded_user_id}/list?limit={limit}&offset={offset}",
             API_BASE_URL.as_str()
         );
         if let Some(start) = start_date {
