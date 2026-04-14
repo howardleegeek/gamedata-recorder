@@ -83,6 +83,10 @@ fn print_help() {
 /// Output writer trait for abstraction over stdout and compressed file
 trait OutputWriter: Write {
     fn flush_output(&mut self) -> std::io::Result<()>;
+    /// Sync data to disk for crash durability. Default does nothing.
+    fn sync_output(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl OutputWriter for std::io::StdoutLock<'_> {
@@ -94,6 +98,9 @@ impl OutputWriter for std::io::StdoutLock<'_> {
 impl OutputWriter for std::fs::File {
     fn flush_output(&mut self) -> std::io::Result<()> {
         self.flush()
+    }
+    fn sync_output(&mut self) -> std::io::Result<()> {
+        self.sync_all()
     }
 }
 
@@ -116,6 +123,13 @@ impl Write for ZstdWriter {
 #[cfg(feature = "compression")]
 impl OutputWriter for ZstdWriter {
     fn flush_output(&mut self) -> std::io::Result<()> {
+        self.encoder.flush()
+    }
+    fn sync_output(&mut self) -> std::io::Result<()> {
+        // Finish the encoder to write the zstd footer, then sync the underlying file
+        // Note: finish() consumes the encoder, so we use do_finish() which doesn't
+        self.encoder.do_finish()?;
+        // After do_finish(), the encoder will pass through sync_all calls to the underlying file
         self.encoder.flush()
     }
 }
@@ -164,16 +178,31 @@ fn main() {
                     let encoder = zstd::stream::write::Encoder::new(file, args.level)
                         .expect("Failed to create zstd encoder");
                     let mut writer = ZstdWriter { encoder };
-                    run_logger(&timer, &mut rx, &mut writer).await
+                    let result = run_logger(&timer, &mut rx, &mut writer).await;
+                    // Flush compressed data for crash durability
+                    if let Err(e) = writer.sync_output() {
+                        eprintln!("Warning: failed to sync output file: {}", e);
+                    }
+                    result
                 } else {
                     let mut writer = file;
-                    run_logger(&timer, &mut rx, &mut writer).await
+                    let result = run_logger(&timer, &mut rx, &mut writer).await;
+                    // Ensure data is flushed to disk for crash durability
+                    if let Err(e) = writer.sync_output() {
+                        eprintln!("Warning: failed to sync output file: {}", e);
+                    }
+                    result
                 }
 
                 #[cfg(not(feature = "compression"))]
                 {
                     let mut writer = file;
-                    run_logger(&timer, &mut rx, &mut writer).await
+                    let result = run_logger(&timer, &mut rx, &mut writer).await;
+                    // Ensure data is flushed to disk for crash durability
+                    if let Err(e) = writer.sync_output() {
+                        eprintln!("Warning: failed to sync output file: {}", e);
+                    }
+                    result
                 }
             }
             None => {
