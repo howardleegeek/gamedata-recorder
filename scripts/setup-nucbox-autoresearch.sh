@@ -46,7 +46,10 @@ fi
 # 5. Clone gamedata-recorder
 cd ~
 if [ ! -d gamedata-recorder ]; then
-    git clone https://github.com/howardleegeek/gamedata-recorder.git
+    if ! git clone https://github.com/howardleegeek/gamedata-recorder.git; then
+        echo "Error: Failed to clone gamedata-recorder repository"
+        exit 1
+    fi
 fi
 cd gamedata-recorder
 if ! git pull 2>/dev/null; then
@@ -66,7 +69,7 @@ fi
 echo
 echo "=== Verification ==="
 BUN_VERSION=$(bun --version 2>/dev/null || echo "MISSING")
-OPENCODE_VERSION=$(~/.opencode/bin/opencode --version 2>/dev/null || echo "MISSING")
+OPENCODE_VERSION=$(command -v opencode &>/dev/null && opencode --version 2>/dev/null || $HOME/.opencode/bin/opencode --version 2>/dev/null || echo "MISSING")
 CARGO_VERSION=$(cargo --version 2>/dev/null || echo "MISSING")
 JQ_VERSION=$(jq --version 2>/dev/null || echo "MISSING")
 REPO_STATUS=$(git -C ~/gamedata-recorder log -1 --oneline 2>/dev/null || echo "MISSING")
