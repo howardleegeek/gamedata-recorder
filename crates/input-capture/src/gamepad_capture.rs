@@ -279,6 +279,26 @@ pub fn initialize_thread(
             while let Some(gilrs_wgi::Event { id, event, .. }) = gilrs.next_event_blocking(None) {
                 let gamepad = gilrs.gamepad(id);
                 let gamepad_id = GamepadId::WGI(id.into());
+
+                // Handle disconnection events to clean up stale state
+                if matches!(
+                    event,
+                    gilrs_wgi::EventType::Disconnected | gilrs_wgi::EventType::Dropped
+                ) {
+                    let mut active_guard = match active_gamepads.lock() {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            tracing::error!(
+                                "Active gamepads lock poisoned (wgi), stopping capture: {e}"
+                            );
+                            break;
+                        }
+                    };
+                    active_guard.devices.remove(&gamepad_id);
+                    drop(active_guard);
+                    continue;
+                }
+
                 let gamepad_name = sanitize_gamepad_name(gamepad.name(), id.into());
 
                 // Only update metadata on first encounter to reduce lock contention
@@ -326,7 +346,7 @@ pub fn initialize_thread(
                     }
                 }
 
-                let Some(event) = map_event_wgi(GamepadId::WGI(id.into()), event) else {
+                let Some(event) = map_event_wgi(gamepad_id, event) else {
                     continue;
                 };
 
