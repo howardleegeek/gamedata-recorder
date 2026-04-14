@@ -206,7 +206,6 @@ pub async fn upload_folder(
                 .file_name()
                 .ok_or_else(|| UploadFolderError::MissingFilename(path.to_owned()))?
                 .to_string_lossy()
-                .as_ref()
                 .to_string())
         }
 
