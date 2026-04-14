@@ -1,8 +1,33 @@
 """Run: python3 test_api.py"""
+import atexit
 from main import app
 from fastapi.testclient import TestClient
 
 client = TestClient(app)
+
+# Track resources for cleanup
+_test_user_id = None
+_test_upload_id = None
+
+
+def cleanup_test_data():
+    """Cleanup test data to prevent database pollution between runs."""
+    global _test_user_id, _test_upload_id
+    try:
+        if _test_upload_id:
+            # Attempt to clean up upload if API supports deletion
+            client.delete(f"/api/v1/uploads/{_test_upload_id}")
+        if _test_user_id:
+            # Note: User deletion would require admin privileges
+            # This is a best-effort cleanup
+            pass
+    except Exception:
+        # Cleanup failures should not mask test results
+        pass
+
+
+# Register cleanup to run on exit
+atexit.register(cleanup_test_data)
 
 # 1. Health
 r = client.get("/health")
@@ -14,6 +39,7 @@ r = client.post("/api/v1/auth/login", json={"email": "gamer@test.com", "password
 assert r.status_code == 200
 token = r.json()["token"]
 user_id = r.json()["user_id"]
+_test_user_id = user_id  # Track for cleanup
 print(f"[PASS] Login: user_id={user_id}")
 
 headers = {"Authorization": f"Bearer {token}"}
@@ -35,6 +61,7 @@ r = client.post("/api/v1/upload/init", headers=headers, json={
 })
 assert r.status_code == 200
 upload_id = r.json()["upload_id"]
+_test_upload_id = upload_id  # Track for cleanup
 print(f"[PASS] Upload init: {upload_id}, chunks={r.json()['total_chunks']}")
 
 # 5. Upload chunk URL

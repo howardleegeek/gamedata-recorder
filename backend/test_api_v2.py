@@ -39,6 +39,13 @@ async def override_get_db():
 app.dependency_overrides[get_db] = override_get_db
 
 
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def cleanup_test_engine():
+    """Cleanup fixture to dispose test engine after all tests."""
+    yield
+    await test_engine.dispose()
+
+
 @pytest_asyncio.fixture(scope="function")
 async def client():
     """Create test client."""
