@@ -108,6 +108,10 @@ if WinExist("ahk_exe OWL Control.exe") {
         }
         if (coords.Length = 3) {
             repeat := coords[3]
+            if (repeat < 1 || repeat > 100) {
+                MsgBox("Invalid repeat count: must be between 1 and 100, got " . repeat)
+                ExitApp()
+            }
             loop repeat {
                 MouseClick "left", coords[1], coords[2]
                 y := (coords[2] + (A_Index) * option_offset) - collapse_offset
