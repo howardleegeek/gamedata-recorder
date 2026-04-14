@@ -67,6 +67,13 @@ pub fn build_actions(
     trajectories: &[Trajectory],
     fps: f64,
 ) -> Vec<Action> {
+    // Validate FPS to prevent division by zero and ensure valid frame calculations
+    let fps = if fps > 0.0 && fps.is_finite() {
+        fps
+    } else {
+        tracing::warn!("Invalid FPS value: {}. Using default 60.0", fps);
+        60.0
+    };
     let frame_interval_ns = (1_000_000_000.0 / fps) as u64;
     let mut actions = Vec::new();
     let mut action_index: u32 = 0;
