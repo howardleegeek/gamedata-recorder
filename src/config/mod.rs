@@ -7,14 +7,22 @@ use std::{collections::HashMap, fs, path::PathBuf};
 
 /// Maximum allowed length for API key to prevent DoS from malicious config files
 const MAX_API_KEY_LENGTH: usize = 2048;
+/// Maximum allowed length for hotkey strings to prevent DoS from malicious config files
+const MAX_HOTKEY_LENGTH: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 // camel case renames are legacy from old existing configs, we want it to be backwards-compatible with previous owl releases that used electron
 #[serde(rename_all = "camelCase")]
 pub struct Preferences {
-    #[serde(default = "default_start_key")]
+    #[serde(
+        default = "default_start_key",
+        deserialize_with = "validate_hotkey_length"
+    )]
     pub start_recording_key: String,
-    #[serde(default = "default_stop_key")]
+    #[serde(
+        default = "default_stop_key",
+        deserialize_with = "validate_hotkey_length"
+    )]
     pub stop_recording_key: String,
     #[serde(default)]
     pub stop_hotkey_enabled: bool,
@@ -223,6 +231,25 @@ where
         return Err(Error::custom(format!(
             "API key exceeds maximum length of {} characters",
             MAX_API_KEY_LENGTH
+        )));
+    }
+
+    Ok(key)
+}
+
+/// Validates hotkey string length to prevent DoS from malicious config files with
+/// extremely large strings that could cause memory exhaustion.
+fn validate_hotkey_length<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    let key = String::deserialize(deserializer)?;
+
+    if key.len() > MAX_HOTKEY_LENGTH {
+        return Err(Error::custom(format!(
+            "Hotkey exceeds maximum length of {} characters",
+            MAX_HOTKEY_LENGTH
         )));
     }
 
