@@ -932,10 +932,14 @@ fn delete_recording_confirmation_window(
                     ui.add_space(4.0);
 
                     ui.horizontal(|ui| {
+                        // Calculate widths upfront since available_width() changes after each widget
+                        let full_width = ui.available_width();
+                        let half_width = full_width / 2.0;
+
                         // Cancel button
                         if ui
                             .add_sized(
-                                vec2(ui.available_width() / 2.0, 32.0),
+                                vec2(half_width, 32.0),
                                 Button::new(RichText::new("Cancel").size(13.0)),
                             )
                             .clicked()
@@ -946,7 +950,7 @@ fn delete_recording_confirmation_window(
                         // Really Delete button
                         if ui
                             .add_sized(
-                                vec2(ui.available_width(), 32.0),
+                                vec2(half_width, 32.0),
                                 Button::new(
                                     RichText::new("Really Delete")
                                         .size(13.0)
