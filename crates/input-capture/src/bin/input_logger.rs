@@ -17,6 +17,7 @@ use input_capture::{Event, PressState, timestamp::HighPrecisionTimer, vkey_names
 struct Args {
     compress: bool,
     output: Option<String>,
+    #[cfg(feature = "compression")]
     level: i32,
 }
 
@@ -25,6 +26,7 @@ impl Args {
         let args: Vec<String> = std::env::args().collect();
         let mut compress = false;
         let mut output = None;
+        #[cfg(feature = "compression")]
         let mut level = 3; // Default zstd compression level
 
         let mut i = 1;
@@ -39,6 +41,7 @@ impl Args {
                         eprintln!("Warning: --output requires a file path argument");
                     }
                 }
+                #[cfg(feature = "compression")]
                 "--level" | "-l" => {
                     if i + 1 < args.len() {
                         if let Ok(l) = args[i + 1].parse::<i32>() {
@@ -61,6 +64,7 @@ impl Args {
         Self {
             compress,
             output,
+            #[cfg(feature = "compression")]
             level,
         }
     }
