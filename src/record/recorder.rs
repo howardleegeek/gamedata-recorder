@@ -75,7 +75,7 @@ impl Recorder {
         let backend = app_state
             .config
             .read()
-            .unwrap()
+            .map_err(|_| color_eyre::eyre::eyre!("config lock poisoned"))?
             .preferences
             .recording_backend;
         tracing::debug!("Recording backend: {:?}", backend);
@@ -196,7 +196,8 @@ impl Recorder {
         );
 
         let params = {
-            let config = self.app_state.config.read().unwrap();
+            let config = self.app_state.config.read()
+                .map_err(|_| color_eyre::eyre::eyre!("config lock poisoned"))?;
             RecordingParams {
                 recording_location: recording_location.clone(),
                 game_exe: game_exe.clone(),
@@ -225,7 +226,8 @@ impl Recorder {
         delete_recording_on_exit.disarm();
 
         self.recording = Some(recording);
-        *self.app_state.state.write().unwrap() = RecordingStatus::Recording {
+        *self.app_state.state.write()
+            .map_err(|_| color_eyre::eyre::eyre!("state lock poisoned"))? = RecordingStatus::Recording {
             start_time: Instant::now(),
             game_exe,
             current_fps: None,
@@ -263,7 +265,8 @@ impl Recorder {
                 input_capture,
             )
             .await?;
-        *self.app_state.state.write().unwrap() = RecordingStatus::Stopped;
+        *self.app_state.state.write()
+            .map_err(|_| color_eyre::eyre::eyre!("state lock poisoned"))? = RecordingStatus::Stopped;
 
         tracing::info!("Recording stopped");
         Ok(())
@@ -272,7 +275,10 @@ impl Recorder {
     pub async fn poll(&mut self) {
         let update = self.video_recorder.poll().await;
         if let Some(fps) = update.active_fps {
-            let mut state = self.app_state.state.write().unwrap();
+            let Ok(mut state) = self.app_state.state.write() else {
+                tracing::error!("state lock poisoned, cannot update FPS");
+                return;
+            };
             if let RecordingStatus::Recording { current_fps, .. } = &mut *state {
                 *current_fps = Some(fps);
             }
