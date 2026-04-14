@@ -1,4 +1,4 @@
-use std::sync::LazyLock;
+use std::{collections::HashMap, sync::LazyLock};
 
 // https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes
 //
