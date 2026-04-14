@@ -32,8 +32,11 @@ cp requirements.txt "$DEPLOY_DIR/"
 
 # Create .env if not exists
 if [ ! -f "$DEPLOY_DIR/.env" ]; then
-    cat > "$DEPLOY_DIR/.env" << 'ENV'
-API_SECRET=change-me-to-a-random-string
+    # Generate a cryptographically secure random API secret
+    # Using openssl for portability - produces 32 bytes of random hex (64 chars)
+    GENERATED_SECRET=$(openssl rand -hex 32 2>/dev/null || python3 -c "import secrets; print(secrets.token_hex(32))")
+    cat > "$DEPLOY_DIR/.env" << ENV
+API_SECRET=$GENERATED_SECRET
 S3_BUCKET=gamedata-recordings
 S3_REGION=us-east-1
 # AWS_ACCESS_KEY_ID=
@@ -41,7 +44,8 @@ S3_REGION=us-east-1
 DATA_DIR=/var/lib/gamedata
 PORT=8080
 ENV
-    echo "Created .env file at $DEPLOY_DIR/.env — please edit with your credentials"
+    echo "Created .env file at $DEPLOY_DIR/.env with auto-generated API_SECRET"
+    echo "⚠️  Review other settings in the .env file before production use"
 fi
 
 # Create systemd service
