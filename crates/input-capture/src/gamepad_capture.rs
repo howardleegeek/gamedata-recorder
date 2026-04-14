@@ -338,16 +338,30 @@ macro_rules! generate_map_functions {
                     key: $map_button(button),
                     press_state: PressState::Released,
                 }),
-                EventType::ButtonChanged(button, value, _) => Some(Event::GamepadButtonChange {
-                    id: gamepad_id,
-                    key: $map_button(button),
-                    value,
-                }),
-                EventType::AxisChanged(axis, value, _) => Some(Event::GamepadAxisChange {
-                    id: gamepad_id,
-                    axis: $map_axis(axis),
-                    value,
-                }),
+                EventType::ButtonChanged(button, value, _) => {
+                    // Validate value is finite to prevent NaN/Infinity from propagating downstream
+                    if !value.is_finite() {
+                        tracing::warn!("Ignoring non-finite button value: {}", value);
+                        return None;
+                    }
+                    Some(Event::GamepadButtonChange {
+                        id: gamepad_id,
+                        key: $map_button(button),
+                        value,
+                    })
+                }
+                EventType::AxisChanged(axis, value, _) => {
+                    // Validate value is finite to prevent NaN/Infinity from propagating downstream
+                    if !value.is_finite() {
+                        tracing::warn!("Ignoring non-finite axis value: {}", value);
+                        return None;
+                    }
+                    Some(Event::GamepadAxisChange {
+                        id: gamepad_id,
+                        axis: $map_axis(axis),
+                        value,
+                    })
+                }
                 EventType::ButtonRepeated(..)
                 | EventType::Connected
                 | EventType::Disconnected
