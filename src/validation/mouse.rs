@@ -95,7 +95,9 @@ fn get_stats(input: &super::ValidationInput) -> MouseStats {
                 tracing::warn!("Mouse event timestamp too large, exceeds valid frame range");
                 continue;
             }
-            let frame = frame_index as i32;
+            // Round to nearest frame to prevent floating-point precision errors
+            // from causing events near frame boundaries to be assigned to wrong frames
+            let frame = frame_index.round() as i32;
             let entry = frame_data.entry(frame).or_default();
             entry.dx += dx as f64;
             entry.dy += dy as f64;
