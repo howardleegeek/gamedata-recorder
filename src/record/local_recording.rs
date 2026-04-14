@@ -7,6 +7,7 @@ use std::{
 use color_eyre::{Result, eyre};
 use egui_wgpu::wgpu;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 
 use crate::{
     api::{ApiClient, ApiError, CompleteMultipartUploadChunk},
@@ -617,7 +618,10 @@ impl LocalRecording {
         // Prevents corruption if the process crashes mid-write.
         let metadata_json = serde_json::to_string_pretty(&metadata)?;
         let temp_path = metadata_path.with_extension("json.tmp");
-        tokio::fs::write(&temp_path, &metadata_json).await?;
+        let mut file = tokio::fs::File::create(&temp_path).await?;
+        file.write_all(metadata_json.as_bytes()).await?;
+        file.sync_all().await?;
+        drop(file);
         tokio::fs::rename(&temp_path, &metadata_path).await?;
 
         // Validate the recording immediately after stopping to create [`constants::filename::recording::INVALID`] file if needed
