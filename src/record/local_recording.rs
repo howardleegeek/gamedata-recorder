@@ -119,6 +119,11 @@ impl UploadProgressState {
         }
 
         writer.flush()?;
+
+        // Sync to disk to prevent data loss on system crash
+        let file = writer.into_inner()?;
+        file.sync_all()?;
+
         Ok(())
     }
 
