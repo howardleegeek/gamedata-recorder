@@ -168,9 +168,14 @@ pub async fn upload_folder(
             )
         })?;
 
-        let file_size = std::fs::metadata(tar_path)
-            .map(|m| m.len())
-            .map_err(|e| UploadFolderError::FailedToGetFileSize(tar_path.to_owned(), e))?;
+        // Use spawn_blocking to avoid blocking the async runtime with filesystem I/O
+        let file_size = tokio::task::spawn_blocking({
+            let tar_path = tar_path.to_path_buf();
+            move || std::fs::metadata(&tar_path).map(|m| m.len())
+        })
+        .await
+        .map_err(|e| UploadFolderError::Io(std::io::Error::other(e)))?
+        .map_err(|e| UploadFolderError::FailedToGetFileSize(tar_path.to_path_buf(), e))?;
 
         fn get_filename(path: &Path) -> Result<String, UploadFolderError> {
             Ok(path
