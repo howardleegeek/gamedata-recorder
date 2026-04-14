@@ -58,7 +58,6 @@ InitUIVars() {
     upload_button := Array(383, 946)
     FAQ_button := Array(32, 1002)
     logs_button := Array(76, 1002)
-    logs_button := Array(76, 1002)
     website_button := Array(689, 1002)
     return
 }
