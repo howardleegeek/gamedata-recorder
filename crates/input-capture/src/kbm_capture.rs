@@ -4,35 +4,34 @@ use std::{
 };
 
 use color_eyre::{
+    eyre::{bail, Context},
     Result,
-    eyre::{Context, bail},
 };
 
 use windows::{
+    core::PCSTR,
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleA,
         UI::{
             Input::{
-                self, GetRawInputData, HRAWINPUT,
+                self, GetRawInputData,
                 KeyboardAndMouse::{VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2},
-                MOUSE_MOVE_ABSOLUTE, MOUSE_VIRTUAL_DESKTOP, RAWINPUT, RAWINPUTDEVICE,
-                RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RegisterRawInputDevices,
+                RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, MOUSE_VIRTUAL_DESKTOP,
+                RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RID_INPUT,
             },
             WindowsAndMessaging::{
                 self, CreateWindowExA, DefWindowProcA, DestroyWindow, DispatchMessageA,
-                GetMessageA, GetSystemMetrics, HWND_MESSAGE, MSG, PostQuitMessage, RI_KEY_BREAK,
-                RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
-                RI_MOUSE_BUTTON_5_UP, RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP,
-                RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN,
-                RI_MOUSE_RIGHT_BUTTON_UP, RI_MOUSE_WHEEL, RegisterClassA, SM_CXSCREEN,
-                SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-                SM_YVIRTUALSCREEN, TranslateMessage, UnregisterClassA, WINDOW_EX_STYLE,
-                WINDOW_STYLE, WNDCLASSA,
+                GetMessageA, GetSystemMetrics, PostQuitMessage, RegisterClassA, TranslateMessage,
+                UnregisterClassA, HWND_MESSAGE, MSG, RI_KEY_BREAK, RI_MOUSE_BUTTON_4_DOWN,
+                RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_BUTTON_5_UP,
+                RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP, RI_MOUSE_MIDDLE_BUTTON_DOWN,
+                RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN, RI_MOUSE_RIGHT_BUTTON_UP,
+                RI_MOUSE_WHEEL, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
+                SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSA,
             },
         },
     },
-    core::PCSTR,
 };
 
 use crate::{Event, PressState};
@@ -57,7 +56,10 @@ impl Drop for KbmCapture {
             match DestroyWindow(self.hwnd) {
                 Ok(_) => {
                     if let Err(e) = UnregisterClassA(self.class_name, Some(self.h_instance)) {
-                        tracing::error!("Failed to unregister window class during cleanup: {:?}", e);
+                        tracing::error!(
+                            "Failed to unregister window class during cleanup: {:?}",
+                            e
+                        );
                     }
                 }
                 Err(e) => {
@@ -115,11 +117,8 @@ impl KbmCapture {
                 hwndTarget: hwnd,
             });
 
-            RegisterRawInputDevices(
-                &raw_input_devices,
-                size_of::<RAWINPUTDEVICE>() as u32,
-            )
-            .wrap_err("failed to register raw input devices")?;
+            RegisterRawInputDevices(&raw_input_devices, size_of::<RAWINPUTDEVICE>() as u32)
+                .wrap_err("failed to register raw input devices")?;
 
             Ok(Self {
                 hwnd,
@@ -135,7 +134,22 @@ impl KbmCapture {
             let mut msg = MSG::default();
             let mut last_absolute: Option<(i32, i32)> = None;
 
-            while GetMessageA(&mut msg, None, 0, 0).as_bool() {
+            // GetMessageA returns:
+            // - 0 if WM_QUIT is received (exit loop)
+            // - -1 if an error occurs (handle error)
+            // - positive non-zero if a message is retrieved
+            // We must check for -1 explicitly; .as_bool() would treat it as true.
+            loop {
+                let result = GetMessageA(&mut msg, None, 0, 0);
+                let result_i32 = result.0;
+                if result_i32 == 0 {
+                    break; // WM_QUIT received
+                }
+                if result_i32 < 0 {
+                    use windows::Win32::Foundation::GetLastError;
+                    let error = GetLastError();
+                    bail!("GetMessageA failed: {error:?}");
+                }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageA(&msg);
 
