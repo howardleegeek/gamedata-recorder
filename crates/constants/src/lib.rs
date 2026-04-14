@@ -255,7 +255,6 @@ pub const GAME_WHITELIST: &[&str] = &[
     "helldivers2",
     // Wuthering Waves
     "wutheringwaves",
-    "client-win64-shipping",
     // Black Myth: Wukong
     "b1-win64-shipping",
     // Grand Theft Auto: San Andreas
