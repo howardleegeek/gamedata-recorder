@@ -87,7 +87,8 @@ impl ProgressSender {
             0.0
         };
 
-        self.tx
+        if let Err(e) = self
+            .tx
             .send(UiUpdateUnreliable::UpdateUploadProgress(Some(
                 ProgressData {
                     bytes_uploaded: self.bytes_uploaded,
@@ -105,7 +106,8 @@ impl ProgressSender {
                     },
                     file_progress: self.file_progress.clone(),
                 },
-            ))) {
+            )))
+        {
             tracing::warn!("Failed to send upload progress update: {}", e);
         }
     }
