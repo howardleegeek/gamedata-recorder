@@ -32,13 +32,16 @@ impl From<GamepadStats> for GamepadOutputStats {
 pub(super) fn validate(input: &super::ValidationInput) -> (GamepadOutputStats, Vec<String>) {
     let mut invalid_reasons = vec![];
 
-    // Validate duration is non-negative to prevent invalid APM calculations
-    if input.duration_minutes < 0.0 {
+    // Validate duration is non-negative and finite to prevent invalid APM calculations
+    if input.duration_minutes < 0.0 || !input.duration_minutes.is_finite() {
         invalid_reasons.push(format!(
-            "Gamepad validation failed: negative duration {}",
+            "Gamepad validation failed: invalid duration {}",
             input.duration_minutes
         ));
-        return (GamepadOutputStats::from(GamepadStats::default()), invalid_reasons);
+        return (
+            GamepadOutputStats::from(GamepadStats::default()),
+            invalid_reasons,
+        );
     }
 
     let stats = get_stats(input);
