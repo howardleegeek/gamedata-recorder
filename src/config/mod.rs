@@ -1,8 +1,6 @@
 use color_eyre::eyre::{eyre, Context, Result};
 use constants::encoding::VideoEncoderType;
 use serde::{Deserialize, Deserializer, Serialize};
-#[cfg(unix)]
-use std::os::unix::fs::DirBuilderExt;
 use std::{collections::HashMap, fs, io::Write, path::PathBuf};
 
 #[cfg(unix)]
