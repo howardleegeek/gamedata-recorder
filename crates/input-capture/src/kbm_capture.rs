@@ -110,13 +110,11 @@ impl KbmCapture {
                 hwndTarget: hwnd,
             });
 
-            RegisterRawInputDevices(
-                &raw_input_devices,
-                size_of::<RAWINPUTDEVICE>()
-                    .try_into()
-                    .expect("size of RAWINPUTDEVICE should fit in u32"),
-            )
-            .wrap_err("failed to register raw input devices")?;
+            let device_count = size_of::<RAWINPUTDEVICE>()
+                .try_into()
+                .wrap_err("size of RAWINPUTDEVICE should fit in u32")?;
+            RegisterRawInputDevices(&raw_input_devices, device_count)
+                .wrap_err("failed to register raw input devices")?;
 
             Ok(Self {
                 hwnd,
@@ -337,14 +335,19 @@ impl KbmCapture {
             let hrawinput = HRAWINPUT(lparam.0 as *mut _);
             let mut rawinput = RAWINPUT::default();
             let mut pcbsize = size_of_val(&rawinput) as u32;
+            let header_size = match size_of::<RAWINPUTHEADER>().try_into() {
+                Ok(size) => size,
+                Err(e) => {
+                    tracing::error!("size of RAWINPUTHEADER should fit in u32: {e}");
+                    return Vec::new();
+                }
+            };
             let result = GetRawInputData(
                 hrawinput,
                 RID_INPUT,
                 Some(&mut rawinput as *mut _ as *mut _),
                 &mut pcbsize,
-                size_of::<RAWINPUTHEADER>()
-                    .try_into()
-                    .expect("size of HRAWINPUT should fit in u32"),
+                header_size,
             );
             if result == u32::MAX {
                 return Vec::new();
