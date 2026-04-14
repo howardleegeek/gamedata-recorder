@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use backoff::{Error as BackoffError, ExponentialBackoff, future::retry_notify};
+use backoff::{future::retry_notify, Error as BackoffError, ExponentialBackoff};
 
 use futures::TryStreamExt as _;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
@@ -444,7 +444,7 @@ pub async fn run(
 
                     // Create a stream that wraps chunk_data and tracks upload progress
                     let progress_stream =
-                        tokio_util::io::ReaderStream::new(std::io::Cursor::new(chunk_data.clone()))
+                        tokio_util::io::ReaderStream::new(std::io::Cursor::new(&chunk_data))
                             .inspect_ok({
                                 let progress_sender = progress_sender.clone();
                                 move |bytes| {
