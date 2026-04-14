@@ -170,9 +170,11 @@ impl VideoRecorder for ObsEmbeddedRecorder {
             .await
             .is_err()
         {
-            return false;
+            // Channel closed - OBS thread likely panicked, treat as timeout
+            return true;
         }
-        result_rx.await.unwrap_or(false)
+        // If the sender was dropped (OBS thread panic), return true to stop recording
+        result_rx.await.unwrap_or(true)
     }
 }
 
