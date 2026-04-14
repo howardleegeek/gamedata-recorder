@@ -1,6 +1,6 @@
 # Input Recording Format
 
-This document describes the format of the `inputs.csv` file produced by owl-control's recording system.
+This document describes the format of the `inputs.csv` file produced by GameData Recorder's recording system.
 
 ## Overview
 
