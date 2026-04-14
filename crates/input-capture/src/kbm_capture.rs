@@ -4,35 +4,34 @@ use std::{
 };
 
 use color_eyre::{
+    eyre::{bail, Context},
     Result,
-    eyre::{Context, bail},
 };
 
 use windows::{
+    core::PCSTR,
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleA,
         UI::{
             Input::{
-                self, GetRawInputData, HRAWINPUT,
+                self, GetRawInputData,
                 KeyboardAndMouse::{VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2},
-                MOUSE_MOVE_ABSOLUTE, MOUSE_VIRTUAL_DESKTOP, RAWINPUT, RAWINPUTDEVICE,
-                RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RegisterRawInputDevices,
+                RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, MOUSE_VIRTUAL_DESKTOP,
+                RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RID_INPUT,
             },
             WindowsAndMessaging::{
                 self, CreateWindowExA, DefWindowProcA, DestroyWindow, DispatchMessageA,
-                GetMessageA, GetSystemMetrics, HWND_MESSAGE, MSG, PostQuitMessage, RI_KEY_BREAK,
-                RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
-                RI_MOUSE_BUTTON_5_UP, RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP,
-                RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN,
-                RI_MOUSE_RIGHT_BUTTON_UP, RI_MOUSE_WHEEL, RegisterClassA, SM_CXSCREEN,
-                SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-                SM_YVIRTUALSCREEN, TranslateMessage, UnregisterClassA, WINDOW_EX_STYLE,
-                WINDOW_STYLE, WNDCLASSA,
+                GetMessageA, GetSystemMetrics, PostQuitMessage, RegisterClassA, TranslateMessage,
+                UnregisterClassA, HWND_MESSAGE, MSG, RI_KEY_BREAK, RI_MOUSE_BUTTON_4_DOWN,
+                RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_BUTTON_5_UP,
+                RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP, RI_MOUSE_MIDDLE_BUTTON_DOWN,
+                RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN, RI_MOUSE_RIGHT_BUTTON_UP,
+                RI_MOUSE_WHEEL, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
+                SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSA,
             },
         },
     },
-    core::PCSTR,
 };
 
 use crate::{Event, PressState};
@@ -341,8 +340,6 @@ impl KbmCapture {
     ) -> Vec<Event> {
         unsafe {
             let hrawinput = HRAWINPUT(lparam.0 as *mut _);
-            let mut rawinput = RAWINPUT::default();
-            let mut pcbsize = size_of_val(&rawinput) as u32;
             let header_size = match size_of::<RAWINPUTHEADER>().try_into() {
                 Ok(size) => size,
                 Err(e) => {
@@ -350,10 +347,21 @@ impl KbmCapture {
                     return Vec::new();
                 }
             };
+
+            // Query required buffer size first - some devices send larger data
+            let mut pcbsize: u32 = 0;
+            let size_result =
+                GetRawInputData(hrawinput, RID_INPUT, None, &mut pcbsize, header_size);
+            if size_result == u32::MAX {
+                return Vec::new();
+            }
+
+            // Allocate buffer with required size (handles oversized input data)
+            let mut buffer: Vec<u8> = vec![0; pcbsize as usize];
             let result = GetRawInputData(
                 hrawinput,
                 RID_INPUT,
-                Some(&mut rawinput as *mut _ as *mut _),
+                Some(buffer.as_mut_ptr() as *mut _),
                 &mut pcbsize,
                 header_size,
             );
@@ -361,6 +369,7 @@ impl KbmCapture {
                 return Vec::new();
             }
 
+            let rawinput = &*(buffer.as_ptr() as *const RAWINPUT);
             match Input::RID_DEVICE_INFO_TYPE(rawinput.header.dwType) {
                 Input::RIM_TYPEMOUSE => {
                     let mut events = Vec::new();
