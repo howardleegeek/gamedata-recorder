@@ -532,7 +532,7 @@ impl RecorderState {
                         tokio::select! {
                             r = start_signal_rx.recv() => {
                                 if r.is_ok() {
-                                    if last_application.as_ref().is_some_and(|a| a == &(game_exe.clone(), hwnd.clone())) {
+                                    if last_application.as_ref().is_some_and(|a| a.0 == game_exe && a.1 .0 == hwnd.0) {
                                         tracing::warn!("Video started again for last game, assuming we're already hooked");
                                         let _ = event_stream.send(InputEventType::HookStart);
                                         was_hooked.store(true, Ordering::Relaxed);
