@@ -4,7 +4,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use color_eyre::{Result, eyre};
+use color_eyre::{eyre, Result};
 use egui_wgpu::wgpu;
 use serde::{Deserialize, Serialize};
 
@@ -62,6 +62,10 @@ impl UploadProgressState {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        // Prevent overflow: if expires_at exceeds i64::MAX, treat as expired
+        if self.expires_at > i64::MAX as u64 {
+            return -1;
+        }
         self.expires_at as i64 - now as i64
     }
 
