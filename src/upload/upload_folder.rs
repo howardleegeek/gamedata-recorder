@@ -41,21 +41,45 @@ impl TarFileGuard {
 impl Drop for TarFileGuard {
     fn drop(&mut self) {
         if let Some(path) = self.path.take() {
-            // Offload blocking I/O to a blocking thread to avoid stalling the async runtime
-            let _ = tokio::task::spawn_blocking(move || {
+            // Try to offload blocking I/O to a blocking thread to avoid stalling the async runtime.
+            // If spawn_blocking fails (e.g., during runtime shutdown), fall back to synchronous cleanup.
+            let cleanup_result = tokio::task::spawn_blocking(move || {
                 if let Err(e) = std::fs::remove_file(&path) {
                     tracing::warn!(
                         "Tar file guard triggered but failed to clean up tar file at {}: {}",
                         path.display(),
                         e
                     );
+                    Err(e)
                 } else {
                     tracing::info!(
                         "Tar file guard triggered, cleaned up tar file at {}",
                         path.display()
                     );
+                    Ok(())
                 }
             });
+
+            // Handle spawn_blocking failure - runtime might be shutting down
+            if let Err(e) = cleanup_result {
+                tracing::warn!(
+                    "Failed to spawn blocking task for tar cleanup (runtime shutting down?), attempting synchronous cleanup: {}",
+                    e
+                );
+                // Fallback to synchronous cleanup to prevent resource leak
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::warn!(
+                        "Synchronous tar file cleanup also failed for {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    tracing::info!(
+                        "Synchronous tar file guard cleanup succeeded for {}",
+                        path.display()
+                    );
+                }
+            }
         }
     }
 }
