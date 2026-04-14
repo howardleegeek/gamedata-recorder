@@ -230,7 +230,7 @@ pub async fn run(
             async move {
                 // If resuming, seek to the correct position in the file
                 if start_chunk > 1 {
-                    let bytes_to_skip = (start_chunk - 1) * chunk_size_bytes;
+                    let bytes_to_skip = (start_chunk - 1).saturating_mul(chunk_size_bytes);
                     if let Err(e) = file.seek(std::io::SeekFrom::Start(bytes_to_skip)).await {
                         return Err(UploadTarError::Io(e));
                     }
