@@ -18,11 +18,11 @@ sudo apt-get update -qq
 sudo apt-get install -y -qq \
     git curl jq python3 python3-pip python3-venv \
     build-essential pkg-config libssl-dev \
-    ripgrep
+    ripgrep procps
 
 # 2. Install Bun (OpenCode runtime)
 if ! command -v bun &>/dev/null; then
-    curl -fsSL https://bun.sh/install | bash
+    curl -fsSL --connect-timeout 30 --max-time 300 https://bun.sh/install | bash
 fi
 export PATH="$HOME/.bun/bin:$PATH"
 
