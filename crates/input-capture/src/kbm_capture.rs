@@ -174,7 +174,9 @@ impl KbmCapture {
     }
 
     fn active_keys(&self) -> MutexGuard<'_, ActiveKeys> {
-        self.active_keys.lock().unwrap()
+        self.active_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Parse raw input from GetRawInputBuffer batch reading.
