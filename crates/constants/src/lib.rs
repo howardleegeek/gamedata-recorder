@@ -276,6 +276,13 @@ pub const RECORDING_HEIGHT: u32 = 1080;
 /// Minimum free space required to record (in megabytes)
 pub const MIN_FREE_SPACE_MB: u64 = 512;
 
+/// Critical free space threshold during recording (in megabytes)
+/// When free space drops below this during an active recording,
+/// the recording is stopped gracefully to prevent file corruption.
+/// Set lower than MIN_FREE_SPACE_MB to allow recordings to complete
+/// when disk space is tight but not exhausted.
+pub const CRITICAL_FREE_SPACE_MB: u64 = 128;
+
 /// Minimum footage length
 pub const MIN_FOOTAGE: Duration = Duration::from_secs(20);
 /// Maximum footage length
@@ -283,7 +290,8 @@ pub const MAX_FOOTAGE: Duration = duration_from_mins(10);
 /// Maximum idle duration before stopping recording
 pub const MAX_IDLE_DURATION: Duration = Duration::from_secs(30);
 /// Maximum time to wait for OBS to hook into the application before stopping recording
-pub const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
+/// Extended to 15 seconds to accommodate games with anti-cheat systems that delay hook initialization
+pub const HOOK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Minimum average FPS. We allow some leeway below 60 FPS, but we want to make sure
 /// we aren't getting 30-40 FPS data.

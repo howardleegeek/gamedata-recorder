@@ -182,15 +182,42 @@ pub fn initialize_thread(
                 }
             };
 
-            // Examine new events with periodic shutdown checks
-            loop {
-                if shutdown.load(Ordering::SeqCst) {
-                    tracing::debug!("XInput gamepad capture shutting down");
-                    break;
-                }
+            // Examine new events
+            while let Some(gilrs_xinput::Event { id, event, .. }) = gilrs.next_event_blocking(None)
+            {
+                let gamepad = gilrs.gamepad(id);
+                let gamepad_name = gamepad.name().to_string();
 
-                let event_opt = gilrs.next_event_blocking(Some(POLL_INTERVAL));
-                let Some(gilrs_xinput::Event { id, event, .. }) = event_opt else {
+                // Handle poisoned locks gracefully: if another thread panicked while
+                // holding the lock, log the error and break rather than crashing.
+                let mut gamepads_guard = match gamepads.write() {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        tracing::error!("Gamepads RwLock poisoned (xinput), stopping capture: {e}");
+                        break;
+                    }
+                };
+                gamepads_guard.insert(
+                    GamepadId::XInput(id.into()),
+                    GamepadMetadata {
+                        name: gamepad_name.clone(),
+                        vendor_id: gamepad.vendor_id(),
+                        product_id: gamepad.product_id(),
+                    },
+                );
+                drop(gamepads_guard);
+
+                let mut captured_guard = match already_captured_by_xinput.write() {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        tracing::error!("Captured lock poisoned (xinput), stopping capture: {e}");
+                        break;
+                    }
+                };
+                captured_guard.insert(gamepad_name);
+                drop(captured_guard);
+
+                let Some(event) = map_event_xinput(GamepadId::XInput(id.into()), event) else {
                     continue;
                 };
                 let gamepad = gilrs.gamepad(id);
@@ -313,7 +340,7 @@ pub fn initialize_thread(
                     continue;
                 };
                 let gamepad = gilrs.gamepad(id);
-                let gamepad_id = GamepadId::WGI(id.into());
+                let gamepad_name = gamepad.name().to_string();
 
                 // Handle disconnection events to clean up stale state
                 if matches!(
@@ -336,6 +363,28 @@ pub fn initialize_thread(
                     if let Ok(mut gamepads_guard) = gamepads.write() {
                         gamepads_guard.remove(&gamepad_id);
                     }
+                };
+                gamepads_guard.insert(
+                    GamepadId::WGI(id.into()),
+                    GamepadMetadata {
+                        name: gamepad_name.clone(),
+                        vendor_id: gamepad.vendor_id(),
+                        product_id: gamepad.product_id(),
+                    },
+                );
+                drop(gamepads_guard);
+
+                let captured_guard = match already_captured_by_xinput.read() {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        tracing::error!("Captured lock poisoned (wgi), stopping capture: {e}");
+                        break;
+                    }
+                };
+                let is_captured = captured_guard.contains(&gamepad_name);
+                drop(captured_guard);
+
+                if is_captured {
                     continue;
                 }
 
@@ -457,36 +506,17 @@ macro_rules! generate_map_functions {
                     key: $map_button(button),
                     press_state: PressState::Released,
                 }),
-                EventType::ButtonChanged(button, value, _) => {
-                    // Validate value is finite to prevent NaN/Infinity from propagating downstream
-                    if !value.is_finite() {
-                        tracing::warn!("Ignoring non-finite button value: {}", value);
-                        return None;
-                    }
-                    Some(Event::GamepadButtonChange {
-                        id: gamepad_id,
-                        key: $map_button(button),
-                        value,
-                    })
-                }
-                EventType::AxisChanged(axis, value, _) => {
-                    // Validate value is finite to prevent NaN/Infinity from propagating downstream
-                    if !value.is_finite() {
-                        tracing::warn!("Ignoring non-finite axis value: {}", value);
-                        return None;
-                    }
-                    Some(Event::GamepadAxisChange {
-                        id: gamepad_id,
-                        axis: $map_axis(axis),
-                        value,
-                    })
-                }
-                EventType::ButtonRepeated(..)
-                | EventType::Connected
-                | EventType::Disconnected
-                | EventType::Dropped
-                | EventType::ForceFeedbackEffectCompleted
-                | _ => None,
+                EventType::ButtonChanged(button, value, _) => Some(Event::GamepadButtonChange {
+                    id: gamepad_id,
+                    key: $map_button(button),
+                    value,
+                }),
+                EventType::AxisChanged(axis, value, _) => Some(Event::GamepadAxisChange {
+                    id: gamepad_id,
+                    axis: $map_axis(axis),
+                    value,
+                }),
+                _ => None,
             }
         }
 

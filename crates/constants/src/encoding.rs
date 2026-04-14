@@ -136,6 +136,10 @@ pub const H264_VIDEO_PROFILE: &str = "high";
 /// Bitrate (kbps) — buyer spec: 8-12 Mbps for 1080p30 HEVC
 pub const BITRATE: u64 = 10_000;
 
+/// Audio bitrate (kbps) — AAC encoder default
+/// 160 kbps provides good quality for stereo audio while keeping file sizes reasonable
+pub const AUDIO_BITRATE: i64 = 160;
+
 /// Rate control
 pub const RATE_CONTROL: &str = "CBR";
 

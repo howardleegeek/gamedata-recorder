@@ -420,7 +420,7 @@ impl RecorderState {
         // Create audio encoder upfront (will be reused for all recordings)
         tracing::info!("Creating audio encoder (one-time)");
         let mut audio_settings = obs_context.data()?;
-        audio_settings.set_int("bitrate", 160)?;
+        audio_settings.set_int("bitrate", constants::encoding::AUDIO_BITRATE)?;
         let audio_info =
             AudioEncoderInfo::new("ffmpeg_aac", "audio_encoder", Some(audio_settings), None);
         let audio_encoder =
