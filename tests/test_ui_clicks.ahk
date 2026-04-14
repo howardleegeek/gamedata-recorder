@@ -151,9 +151,57 @@ InitUIVars() {
 
     ; Upload Manager
     move_button := Array(651, 468)
+    if (move_button.Length < 2) {
+        MsgBox("move_button array must have at least 2 elements")
+        ExitApp()
+    }
+    if (move_button[1] < 0 || move_button[1] > 1920) {
+        MsgBox("move_button X coordinate out of bounds: " . move_button[1])
+        ExitApp()
+    }
+    if (move_button[2] < 0 || move_button[2] > 1080) {
+        MsgBox("move_button Y coordinate out of bounds: " . move_button[2])
+        ExitApp()
+    }
     open_button := Array(706, 468)
+    if (open_button.Length < 2) {
+        MsgBox("open_button array must have at least 2 elements")
+        ExitApp()
+    }
+    if (open_button[1] < 0 || open_button[1] > 1920) {
+        MsgBox("open_button X coordinate out of bounds: " . open_button[1])
+        ExitApp()
+    }
+    if (open_button[2] < 0 || open_button[2] > 1080) {
+        MsgBox("open_button Y coordinate out of bounds: " . open_button[2])
+        ExitApp()
+    }
     date_min_button := Array(258, 528)
+    if (date_min_button.Length < 2) {
+        MsgBox("date_min_button array must have at least 2 elements")
+        ExitApp()
+    }
+    if (date_min_button[1] < 0 || date_min_button[1] > 1920) {
+        MsgBox("date_min_button X coordinate out of bounds: " . date_min_button[1])
+        ExitApp()
+    }
+    if (date_min_button[2] < 0 || date_min_button[2] > 1080) {
+        MsgBox("date_min_button Y coordinate out of bounds: " . date_min_button[2])
+        ExitApp()
+    }
     date_max_button := Array(404, 528)
+    if (date_max_button.Length < 2) {
+        MsgBox("date_max_button array must have at least 2 elements")
+        ExitApp()
+    }
+    if (date_max_button[1] < 0 || date_max_button[1] > 1920) {
+        MsgBox("date_max_button X coordinate out of bounds: " . date_max_button[1])
+        ExitApp()
+    }
+    if (date_max_button[2] < 0 || date_max_button[2] > 1080) {
+        MsgBox("date_max_button Y coordinate out of bounds: " . date_max_button[2])
+        ExitApp()
+    }
     /* TODO: grid out calendar coordinates
     291-601 X
     638-747 Y */
