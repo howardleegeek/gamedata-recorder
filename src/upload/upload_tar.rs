@@ -214,7 +214,7 @@ pub async fn run(
             async move {
                 // If resuming, seek to the correct position in the file
                 if start_chunk > 1 {
-                    let bytes_to_skip = (start_chunk - 1) * chunk_size_bytes;
+                    let bytes_to_skip = (start_chunk - 1).saturating_mul(chunk_size_bytes);
                     if let Err(e) = file.seek(std::io::SeekFrom::Start(bytes_to_skip)).await {
                         return Err(UploadTarError::Io(e));
                     }
@@ -353,7 +353,7 @@ pub async fn run(
         });
 
         // Initialize progress sender with bytes already uploaded
-        let bytes_already_uploaded = (start_chunk - 1) * chunk_size_bytes;
+        let bytes_already_uploaded = (start_chunk - 1).saturating_mul(chunk_size_bytes);
         let progress_sender = Arc::new(Mutex::new({
             let mut sender = ProgressSender::new(unreliable_tx.clone(), file_size, file_progress);
             sender.set_bytes_uploaded(bytes_already_uploaded);
