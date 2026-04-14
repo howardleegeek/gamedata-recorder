@@ -711,6 +711,7 @@ async def upload_chunk(
     # Generate S3 presigned URL if configured
     upload_url = None
     if AWS_ACCESS_KEY and AWS_SECRET_KEY and upload.s3_upload_id:
+        s3 = None
         try:
             s3 = boto3.client(
                 "s3",
@@ -731,6 +732,9 @@ async def upload_chunk(
         except Exception as e:
             logger.error(f"Failed to generate chunk URL: {e}")
             raise HTTPException(status_code=500, detail="Failed to generate upload URL")
+        finally:
+            if s3:
+                s3.close()
 
     return {"upload_url": upload_url, "chunk_number": chunk_number}
 
