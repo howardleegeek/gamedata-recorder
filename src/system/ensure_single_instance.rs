@@ -12,8 +12,8 @@ use color_eyre::eyre;
 #[cfg(target_os = "windows")]
 pub fn ensure_single_instance() -> eyre::Result<()> {
     use windows::{
-        core::PCWSTR,
         Win32::{Foundation::ERROR_ALREADY_EXISTS, System::Threading::CreateMutexW},
+        core::PCWSTR,
     };
 
     let mutex_name = "GameData-Recorder-SingleInstance";

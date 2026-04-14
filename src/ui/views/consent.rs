@@ -1,5 +1,5 @@
 use egui::{
-    vec2, Align, Button, CentralPanel, Frame, Layout, Margin, RichText, ScrollArea, TopBottomPanel,
+    Align, Button, CentralPanel, Frame, Layout, Margin, RichText, ScrollArea, TopBottomPanel, vec2,
 };
 
 use crate::ui::views::{App, HEADING_TEXT_SIZE, SUBHEADING_TEXT_SIZE};

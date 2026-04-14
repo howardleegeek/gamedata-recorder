@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{atomic::Ordering, Arc, AtomicBool, Mutex, RwLock},
+    sync::{Arc, AtomicBool, Mutex, RwLock, atomic::Ordering},
     time::Duration,
 };
 

@@ -3,26 +3,26 @@ use std::{
     path::PathBuf,
 };
 
-use color_eyre::{eyre::Context as _, Result};
+use color_eyre::{Result, eyre::Context as _};
 
 use windows::{
-    core::{Error, Owned, PSTR},
     Win32::{
         Foundation::{HWND, STILL_ACTIVE},
         System::{
             Diagnostics::ToolHelp::{
-                CreateToolhelp32Snapshot, Module32First, Module32Next, Process32First,
-                Process32Next, MODULEENTRY32, PROCESSENTRY32, TH32CS_SNAPMODULE,
+                CreateToolhelp32Snapshot, MODULEENTRY32, Module32First, Module32Next,
+                PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPMODULE,
                 TH32CS_SNAPMODULE32, TH32CS_SNAPPROCESS,
             },
             Threading::{
-                GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameA, PROCESS_NAME_NATIVE,
-                PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+                GetExitCodeProcess, OpenProcess, PROCESS_NAME_NATIVE, PROCESS_QUERY_INFORMATION,
+                PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameA,
             },
             WindowsProgramming::HW_PROFILE_INFOA,
         },
         UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
     },
+    core::{Error, Owned, PSTR},
 };
 
 pub use windows;

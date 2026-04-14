@@ -93,14 +93,14 @@ pub fn get_hardware_specs(gpus: Vec<GpuSpecs>) -> Result<HardwareSpecs> {
 /// Returns the resolution of the primary monitor
 pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
     use windows::{
-        core::PCWSTR,
         Win32::{
             Foundation::POINT,
             Graphics::Gdi::{
-                EnumDisplaySettingsW, GetMonitorInfoW, MonitorFromPoint, DEVMODEW,
-                ENUM_CURRENT_SETTINGS, MONITORINFO, MONITORINFOEXW,
+                DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW,
+                MONITORINFO, MONITORINFOEXW, MonitorFromPoint,
             },
         },
+        core::PCWSTR,
     };
 
     // Get the primary monitor handle

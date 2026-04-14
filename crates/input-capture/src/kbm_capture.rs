@@ -224,28 +224,28 @@ impl KbmCapture {
                     let mouse = rawinput.data.mouse;
                     let us_flags = mouse.usFlags.0;
 
-                // Handle mouse movement
-                if mouse.lLastX != 0 || mouse.lLastY != 0 {
-                    let (delta_x, delta_y) = if (us_flags & MOUSE_MOVE_ABSOLUTE.0) != 0 {
-                        let is_virtual_desktop = (us_flags & MOUSE_VIRTUAL_DESKTOP.0) != 0;
-                        let (screen_x, screen_y) = convert_absolute_to_screen_coords(
-                            mouse.lLastX,
-                            mouse.lLastY,
-                            is_virtual_desktop,
-                        );
-                        let delta = last_absolute
-                            .map(|(last_x, last_y)| {
-                                (
-                                    screen_x.saturating_sub(last_x),
-                                    screen_y.saturating_sub(last_y),
-                                )
-                            })
-                            .unwrap_or_default();
-                        *last_absolute = Some((screen_x, screen_y));
-                        delta
-                    } else {
-                        (mouse.lLastX, mouse.lLastY)
-                    };
+                    // Handle mouse movement
+                    if mouse.lLastX != 0 || mouse.lLastY != 0 {
+                        let (delta_x, delta_y) = if (us_flags & MOUSE_MOVE_ABSOLUTE.0) != 0 {
+                            let is_virtual_desktop = (us_flags & MOUSE_VIRTUAL_DESKTOP.0) != 0;
+                            let (screen_x, screen_y) = convert_absolute_to_screen_coords(
+                                mouse.lLastX,
+                                mouse.lLastY,
+                                is_virtual_desktop,
+                            );
+                            let delta = last_absolute
+                                .map(|(last_x, last_y)| {
+                                    (
+                                        screen_x.saturating_sub(last_x),
+                                        screen_y.saturating_sub(last_y),
+                                    )
+                                })
+                                .unwrap_or_default();
+                            *last_absolute = Some((screen_x, screen_y));
+                            delta
+                        } else {
+                            (mouse.lLastX, mouse.lLastY)
+                        };
 
                         if delta_x != 0 || delta_y != 0 {
                             events.push(Event::MouseMove([delta_x, delta_y]));

@@ -1,11 +1,12 @@
 use std::{path::Path, time::Duration};
 
 use color_eyre::{
-    eyre::{Context, OptionExt as _},
     Result,
+    eyre::{Context, OptionExt as _},
 };
-use constants::{encoding::VideoEncoderType, FPS, RECORDING_HEIGHT, RECORDING_WIDTH};
+use constants::{FPS, RECORDING_HEIGHT, RECORDING_WIDTH, encoding::VideoEncoderType};
 use obws::{
+    Client,
     requests::{
         config::SetVideoSettings,
         inputs::{InputId, SetSettings, Volume},
@@ -13,7 +14,6 @@ use obws::{
         scene_items::{Position, Scale, SceneItemTransform, SetTransform},
         scenes::SceneId,
     },
-    Client,
 };
 use windows::Win32::Foundation::{GetLastError, HWND};
 

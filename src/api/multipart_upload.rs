@@ -1,7 +1,7 @@
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 
-use crate::api::{check_for_response_success, ApiClient, ApiError, API_BASE_URL};
+use crate::api::{API_BASE_URL, ApiClient, ApiError, check_for_response_success};
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]
 #[allow(unused)]

@@ -5,7 +5,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use color_eyre::{eyre, Result};
+use color_eyre::{Result, eyre};
 use egui_wgpu::wgpu;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;

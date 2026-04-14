@@ -1,9 +1,9 @@
 use windows::{
-    core::HSTRING,
     Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, MessageBoxW, MB_ICONERROR, MB_ICONWARNING, MB_SETFOREGROUND,
-        MB_TOPMOST,
+        GetForegroundWindow, MB_ICONERROR, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST,
+        MessageBoxW,
     },
+    core::HSTRING,
 };
 
 fn get_parent_window() -> Option<windows::Win32::Foundation::HWND> {

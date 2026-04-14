@@ -939,7 +939,9 @@ fn parse_skipped_frames(msg: &str) -> Option<SkippedFrames> {
 
     // Find the number after '/' (total frames)
     let after_slash = &msg[slash_idx + 1..];
-    let total_end = after_slash.find(|c: char| !c.is_ascii_digit()).unwrap_or(after_slash.len());
+    let total_end = after_slash
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after_slash.len());
     let total_str = &after_slash[..total_end];
     let total = total_str.parse::<usize>().ok()?;
 

@@ -1,19 +1,20 @@
 use std::{
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
 
 use egui::{
-    containers::Frame, text::LayoutJob, Color32, Context, FontFamily, FontId, Image, ImageSource,
-    Margin, RichText, Stroke, TextFormat, TextWrapMode, Vec2, WidgetText, Window,
+    Color32, Context, FontFamily, FontId, Image, ImageSource, Margin, RichText, Stroke, TextFormat,
+    TextWrapMode, Vec2, WidgetText, Window, containers::Frame, text::LayoutJob,
 };
 use egui_overlay::EguiOverlay;
 use egui_render_three_d::ThreeDBackend as DefaultGfxBackend;
 use windows::Win32::{
     Foundation::HWND,
     UI::WindowsAndMessaging::{
-        FlashWindowEx, GetWindowLongPtrW, SetWindowLongPtrW, ShowWindow, FLASHWINFO, FLASHW_STOP,
-        GWL_EXSTYLE, SW_HIDE, SW_SHOWDEFAULT, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        FLASHW_STOP, FLASHWINFO, FlashWindowEx, GWL_EXSTYLE, GetWindowLongPtrW, SW_HIDE,
+        SW_SHOWDEFAULT, SetWindowLongPtrW, ShowWindow, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW,
     },
 };
 

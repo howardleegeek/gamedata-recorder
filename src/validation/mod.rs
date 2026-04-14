@@ -61,8 +61,7 @@ pub fn validate_folder(path: &Path) -> eyre::Result<ValidationResult> {
             let temp_path = invalid_path.with_extension("tmp");
             if let Err(write_err) = std::fs::write(&temp_path, e.join("\n")) {
                 tracing::error!("Failed to write INVALID marker temp file: {write_err}");
-            } else if let Err(sync_err) = std::fs::File::open(&temp_path)
-                .and_then(|f| f.sync_all())
+            } else if let Err(sync_err) = std::fs::File::open(&temp_path).and_then(|f| f.sync_all())
             {
                 tracing::error!("Failed to sync INVALID marker file: {sync_err}");
             } else if let Err(rename_err) = std::fs::rename(&temp_path, &invalid_path) {
@@ -215,7 +214,8 @@ fn validate_files(
     if !start_time.is_finite() || !end_time.is_finite() {
         eyre::bail!(
             "Invalid timeline: start_time ({}) or end_time ({}) is not finite",
-            start_time, end_time
+            start_time,
+            end_time
         );
     }
 
@@ -223,7 +223,8 @@ fn validate_files(
     if start_time > end_time {
         eyre::bail!(
             "Invalid timeline: start_time ({}) is after end_time ({})",
-            start_time, end_time
+            start_time,
+            end_time
         );
     }
 

@@ -11,7 +11,7 @@
 
 use std::io::Write;
 
-use input_capture::{timestamp::HighPrecisionTimer, vkey_names::vkey_to_name, Event, PressState};
+use input_capture::{Event, PressState, timestamp::HighPrecisionTimer, vkey_names::vkey_to_name};
 
 #[derive(Debug)]
 struct Args {

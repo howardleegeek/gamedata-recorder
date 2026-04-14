@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use color_eyre::{
-    eyre::{eyre, WrapErr as _},
     Result,
+    eyre::{WrapErr as _, eyre},
 };
 use input_capture::{HighPrecisionTimer, InputCapture};
 use serde::Serialize;
