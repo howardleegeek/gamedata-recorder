@@ -794,7 +794,7 @@ fn upload_stats_view(ui: &mut Ui, recordings: &Recordings) {
                         .latest_upload_timestamp()
                         .map(|dt| dt.with_timezone(&chrono::Local))
                         .map(util::format_datetime)
-                        .unwrap_or("Never".to_string())
+                        .unwrap_or_else(|| "Never".to_string())
                 } else {
                     "Loading...".to_string()
                 },
