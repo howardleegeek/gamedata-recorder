@@ -132,9 +132,19 @@ pub fn get_primary_monitor_resolution() -> Option<(u32, u32)> {
         dmSize: std::mem::size_of::<DEVMODEW>() as u16,
         ..Default::default()
     };
+    // Ensure device name is null-terminated to prevent buffer overread.
+    // szDevice is [u16; 32] but may not be null-terminated if the name fills the buffer.
+    let device_name = match monitor_info.szDevice.iter().position(|&c| c == 0) {
+        Some(len) => &monitor_info.szDevice[..=len], // Include null terminator
+        None => {
+            // No null terminator found - device name fills entire buffer
+            // This shouldn't happen with valid Windows data, but handle gracefully
+            return None;
+        }
+    };
     unsafe {
         EnumDisplaySettingsW(
-            PCWSTR(monitor_info.szDevice.as_ptr()),
+            PCWSTR(device_name.as_ptr()),
             ENUM_CURRENT_SETTINGS,
             &mut devmode,
         )
