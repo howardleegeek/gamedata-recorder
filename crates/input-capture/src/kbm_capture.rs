@@ -204,7 +204,6 @@ impl KbmCapture {
     /// Parse raw input from GetRawInputBuffer batch reading.
     /// Includes message time for latency tracking.
     #[allow(dead_code)]
-    #[allow(clippy::unnecessary_unsafe)]
     fn parse_raw_input(
         &mut self,
         rawinput: &RAWINPUT,
@@ -216,10 +215,11 @@ impl KbmCapture {
         // SAFETY: We trust the RAWINPUT data from Windows. Union field access
         // is required because RAWINPUT.data is a union of mouse/keyboard/hid.
         // The dwType field tells us which union variant is valid.
-        match Input::RID_DEVICE_INFO_TYPE(rawinput.header.dwType) {
-            Input::RIM_TYPEMOUSE => {
-                let mut events = Vec::new();
-                let mouse = unsafe { rawinput.data.mouse };
+        unsafe {
+            match Input::RID_DEVICE_INFO_TYPE(rawinput.header.dwType) {
+                Input::RIM_TYPEMOUSE => {
+                    let mut events = Vec::new();
+                    let mouse = rawinput.data.mouse;
                 let us_flags = mouse.usFlags.0;
 
                 // Handle mouse movement
@@ -506,7 +506,7 @@ impl KbmCapture {
                     }
 
                     if us_button_flags & RI_MOUSE_WHEEL != 0 {
-                        let scroll = unsafe { mouse.Anonymous.Anonymous.usButtonData as i16 };
+                        let scroll = mouse.Anonymous.Anonymous.usButtonData as i16;
                         events.push(Event::MouseScroll {
                             scroll_amount: scroll,
                         });
@@ -515,7 +515,7 @@ impl KbmCapture {
                     events
                 }
                 Input::RIM_TYPEKEYBOARD => {
-                    let keyboard = unsafe { rawinput.data.keyboard };
+                    let keyboard = rawinput.data.keyboard;
                     let key = keyboard.VKey;
                     let flags = u32::from(keyboard.Flags);
                     let press_state = if flags & RI_KEY_BREAK != 0 {
