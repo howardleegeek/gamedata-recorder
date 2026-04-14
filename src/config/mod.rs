@@ -190,13 +190,26 @@ fn default_recording_location() -> std::path::PathBuf {
 /// Validates that the recording path doesn't contain path traversal sequences
 /// that could allow writing to unintended system locations. Returns an error
 /// if the path contains suspicious patterns like absolute paths or parent directory
-/// references that could escape the intended directory structure.
+/// references that could escape the intended directory structure, or if the path
+/// is empty or whitespace-only.
 fn validate_recording_path<'de, D>(deserializer: D) -> Result<std::path::PathBuf, D::Error>
 where
     D: Deserializer<'de>,
 {
     use serde::de::Error;
     let path = PathBuf::deserialize(deserializer)?;
+
+    // Reject empty paths that would be invalid or confusing
+    if path.as_os_str().is_empty() {
+        return Err(Error::custom("Recording location cannot be empty"));
+    }
+
+    // Reject paths that are whitespace-only (can't be meaningfully used)
+    if path.to_str().map(|s| s.trim().is_empty()).unwrap_or(false) {
+        return Err(Error::custom(
+            "Recording location cannot be whitespace-only",
+        ));
+    }
 
     // Reject absolute paths which could target any system location
     if path.is_absolute() {
