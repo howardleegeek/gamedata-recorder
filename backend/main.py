@@ -58,9 +58,10 @@ API_SECRET = os.getenv("API_SECRET")
 
 # Database configuration
 DATABASE_URL = os.getenv("DATABASE_URL")
+# Always capture DB_PASSWORD for validation (even when using DATABASE_URL)
+DB_PASSWORD = os.getenv("DB_PASSWORD")
 if not DATABASE_URL:
     DB_USER = os.getenv("DB_USER", "gamedata")
-    DB_PASSWORD = os.getenv("DB_PASSWORD")
     DB_HOST = os.getenv("DB_HOST", "localhost")
     DB_PORT = os.getenv("DB_PORT", "5432")
     DB_NAME = os.getenv("DB_NAME", "gamedata")
