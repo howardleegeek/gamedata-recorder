@@ -901,7 +901,9 @@ mod tests {
     fn test_parse_skipped_frames_basic() {
         let msg =
             "Video stopped, number of skipped frames due to encoding lag: 10758/22640 (47.5%)";
-        let result = parse_skipped_frames(msg).expect("Failed to parse");
+        let result = parse_skipped_frames(msg);
+        assert!(result.is_some(), "parse_skipped_frames should succeed for valid input");
+        let result = result.unwrap();
 
         assert_eq!(result.skipped, 10758);
         assert_eq!(result.total, 22640);
