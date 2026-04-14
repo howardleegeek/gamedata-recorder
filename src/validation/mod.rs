@@ -47,6 +47,9 @@ pub fn validate_folder(path: &Path) -> eyre::Result<ValidationResult> {
     }
 }
 
+// Maximum allowed size for input files (50 MB) to prevent memory exhaustion
+const MAX_INPUT_FILE_SIZE: u64 = 50 * 1024 * 1024;
+
 // This is a bit messy - I don't love using a Vec of Strings for the errors -
 // but I wanted to capture the multi-error nature of the validation process
 //
@@ -147,6 +150,17 @@ fn validate_files(
     mp4_path: &Path,
     csv_path: &Path,
 ) -> eyre::Result<(InputStats, Vec<String>)> {
+    // Check file size before reading to prevent memory exhaustion
+    let metadata_csv = std::fs::metadata(csv_path)
+        .with_context(|| format!("Error reading metadata for {csv_path:?}"))?;
+    if metadata_csv.len() > MAX_INPUT_FILE_SIZE {
+        eyre::bail!(
+            "Input file too large: {} bytes (max: {} bytes)",
+            metadata_csv.len(),
+            MAX_INPUT_FILE_SIZE
+        );
+    }
+
     let events = std::fs::read_to_string(csv_path)
         .with_context(|| format!("Error reading CSV file at {csv_path:?})"))?
         .lines()
