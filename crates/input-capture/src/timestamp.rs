@@ -153,9 +153,18 @@ impl HighPrecisionTimer {
     /// Get the current GetMessageTime value (Windows only).
     /// Returns milliseconds since system start.
     /// This is useful for correlating input events with Windows message timestamps.
+    /// Returns 0 if the call fails (should not happen on modern Windows).
     #[cfg(target_os = "windows")]
     pub fn message_time_ms(&self) -> i32 {
-        unsafe { GetMessageTime() }
+        unsafe {
+            // GetMessageTime returns the time in milliseconds; on error it returns -1
+            // but this should not fail on modern Windows. We check and log just in case.
+            let result = GetMessageTime();
+            if result < 0 {
+                tracing::warn!("GetMessageTime returned negative value: {}", result);
+            }
+            result
+        }
     }
 
     /// Get hybrid timestamp combining QPC precision with message time correlation.
