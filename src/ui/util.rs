@@ -6,7 +6,7 @@ pub fn format_bytes(bytes: u64) -> String {
         return "0 B".to_string();
     }
     let k = 1024_f64;
-    let sizes = ["B", "KB", "MB", "GB"];
+    let sizes = ["B", "KB", "MB", "GB", "TB", "PB"];
     let bytes_f = bytes as f64;
     let i = (bytes_f.ln() / k.ln()).floor() as usize;
     let i = i.min(sizes.len() - 1);
