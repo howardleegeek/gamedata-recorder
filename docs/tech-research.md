@@ -456,8 +456,6 @@ Buyer API: REST + Stripe 计量 + R2 Presigned URL 下载
 
 ## 十二、定价 & 单位经济
 
-> **Note:** Unit economics documentation pending
-
 ### 12.1 卖给 AI 公司
 
 | 层级 | 价格/小时 | 包含 |
@@ -734,5 +732,5 @@ session_{id}/
 |------|------|
 | [tech-research.md](tech-research.md) | 本文: 技术选型总报告 |
 | [backend-architecture.md](backend-architecture.md) | 后端 Pipeline 详细架构 |
-| *(pending)* | 定价 & 单位经济详细模型 |
+| 本文 §12 | 定价 & 单位经济详细模型 |
 | [engine-plugin-research.md](engine-plugin-research.md) | 引擎插件详细研究 |
