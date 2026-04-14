@@ -336,6 +336,8 @@ fn get_obs_window_encoding(hwnd: HWND, game_exe: &str) -> String {
     };
 
     // Get window title
+    // Note: GetWindowTextLengthW returns 0 for both empty titles AND on error.
+    // We check GetLastError() to distinguish between these cases.
     let title_len = unsafe { GetWindowTextLengthW(hwnd) };
     let mut title = String::new();
     if title_len > 0 {
@@ -347,6 +349,12 @@ fn get_obs_window_encoding(hwnd: HWND, game_exe: &str) -> String {
             } else {
                 title = String::from_utf16_lossy(&buf);
             }
+        }
+    } else {
+        // Check if 0 means error or truly empty title
+        let last_error = unsafe { windows::Win32::Foundation::GetLastError() };
+        if last_error.0 != 0 {
+            tracing::warn!("GetWindowTextLengthW failed for hwnd {:?}: error {}", hwnd, last_error.0);
         }
     }
 
