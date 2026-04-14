@@ -15,9 +15,6 @@ use crate::{
     upload::{FileProgress, ProgressSender},
 };
 
-/// Maximum allowed chunk size (1 GB) to prevent memory exhaustion from malicious server responses.
-const MAX_CHUNK_SIZE_BYTES: u64 = 1024 * 1024 * 1024;
-
 /// Result type for `upload_tar` that distinguishes between different outcomes.
 pub enum UploadTarOutput {
     /// Upload completed successfully, recording is now Uploaded variant
@@ -128,18 +125,12 @@ pub async fn run(
         )
     };
 
-    // Use spawn_blocking to avoid blocking the async runtime with filesystem I/O
-    let file_size = tokio::task::spawn_blocking({
-        let tar_path = tar_path.clone();
-        move || std::fs::metadata(&tar_path).map(|m| m.len())
-    })
-    .await
-    .map_err(|e| std::io::Error::other(e))??;
-    if let Err(e) = unreliable_tx.send(UiUpdateUnreliable::UpdateUploadProgress(Some(
-        Default::default(),
-    ))) {
-        tracing::warn!("Failed to send initial upload progress reset: {}", e);
-    }
+    let file_size = std::fs::metadata(&tar_path).map(|m| m.len())?;
+    unreliable_tx
+        .send(UiUpdateUnreliable::UpdateUploadProgress(Some(
+            Default::default(),
+        )))
+        .ok();
 
     let start_chunk = paused.upload_progress().next_chunk_number();
 
@@ -196,15 +187,8 @@ pub async fn run(
             // Abort server upload
             let api_client = self.api_client.clone();
             let api_token = self.api_token.clone();
-            // Spawn cleanup task; ignoring JoinHandle is intentional (fire-and-forget)
-            // but we explicitly acknowledge this to suppress warnings and document intent
-            let _cleanup_task = tokio::spawn(async move {
-                if let Err(e) = paused.abort_and_cleanup(&api_client, &api_token).await {
-                    tracing::error!(
-                        "Failed to abort and cleanup upload in drop handler: {:?}",
-                        e
-                    );
-                }
+            tokio::spawn(async move {
+                paused.abort_and_cleanup(&api_client, &api_token).await.ok();
             });
         }
     }
@@ -230,7 +214,7 @@ pub async fn run(
             async move {
                 // If resuming, seek to the correct position in the file
                 if start_chunk > 1 {
-                    let bytes_to_skip = (start_chunk - 1).saturating_mul(chunk_size_bytes);
+                    let bytes_to_skip = (start_chunk - 1) * chunk_size_bytes;
                     if let Err(e) = file.seek(std::io::SeekFrom::Start(bytes_to_skip)).await {
                         return Err(UploadTarError::Io(e));
                     }
@@ -239,18 +223,6 @@ pub async fn run(
                         bytes_to_skip,
                         start_chunk
                     );
-                }
-
-                // Validate chunk size to prevent memory exhaustion from malicious server responses
-                // and ensure chunk_size_bytes > 0 for correct resume position calculation
-                if chunk_size_bytes == 0 || chunk_size_bytes > MAX_CHUNK_SIZE_BYTES {
-                    return Err(UploadTarError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "Invalid chunk size {} (must be > 0 and <= {} bytes)",
-                            chunk_size_bytes, MAX_CHUNK_SIZE_BYTES
-                        ),
-                    )));
                 }
 
                 let mut buffer = vec![0u8; chunk_size_bytes as usize];
@@ -279,15 +251,14 @@ pub async fn run(
                     let chunk_data = buffer[..chunk_size].to_vec();
 
                     // Offload Hashing to blocking thread
-                    // Move chunk_data into closure and return it with hash to avoid cloning large buffer
-                    let hash_result = tokio::task::spawn_blocking(move || {
-                        let hash = sha256::digest(&chunk_data);
-                        (hash, chunk_data)
+                    let hash_result = tokio::task::spawn_blocking({
+                        let data = chunk_data.clone();
+                        move || sha256::digest(&data)
                     })
                     .await;
 
-                    let (chunk_hash, chunk_data) = match hash_result {
-                        Ok((hash, data)) => (hash, data),
+                    let chunk_hash = match hash_result {
+                        Ok(hash) => hash,
                         Err(join_err) => {
                             return Err(UploadTarError::from(std::io::Error::other(join_err)));
                         }
@@ -382,7 +353,7 @@ pub async fn run(
         });
 
         // Initialize progress sender with bytes already uploaded
-        let bytes_already_uploaded = (start_chunk - 1).saturating_mul(chunk_size_bytes);
+        let bytes_already_uploaded = (start_chunk - 1) * chunk_size_bytes;
         let progress_sender = Arc::new(Mutex::new({
             let mut sender = ProgressSender::new(unreliable_tx.clone(), file_size, file_progress);
             sender.set_bytes_uploaded(bytes_already_uploaded);
@@ -396,13 +367,26 @@ pub async fn run(
             // Check for error from previous stages
             let (chunk_data, upload_url, chunk_number) = match msg {
                 Ok(val) => val,
-                Err(e) => {
-                    // Abort producer and signer tasks to prevent resource leak on error exit
-                    producer_handle.abort();
-                    signer_handle.abort();
-                    return Err(e);
-                }
+                Err(e) => return Err(e),
             };
+
+            // Check if upload has been paused (user-initiated pause)
+            if pause_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                // Ensure the latest progress is saved for resume
+                if let Some(paused) = guard.paused() {
+                    if let Err(e) = paused.save_upload_progress() {
+                        tracing::error!("Failed to save upload progress on pause: {:?}", e);
+                    }
+                }
+                // Disarm by taking the paused recording - keeps server/session state for resume
+                if let Some(paused) = guard.take_paused() {
+                    return Ok(UploadTarOutput::Paused(LocalRecording::Paused(paused)));
+                }
+                return Err(UploadTarError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Paused recording not available",
+                )));
+            }
 
             // Check if upload session is about to expire
             let now = SystemTime::now()
@@ -410,14 +394,12 @@ pub async fn run(
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             if now >= expires_at {
-                let seconds_past_expiration =
-                    now.saturating_sub(expires_at).min(i64::MAX as u64) as i64;
                 tracing::error!(
                     "Upload session expired: upload_id={}, client_time={}, expires_at={}, diff={}s. If this is a fresh upload, the system clock may be incorrect.",
                     upload_id,
                     now,
                     expires_at,
-                    seconds_past_expiration
+                    now as i64 - expires_at as i64
                 );
                 return Err(UploadTarError::UploadSessionExpired {
                     upload_id,
@@ -425,7 +407,7 @@ pub async fn run(
                     expires_at,
                 });
             }
-            let seconds_left = expires_at.saturating_sub(now).min(i64::MAX as u64) as i64;
+            let seconds_left = expires_at as i64 - now as i64;
             if seconds_left < 60 && chunk_number % 10 == 0 {
                 tracing::warn!("Upload session expires in {} seconds!", seconds_left);
             }
@@ -438,11 +420,8 @@ pub async fn run(
             let bytes_before_chunk = progress_sender
                 .lock()
                 .map(|s| s.bytes_uploaded())
-                .unwrap_or_else(|e| {
-                    tracing::error!("Progress sender mutex poisoned: {}", e);
-                    0
-                });
-            let retries = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+                .unwrap_or_default();
+            let mut retries = 0u32;
 
             // Should be about 5-6 retries
             let backoff = ExponentialBackoff {
@@ -454,7 +433,6 @@ pub async fn run(
                 ..Default::default()
             };
 
-            let retries_for_notify = retries.clone();
             let etag = retry_notify(
                 backoff,
                 || async {
@@ -465,7 +443,7 @@ pub async fn run(
 
                     // Create a stream that wraps chunk_data and tracks upload progress
                     let progress_stream =
-                        tokio_util::io::ReaderStream::new(std::io::Cursor::new(&chunk_data))
+                        tokio_util::io::ReaderStream::new(std::io::Cursor::new(chunk_data.clone()))
                             .inspect_ok({
                                 let progress_sender = progress_sender.clone();
                                 move |bytes| {
@@ -501,8 +479,8 @@ pub async fn run(
 
                     Ok(etag)
                 },
-                move |err, dur| {
-                    retries_for_notify.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                |err, dur| {
+                    retries += 1;
                     tracing::warn!(
                         "Failed to upload chunk {chunk_number}/{total_chunks}, retrying in {dur:?}: {err:?}"
                     );
@@ -512,7 +490,7 @@ pub async fn run(
             .map_err(|e| UploadTarError::FailedToUploadChunk {
                 chunk_number,
                 total_chunks,
-                retries: retries.load(std::sync::atomic::Ordering::Relaxed),
+                retries,
                 error: e,
             })?;
 
@@ -534,29 +512,6 @@ pub async fn run(
             tracing::info!(
                 "Uploaded chunk {chunk_number}/{total_chunks} for upload_id {upload_id}"
             );
-
-            // Check if upload has been paused (user-initiated pause)
-            // This check MUST happen AFTER recording chunk completion to prevent race condition
-            // where a chunk is uploaded but its ETag is lost if pause occurs during final chunk.
-            if pause_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                // Ensure the latest progress is saved for resume
-                if let Some(paused) = guard.paused() {
-                    if let Err(e) = paused.save_upload_progress() {
-                        tracing::error!("Failed to save upload progress on pause: {:?}", e);
-                    }
-                }
-                // Abort producer and signer tasks to prevent resource leak on early exit
-                producer_handle.abort();
-                signer_handle.abort();
-                // Disarm by taking the paused recording - keeps server/session state for resume
-                if let Some(paused) = guard.take_paused() {
-                    return Ok(UploadTarOutput::Paused(LocalRecording::Paused(paused)));
-                }
-                return Err(UploadTarError::Io(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "Paused recording not available",
-                )));
-            }
         }
 
         // Ensure producer and signer tasks didn't crash

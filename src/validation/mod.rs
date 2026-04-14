@@ -1,6 +1,4 @@
 use std::{
-    fs::File,
-    io::Write as _,
     path::{Path, PathBuf},
     str::FromStr as _,
 };
@@ -35,47 +33,18 @@ pub struct ValidationResult {
 
 /// Validates the given recording folder, creating a [`constants::filename::recording::INVALID`] file if validation fails.
 pub fn validate_folder(path: &Path) -> eyre::Result<ValidationResult> {
-    // Validate path to prevent directory traversal attacks
-    // Reject paths that contain components which could escape the intended directory
-    if path
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        eyre::bail!("Invalid path: contains parent directory references");
-    }
-
     match validate_folder_impl(path) {
-        Ok(result) => {
-            // Clean up any stale INVALID marker file from previous failed validation
-            let invalid_marker = path.join(constants::filename::recording::INVALID);
-            if invalid_marker.is_file() {
-                if let Err(e) = std::fs::remove_file(&invalid_marker) {
-                    tracing::warn!("Failed to remove stale INVALID marker file: {}", e);
-                }
-            }
-            Ok(result)
-        }
+        Ok(result) => Ok(result),
         Err(e) => {
-            // Use atomic write pattern for crash durability: write to temp, sync, rename
-            let invalid_path = path.join(constants::filename::recording::INVALID);
-            let temp_path = invalid_path.with_extension("tmp");
-            if let Err(write_err) = std::fs::write(&temp_path, e.join("\n")) {
-                tracing::error!("Failed to write INVALID marker temp file: {write_err}");
-            } else if let Err(sync_err) = std::fs::File::open(&temp_path).and_then(|f| f.sync_all())
-            {
-                tracing::error!("Failed to sync INVALID marker file: {sync_err}");
-            } else if let Err(rename_err) = std::fs::rename(&temp_path, &invalid_path) {
-                tracing::error!("Failed to rename INVALID marker file: {rename_err}");
-                // Clean up temp file on rename failure
-                std::fs::remove_file(&temp_path).ok();
-            }
+            std::fs::write(
+                path.join(constants::filename::recording::INVALID),
+                e.join("\n"),
+            )
+            .ok();
             eyre::bail!("Validation failures: {}", e.join("\n"));
         }
     }
 }
-
-// Maximum allowed size for input files (50 MB) to prevent memory exhaustion
-const MAX_INPUT_FILE_SIZE: u64 = 50 * 1024 * 1024;
 
 // This is a bit messy - I don't love using a Vec of Strings for the errors -
 // but I wanted to capture the multi-error nature of the validation process
@@ -87,13 +56,8 @@ fn validate_folder_impl(path: &Path) -> Result<ValidationResult, Vec<String>> {
     let Some(mp4_path) = path
         .read_dir()
         .map_err(|e| vec![e.to_string()])?
-        .filter_map(|e| match e {
-            Ok(entry) => Some(entry.path()),
-            Err(e) => {
-                tracing::warn!("Error reading directory entry in {}: {}", path.display(), e);
-                None
-            }
-        })
+        .flatten()
+        .map(|e| e.path())
         .find(|e| e.extension().and_then(|e| e.to_str()) == Some("mp4"))
     else {
         return Err(vec![format!("No MP4 file found in {}", path.display())]);
@@ -139,20 +103,15 @@ fn validate_folder_impl(path: &Path) -> Result<ValidationResult, Vec<String>> {
             // fs::write will completely overwrite existing metadata file, and if the OS is
             // out of available memory (either due to user skill issue or a bug with owlc),
             // it becomes a nightmare case where the metadata just gets deleted.
-            // To be safe, we use atomic write pattern: write to temp file, sync, then rename
-            // This prevents corruption if the process crashes, runs out of memory, or loses power
+            // To be safe, we use atomic write pattern: write to temp file, then rename
+            // This prevents corruption if the process crashes or runs out of memory
             let temp_path = meta_path.with_extension("tmp");
-            if let Err(e) = (|| {
-                let file = std::fs::File::create(&temp_path)?;
-                std::io::Write::write_all(&file, metadata.as_bytes())?;
-                file.sync_all()?;
-                std::fs::rename(&temp_path, &meta_path)
-            })() {
+            if let Err(e) = std::fs::write(&temp_path, metadata) {
                 invalid_reasons.push(format!("Error writing metadata temp file: {e:?}"));
+            } else if let Err(e) = std::fs::rename(&temp_path, &meta_path) {
+                invalid_reasons.push(format!("Error renaming metadata temp file: {e:?}"));
                 // Clean up temp file on failure
-                if let Err(e) = std::fs::remove_file(&temp_path) {
-                    tracing::warn!("Failed to clean up temp file after rename failure: {}", e);
-                }
+                std::fs::remove_file(&temp_path).ok();
             }
         }
         Err(e) => invalid_reasons.push(format!("Error generating JSON for metadata file: {e:?}")),
@@ -180,22 +139,13 @@ fn validate_files(
     mp4_path: &Path,
     csv_path: &Path,
 ) -> eyre::Result<(InputStats, Vec<String>)> {
-    let file_content = std::fs::read_to_string(csv_path)
-        .with_context(|| format!("Error reading CSV file at {csv_path:?})"))?;
-    // Legacy CSV format has a header row that must be skipped;
-    // new JSON Lines format has no header (each line is self-describing).
-    let is_legacy_csv = csv_path.extension().and_then(|e| e.to_str()) == Some("csv");
-    let events = file_content
+    let events = std::fs::read_to_string(csv_path)
+        .with_context(|| format!("Error reading CSV file at {csv_path:?})"))?
         .lines()
-        .skip(if is_legacy_csv { 1 } else { 0 })
+        .skip(1)
         .map(InputEvent::from_str)
         .collect::<Result<Vec<_>, _>>()
         .with_context(|| format!("Error parsing CSV file at {csv_path:?}"))?;
-
-    // Validate that we have at least some events to process
-    if events.is_empty() {
-        eyre::bail!("No input events found in recording");
-    }
 
     let start_time = events
         .iter()
@@ -209,24 +159,6 @@ fn validate_files(
         .or_else(|| events.last())
         .map(|event| event.timestamp)
         .unwrap_or(0.0);
-
-    // Validate timeline values are finite to prevent NaN/Infinity from contaminating calculations
-    if !start_time.is_finite() || !end_time.is_finite() {
-        eyre::bail!(
-            "Invalid timeline: start_time ({}) or end_time ({}) is not finite",
-            start_time,
-            end_time
-        );
-    }
-
-    // Validate timeline consistency to prevent empty filtered events and confusing errors
-    if start_time > end_time {
-        eyre::bail!(
-            "Invalid timeline: start_time ({}) is after end_time ({})",
-            start_time,
-            end_time
-        );
-    }
 
     let filtered_events: Vec<_> = events
         .iter()
@@ -245,10 +177,10 @@ fn validate_files(
     let (mouse_stats, mouse_invalid_reasons) = mouse::validate(&input);
     let (gamepad_stats, gamepad_invalid_reasons) = gamepad::validate(&input);
 
-    // Invalidate if any input type has validation errors
-    if !keyboard_invalid_reasons.is_empty()
-        || !mouse_invalid_reasons.is_empty()
-        || !gamepad_invalid_reasons.is_empty()
+    // Only invalidate if all three input types are invalid
+    if !(keyboard_invalid_reasons.is_empty()
+        || mouse_invalid_reasons.is_empty()
+        || gamepad_invalid_reasons.is_empty())
     {
         invalid_reasons.extend(keyboard_invalid_reasons);
         invalid_reasons.extend(mouse_invalid_reasons);

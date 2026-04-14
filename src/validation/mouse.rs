@@ -30,15 +30,10 @@ pub(super) fn validate(input: &super::ValidationInput) -> (MouseOutputStats, Vec
     let mut invalid_reasons = vec![];
     let stats = get_stats(input);
 
-    // Validate stats are finite before comparison to prevent NaN/Infinity from bypassing checks
-    if !stats.overall_max.is_finite() {
-        invalid_reasons.push(format!(
-            "Mouse max movement is invalid: {}",
-            stats.overall_max
-        ));
-    } else if stats.overall_max < 0.05 {
+    if stats.overall_max < 0.05 {
         invalid_reasons.push(format!("Mouse movement too small: {}", stats.overall_max));
-    } else if stats.overall_max > 10_000.0 {
+    }
+    if stats.overall_max > 10_000.0 {
         invalid_reasons.push(format!("Mouse movement too large: {}", stats.overall_max));
     }
 
@@ -90,20 +85,7 @@ fn get_stats(input: &super::ValidationInput) -> MouseStats {
         let mut frame_data: HashMap<i32, Frame> = HashMap::new();
 
         for (timestamp, dx, dy) in mouse_moves {
-            // Skip events with invalid timestamps (before recording start)
-            if timestamp < input.start_time {
-                continue;
-            }
-            let frame_index = (timestamp - input.start_time) / frame_duration;
-            // Prevent i32 overflow: skip events that would exceed valid frame range.
-            // Use safety margin (0.5) to account for rounding up in .round() call below.
-            if frame_index > (i32::MAX as f64 - 0.5) {
-                tracing::warn!("Mouse event timestamp too large, exceeds valid frame range");
-                continue;
-            }
-            // Round to nearest frame to prevent floating-point precision errors
-            // from causing events near frame boundaries to be assigned to wrong frames
-            let frame = frame_index.round() as i32;
+            let frame = ((timestamp - input.start_time) / frame_duration) as i32;
             let entry = frame_data.entry(frame).or_default();
             entry.dx += dx as f64;
             entry.dy += dy as f64;

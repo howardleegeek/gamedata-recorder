@@ -7,17 +7,11 @@ use crate::output_types::Metadata;
 pub fn validate(video_path: &Path, metadata: &Metadata) -> Vec<String> {
     let mut invalid_reasons = vec![];
 
-    // Validate duration is finite and positive before conversion
-    if !metadata.duration.is_finite() || metadata.duration <= 0.0 {
-        invalid_reasons.push(format!("Video duration is invalid: {}", metadata.duration));
-        return invalid_reasons;
-    }
-
     let duration = Duration::from_secs_f64(metadata.duration);
     if duration < MIN_FOOTAGE {
         invalid_reasons.push(format!("Video length {} too short.", metadata.duration));
     }
-    if duration > MAX_FOOTAGE.mul_f32(1.5) {
+    if duration > Duration::from_secs_f32(MAX_FOOTAGE.as_secs_f32() * 1.5) {
         invalid_reasons.push(format!("Video length {} too long.", metadata.duration));
     }
 
@@ -29,15 +23,6 @@ pub fn validate(video_path: &Path, metadata: &Metadata) -> Vec<String> {
         }
     };
 
-    // Validate duration is positive to prevent division by zero
-    if metadata.duration <= 0.0 {
-        invalid_reasons.push(format!(
-            "Video duration must be positive, got {}",
-            metadata.duration
-        ));
-        return invalid_reasons;
-    }
-
     let size_mbytes = size_bytes as f64 / (1024.0 * 1024.0);
     let size_mbits = size_mbytes * 8.0;
 
@@ -46,27 +31,8 @@ pub fn validate(video_path: &Path, metadata: &Metadata) -> Vec<String> {
     let baseline_bitrate_mbps = 3.8;
     let expected_mbits = baseline_bitrate_mbps * metadata.duration;
 
-    // Validate expected_mbits is finite to prevent overflow with extreme duration values
-    if !expected_mbits.is_finite() {
-        invalid_reasons.push(format!(
-            "Video expected size calculation overflow: duration={} too large",
-            metadata.duration
-        ));
-        return invalid_reasons;
-    }
-
     // Log video file stats for diagnostics
     let actual_bitrate_mbps = size_mbits / metadata.duration;
-
-    // Validate bitrate calculation result is finite to prevent overflow with extreme values
-    if !actual_bitrate_mbps.is_finite() {
-        invalid_reasons.push(format!(
-            "Video bitrate calculation overflow: size={} bytes, duration={}",
-            size_bytes, metadata.duration
-        ));
-        return invalid_reasons;
-    }
-
     tracing::info!(
         "Video validation: size={:.2}MB ({} bytes), duration={:.2}s, actual_bitrate={:.2}Mbps, expected_baseline={:.2}Mb",
         size_mbytes,

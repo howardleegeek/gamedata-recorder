@@ -30,44 +30,6 @@ impl From<std::io::Error> for CreateTarError {
         CreateTarError::Io(e)
     }
 }
-/// RAII guard that cleans up a partially created tar file on drop.
-/// Disarmed when tar creation succeeds via `into_path()`.
-struct CreatingTarGuard {
-    path: Option<PathBuf>,
-}
-
-impl CreatingTarGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path: Some(path) }
-    }
-
-    /// Disarm the guard and return the path, preventing cleanup on drop.
-    fn into_path(mut self) -> PathBuf {
-        self.path.take().expect("path always exists before disarm")
-    }
-}
-
-impl Drop for CreatingTarGuard {
-    fn drop(&mut self) {
-        if let Some(path) = self.path.take() {
-            if path.is_file() {
-                if let Err(e) = std::fs::remove_file(&path) {
-                    tracing::warn!(
-                        "CreatingTarGuard: failed to clean up partial tar at {}: {}",
-                        path.display(),
-                        e
-                    );
-                } else {
-                    tracing::info!(
-                        "CreatingTarGuard: cleaned up partial tar at {}",
-                        path.display()
-                    );
-                }
-            }
-        }
-    }
-}
-
 pub async fn create_tar_file(
     recording_path: &Path,
     validation: &ValidationResult,
@@ -77,12 +39,10 @@ pub async fn create_tar_file(
         let validation = validation.clone();
         move || {
             // Create tar file inside the recording folder
-            let uuid_str = uuid::Uuid::new_v4().simple().to_string();
-            let tar_name = format!("{}.tar", uuid_str.get(0..16).unwrap_or(&uuid_str));
-            let tar_path = recording_path.join(tar_name);
-
-            // Guard to clean up partial tar if creation fails
-            let guard = CreatingTarGuard::new(tar_path.clone());
+            let tar_path = recording_path.join(format!(
+                "{}.tar",
+                &uuid::Uuid::new_v4().simple().to_string()[0..16]
+            ));
 
             // Files to include in the tar archive
             let source_files = [
@@ -97,7 +57,7 @@ pub async fn create_tar_file(
                 match std::fs::metadata(path) {
                     Ok(meta) => {
                         let size = meta.len();
-                        total_source_size = total_source_size.saturating_add(size);
+                        total_source_size += size;
                         tracing::info!(
                             "Tar source file: {} = {} bytes ({:.2} MB)",
                             label,
@@ -117,62 +77,43 @@ pub async fn create_tar_file(
             );
 
             let start_time = std::time::Instant::now();
-
-            // Create the tar file and ensure cleanup on error
-            let result = (|| -> Result<PathBuf, CreateTarError> {
-                let mut tar = tar::Builder::new(std::fs::File::create(&tar_path)?);
-                for (_label, path) in &source_files {
-                    tar.append_file(
-                        path.file_name()
-                            .ok_or_else(|| CreateTarError::InvalidFilename((*path).to_owned()))?,
-                        &mut std::fs::File::open(path)?,
-                    )?;
-                }
-                // Explicitly finish the tar to ensure proper closure
-                tar.finish()?;
-                Ok(tar_path.clone())
-            })();
-
-            // Clean up partial tar file on error
-            if result.is_err() && tar_path.exists() {
-                tracing::warn!(
-                    "Tar creation failed, cleaning up partial tar file at {}",
-                    tar_path.display()
-                );
-                if let Err(e) = std::fs::remove_file(&tar_path) {
-                    tracing::warn!("Failed to remove partial tar file {}: {}", tar_path.display(), e);
-                }
+            let mut tar = tar::Builder::new(std::fs::File::create(&tar_path)?);
+            for (_label, path) in &source_files {
+                tar.append_file(
+                    path.file_name()
+                        .ok_or_else(|| CreateTarError::InvalidFilename((*path).to_owned()))?,
+                    &mut std::fs::File::open(path)?,
+                )?;
             }
+            // Explicitly finish the tar to ensure proper closure
+            tar.finish()?;
 
-            // Log final tar file size and creation time on success
-            if result.is_ok() {
-                let elapsed = start_time.elapsed();
-                match std::fs::metadata(&tar_path) {
-                    Ok(meta) => {
-                        let tar_size = meta.len();
-                        tracing::info!(
-                            "Tar file created: {} bytes ({:.2} MB) in {:.2}s",
+            // Log final tar file size and creation time
+            let elapsed = start_time.elapsed();
+            match std::fs::metadata(&tar_path) {
+                Ok(meta) => {
+                    let tar_size = meta.len();
+                    tracing::info!(
+                        "Tar file created: {} bytes ({:.2} MB) in {:.2}s",
+                        tar_size,
+                        tar_size as f64 / (1024.0 * 1024.0),
+                        elapsed.as_secs_f64()
+                    );
+                    // Warn if tar is significantly larger than source files (shouldn't happen)
+                    if tar_size > total_source_size + 1024 * 1024 {
+                        tracing::warn!(
+                            "Tar file ({} bytes) is larger than expected based on source files ({} bytes)",
                             tar_size,
-                            tar_size as f64 / (1024.0 * 1024.0),
-                            elapsed.as_secs_f64()
+                            total_source_size
                         );
-                        // Warn if tar is significantly larger than source files (shouldn't happen)
-                        if tar_size > total_source_size + 1024 * 1024 {
-                            tracing::warn!(
-                                "Tar file ({} bytes) is larger than expected based on source files ({} bytes)",
-                                tar_size,
-                                total_source_size
-                            );
-                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("Failed to get tar file size: {}", e);
-                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to get tar file size: {}", e);
                 }
             }
 
-            // Disarm the guard: tar creation succeeded, don't clean up
-            Ok(guard.into_path())
+            Ok(tar_path)
         }
     })
     .await?

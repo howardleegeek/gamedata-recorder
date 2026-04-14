@@ -45,7 +45,7 @@ impl ProgressSender {
     }
 
     pub fn increment_bytes_uploaded(&mut self, bytes: u64) {
-        self.set_bytes_uploaded(self.bytes_uploaded.saturating_add(bytes));
+        self.set_bytes_uploaded(self.bytes_uploaded + bytes);
     }
 
     pub fn bytes_uploaded(&self) -> u64 {
@@ -82,30 +82,30 @@ impl ProgressSender {
         };
         let elapsed = now.duration_since(oldest_time).as_secs_f64();
         let bps = if elapsed > 0.0 {
-            self.bytes_uploaded.saturating_sub(oldest_bytes) as f64 / elapsed
+            (self.bytes_uploaded - oldest_bytes) as f64 / elapsed
         } else {
             0.0
         };
 
-        if let Err(e) = self.tx.send(UiUpdateUnreliable::UpdateUploadProgress(Some(
-            ProgressData {
-                bytes_uploaded: self.bytes_uploaded,
-                total_bytes: self.file_size,
-                speed_mbps: bps / (1024.0 * 1024.0),
-                eta_seconds: if bps > 0.0 {
-                    self.file_size.saturating_sub(self.bytes_uploaded) as f64 / bps
-                } else {
-                    0.0
+        self.tx
+            .send(UiUpdateUnreliable::UpdateUploadProgress(Some(
+                ProgressData {
+                    bytes_uploaded: self.bytes_uploaded,
+                    total_bytes: self.file_size,
+                    speed_mbps: bps / (1024.0 * 1024.0),
+                    eta_seconds: if bps > 0.0 {
+                        (self.file_size - self.bytes_uploaded) as f64 / bps
+                    } else {
+                        0.0
+                    },
+                    percent: if self.file_size > 0 {
+                        ((self.bytes_uploaded as f64 / self.file_size as f64) * 100.0).min(100.0)
+                    } else {
+                        0.0
+                    },
+                    file_progress: self.file_progress.clone(),
                 },
-                percent: if self.file_size > 0 {
-                    ((self.bytes_uploaded as f64 / self.file_size as f64) * 100.0).min(100.0)
-                } else {
-                    0.0
-                },
-                file_progress: self.file_progress.clone(),
-            },
-        ))) {
-            tracing::warn!("Failed to send upload progress update: {}", e);
-        }
+            )))
+            .ok();
     }
 }
