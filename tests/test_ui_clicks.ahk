@@ -39,6 +39,10 @@ InitUIVars() {
         MsgBox("stop_button array must have at least 2 elements")
         ExitApp()
     }
+    if (stop_button[2] < 0 || stop_button[2] > 1200) {
+        MsgBox("stop_button Y coordinate out of bounds: " . stop_button[2])
+        ExitApp()
+    }
     stop_toggle := PixelGetColor(stop_button[1], stop_button[2])
 
     ;   Recorder Customization
@@ -47,6 +51,10 @@ InitUIVars() {
     honk_button := Array(224, 384)
     if (honk_button.Length < 2) {
         MsgBox("honk_button array must have at least 2 elements")
+        ExitApp()
+    }
+    if (honk_button[2] < 0 || honk_button[2] > 1200) {
+        MsgBox("honk_button Y coordinate out of bounds: " . honk_button[2])
         ExitApp()
     }
     honk_toggled := PixelGetColor(honk_button[1], honk_button[2])
@@ -66,6 +74,10 @@ InitUIVars() {
     collapse_button := Array(31, 681)
     if (collapse_button.Length < 2) {
         MsgBox("collapse_button array must have at least 2 elements")
+        ExitApp()
+    }
+    if (collapse_button[2] < 0 || collapse_button[2] > 1200) {
+        MsgBox("collapse_button Y coordinate out of bounds: " . collapse_button[2])
         ExitApp()
     }
     collapse_toggled := PixelGetColor(collapse_button[1], collapse_button[2])
