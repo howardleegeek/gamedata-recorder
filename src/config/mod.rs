@@ -381,6 +381,14 @@ impl Config {
 
         tracing::debug!("Reading config file");
         let contents = fs::read_to_string(&config_path).context("Failed to read config file")?;
+
+        // Treat whitespace-only files as missing configs (return defaults)
+        // This handles edge case where file exists but has no actual content
+        if contents.trim().is_empty() {
+            tracing::warn!("Config file is empty or whitespace-only, using defaults");
+            return Ok(Self::default());
+        }
+
         tracing::debug!("Parsing config file");
         let mut config =
             serde_json::from_str::<Config>(&contents).context("Failed to parse config file")?;
