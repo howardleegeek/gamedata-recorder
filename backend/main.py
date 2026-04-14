@@ -86,6 +86,10 @@ S3_TIMEOUT_CONFIG = BotoConfig(
     retries={"max_attempts": 3, "mode": "adaptive"}
 )
 
+# Upload limits
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024  # 50 GB per recording
+MAX_CHUNKS = 10000  # Maximum number of chunks per upload
+
 # CORS configuration
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8080"
@@ -578,9 +582,7 @@ async def upload_init(
     upload_id = str(uuid.uuid4())
     game_control_id = str(uuid.uuid4())
 
-    # Validate upload size — max 50 GB per recording, max 10000 chunks
-    MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024  # 50 GB
-    MAX_CHUNKS = 10000
+    # Validate upload size against module-level limits
     if req.total_size_bytes > MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=400,
@@ -699,8 +701,8 @@ async def upload_chunk(
     # Validate chunk_number
     if chunk_number < 1:
         raise HTTPException(status_code=400, detail="chunk_number must be >= 1")
-    if chunk_number > 10000:
-        raise HTTPException(status_code=400, detail="chunk_number exceeds maximum")
+    if chunk_number > MAX_CHUNKS:
+        raise HTTPException(status_code=400, detail=f"chunk_number exceeds maximum ({MAX_CHUNKS})")
 
     # Find upload
     result = await db.execute(

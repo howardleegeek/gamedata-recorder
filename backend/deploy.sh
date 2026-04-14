@@ -28,6 +28,7 @@ fi
 
 # Copy files
 cp main.py "$DEPLOY_DIR/"
+cp models.py "$DEPLOY_DIR/"
 cp requirements.txt "$DEPLOY_DIR/"
 
 # Create .env if not exists

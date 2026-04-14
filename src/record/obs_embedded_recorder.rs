@@ -505,7 +505,7 @@ impl RecorderState {
         self.last_video_encoder_type = Some(encoder_type);
 
         // Listen for signals to pass onto the event stream
-        self.was_hooked.store(false, Ordering::Relaxed);
+        self.was_hooked.store(false, Ordering::SeqCst);
         std::thread::spawn({
             let event_stream = request.event_stream;
             let was_hooked = self.was_hooked.clone();
@@ -543,8 +543,10 @@ impl RecorderState {
                                 if r.is_ok() {
                                     if last_application.as_ref().is_some_and(|a| a == &(game_exe.clone(), hwnd.clone())) {
                                         tracing::warn!("Video started again for last game, assuming we're already hooked");
-                                        let _ = event_stream.send(InputEventType::HookStart);
-                                        was_hooked.store(true, Ordering::Relaxed);
+                                        // Only send HookStart if not already hooked (prevents race with hook_signal_rx)
+                                        if !was_hooked.swap(true, Ordering::SeqCst) {
+                                            let _ = event_stream.send(InputEventType::HookStart);
+                                        }
                                     }
 
                                     tracing::info!("Video started at {}s", initial_time.elapsed().as_secs_f64());
@@ -560,8 +562,10 @@ impl RecorderState {
                             r = hook_signal_rx.recv() => {
                                 if r.is_ok() {
                                     tracing::info!("Game hooked at {}s", initial_time.elapsed().as_secs_f64());
-                                    let _ = event_stream.send(InputEventType::HookStart);
-                                    was_hooked.store(true, Ordering::Relaxed);
+                                    // Only send HookStart if not already sent (prevents duplicate with synthetic hook)
+                                    if !was_hooked.swap(true, Ordering::SeqCst) {
+                                        let _ = event_stream.send(InputEventType::HookStart);
+                                    }
                                 }
                             }
                             _ = &mut shutdown_rx => {
@@ -632,7 +636,7 @@ impl RecorderState {
             shutdown_tx.send(()).ok();
         }
 
-        if !self.was_hooked.load(Ordering::Relaxed) {
+        if !self.was_hooked.load(Ordering::SeqCst) {
             bail!("Application was never hooked, recording will be blank");
         }
 
@@ -687,7 +691,7 @@ impl RecorderState {
         }
 
         // If we're already hooked, no timeout
-        if self.was_hooked.load(Ordering::Relaxed) {
+        if self.was_hooked.load(Ordering::SeqCst) {
             return false;
         }
 
