@@ -221,8 +221,8 @@ fn account_section(ui: &mut Ui, app: &mut App) {
                 let retry_count = app.app_state.offline.retry_count.load(Ordering::SeqCst);
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
 
                 let time_remaining = if next_retry_time > now {
                     let secs = next_retry_time - now;
@@ -811,9 +811,7 @@ fn encoder_settings_window(
         .collapsible(false)
         .resizable(false)
         .show(ctx, |ui| match encoder_settings.encoder {
-            VideoEncoderType::X264 => {
-                encoder_settings_x264(ui, &mut encoder_settings.x264)
-            }
+            VideoEncoderType::X264 => encoder_settings_x264(ui, &mut encoder_settings.x264),
             VideoEncoderType::NvEncHevc | VideoEncoderType::NvEnc => {
                 encoder_settings_nvenc(ui, &mut encoder_settings.nvenc)
             }
