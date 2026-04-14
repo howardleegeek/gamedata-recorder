@@ -94,7 +94,15 @@ impl InputEventWriter {
         self.write_entry(InputEvent::new_at_now(InputEventType::End {
             inputs: input_capture.active_input(),
         }))
-        .await
+        .await?;
+
+        // Sync file to disk for crash durability - ensures all buffered data is written
+        // before the file handle is dropped. This protects against data loss if the
+        // system crashes immediately after recording stops.
+        self.file
+            .sync_all()
+            .await
+            .wrap_err("failed to sync input file to disk")
     }
 
     async fn write_entry(&mut self, event: InputEvent) -> Result<()> {
