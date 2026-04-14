@@ -554,7 +554,7 @@ impl RecorderState {
                         tokio::select! {
                             r = start_signal_rx.recv() => {
                                 if r.is_ok() {
-                                    if last_application.as_ref().is_some_and(|a| a == &(game_exe.clone(), hwnd.clone())) {
+                                    if last_application.as_ref().is_some_and(|a| a.0 == game_exe && a.1 .0 == hwnd.0) {
                                         tracing::warn!("Video started again for last game, assuming we're already hooked");
                                         let _ = event_stream.send(InputEventType::HookStart);
                                         was_hooked.store(true, Ordering::Relaxed);
@@ -929,7 +929,10 @@ mod tests {
         let msg =
             "Video stopped, number of skipped frames due to encoding lag: 10758/22640 (47.5%)";
         let result = parse_skipped_frames(msg);
-        assert!(result.is_some(), "parse_skipped_frames should succeed for valid input");
+        assert!(
+            result.is_some(),
+            "parse_skipped_frames should succeed for valid input"
+        );
         let result = result.unwrap();
 
         assert_eq!(result.skipped, 10758);
