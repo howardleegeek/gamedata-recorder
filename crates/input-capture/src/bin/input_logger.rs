@@ -44,8 +44,12 @@ impl Args {
                 #[cfg(feature = "compression")]
                 "--level" | "-l" => {
                     if i + 1 < args.len() {
-                        if let Ok(l) = args[i + 1].parse::<i32>() {
-                            level = l.clamp(1, 22);
+                        match args[i + 1].parse::<i32>() {
+                            Ok(l) => level = l.clamp(1, 22),
+                            Err(_) => eprintln!(
+                                "Warning: --level requires a numeric argument (1-22), got: {}",
+                                args[i + 1]
+                            ),
                         }
                         i += 1;
                     } else {
