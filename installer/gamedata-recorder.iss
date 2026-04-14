@@ -42,9 +42,9 @@ Name: "desktopicon"; Description: "Create a desktop icon"; GroupDescription: "Ad
 Name: "startup"; Description: "Start automatically when Windows starts"; GroupDescription: "Additional options:"; Flags: checkedonce
 
 [Files]
-Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion uninsrestartdelete
 ; OBS DLLs required by libobs
-Source: "..\target\release\*.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\target\release\*.dll"; DestDir: "{app}"; Flags: ignoreversion uninsrestartdelete
 ; Config is created automatically by the app with defaults if it doesn't exist
 
 [Icons]
