@@ -1,8 +1,8 @@
 use std::{
     path::PathBuf,
     sync::{
-        Arc, OnceLock, RwLock,
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize},
+        Arc, OnceLock, RwLock,
     },
     time::{Duration, Instant},
 };
@@ -73,9 +73,16 @@ impl AppState {
     ) -> Self {
         tracing::debug!("AppState::new() called");
         tracing::debug!("Loading configuration");
+        let config = match Config::load() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::error!("Failed to load config, using defaults: {e}");
+                Config::default()
+            }
+        };
         let state = Self {
             state: RwLock::new(RecordingStatus::Stopped),
-            config: RwLock::new(Config::load().expect("failed to init configs")),
+            config: RwLock::new(config),
             async_request_tx,
             ui_update_tx,
             ui_update_unreliable_tx,
