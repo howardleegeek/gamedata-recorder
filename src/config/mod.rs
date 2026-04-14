@@ -125,13 +125,21 @@ impl std::fmt::Display for OverlayLocation {
 
 /// Validates that the audio cue filename doesn't contain path traversal sequences.
 /// Returns an error if the filename contains parent directory references (..) or
-/// path separators that could escape the intended cues directory.
+/// path separators that could escape the intended cues directory, or if the
+/// filename is empty or whitespace-only.
 fn validate_audio_cue_filename<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,
 {
     use serde::de::Error;
     let filename = String::deserialize(deserializer)?;
+
+    // Reject empty or whitespace-only filenames
+    if filename.trim().is_empty() {
+        return Err(Error::custom(
+            "Audio cue filename cannot be empty or whitespace-only",
+        ));
+    }
 
     // Reject filenames containing parent directory references or path separators
     if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
