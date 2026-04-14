@@ -35,6 +35,8 @@ impl Args {
                     if i + 1 < args.len() {
                         output = Some(args[i + 1].clone());
                         i += 1;
+                    } else {
+                        eprintln!("Warning: --output requires a file path argument");
                     }
                 }
                 "--level" | "-l" => {
@@ -43,6 +45,8 @@ impl Args {
                             level = l.clamp(1, 22);
                         }
                         i += 1;
+                    } else {
+                        eprintln!("Warning: --level requires a numeric argument (1-22)");
                     }
                 }
                 "--help" | "-h" => {
