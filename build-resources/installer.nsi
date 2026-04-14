@@ -104,7 +104,13 @@ Section "MainSection" SEC01
   ${ifNot} ${FileExists} "$SYSDIR\msvcp140.dll"
     DetailPrint "Installing Visual C++ Redistributable..."
     File /oname=$PLUGINSDIR\vc_redist.x64.exe "downloads\vc_redist.x64.exe"
-    ExecWait '"$PLUGINSDIR\vc_redist.x64.exe" /norestart'
+    ExecWait '"$PLUGINSDIR\vc_redist.x64.exe" /norestart' $0
+    IntCmp $0 0 vc_redist_success vc_redist_failed vc_redist_failed
+    vc_redist_failed:
+      DetailPrint "Visual C++ Redistributable installation failed with exit code $0"
+      Abort "Installation failed: Visual C++ Redistributable could not be installed."
+    vc_redist_success:
+      DetailPrint "Visual C++ Redistributable installed successfully"
   ${endIf}
 
   ; Copy all files and folders from dist directory
