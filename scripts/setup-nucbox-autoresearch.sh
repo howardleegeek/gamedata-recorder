@@ -28,7 +28,7 @@ export PATH="$HOME/.bun/bin:$PATH"
 
 # 3. Install OpenCode
 if [ ! -d "$HOME/.opencode" ]; then
-    curl -fsSL https://opencode.ai/install | bash
+    curl -fsSL --connect-timeout 30 --max-time 300 https://opencode.ai/install | bash
 fi
 export PATH="$HOME/.opencode/bin:$PATH"
 
@@ -47,7 +47,7 @@ git pull
 
 # 6. Install Rust toolchain (for cargo fmt/clippy on linter side)
 if ! command -v cargo &>/dev/null; then
-    curl --proto '=https' --tlsv1.2 -sSfL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+    curl --proto '=https' --tlsv1.2 -sSfL --connect-timeout 30 --max-time 300 https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 fi
 source "$HOME/.cargo/env" 2>/dev/null || true
 if command -v rustup &>/dev/null; then
