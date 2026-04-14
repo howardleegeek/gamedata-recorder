@@ -1,10 +1,11 @@
 use std::{
     collections::HashMap,
+    io::Write,
     path::{Path, PathBuf},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use color_eyre::{Result, eyre};
+use color_eyre::{eyre, Result};
 use egui_wgpu::wgpu;
 use serde::{Deserialize, Serialize};
 
@@ -101,7 +102,9 @@ impl UploadProgressState {
 
     /// Save progress state to a file (Snapshot + Log format)
     pub fn save_to_file(&self, path: &Path) -> eyre::Result<()> {
-        let file = std::fs::File::create(path)?;
+        // Atomic write pattern: write to temp file, then rename for crash durability
+        let temp_path = path.with_extension("progress.tmp");
+        let file = std::fs::File::create(&temp_path)?;
         let mut writer = std::io::BufWriter::new(file);
 
         // 1. Write the base state with EMPTY chunk_etags to the first line.
@@ -109,7 +112,6 @@ impl UploadProgressState {
         let mut header_state = self.clone();
         header_state.chunk_etags.clear();
         serde_json::to_writer(&mut writer, &header_state)?;
-        use std::io::Write;
         writeln!(&mut writer)?;
 
         // 2. Write all existing etags as subsequent lines
@@ -119,6 +121,12 @@ impl UploadProgressState {
         }
 
         writer.flush()?;
+        // Ensure data is durable before renaming
+        let file = writer.into_inner()?;
+        file.sync_all()?;
+
+        // Atomically rename temp file to target path
+        std::fs::rename(&temp_path, path)?;
         Ok(())
     }
 
