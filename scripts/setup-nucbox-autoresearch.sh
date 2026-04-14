@@ -38,6 +38,10 @@ export PATH="$HOME/.opencode/bin:$PATH"
 mkdir -p ~/.config/opencode
 chmod 700 ~/.config/opencode
 (umask 077 && jq -n --arg key "$FIREWORKS_API_KEY" '{"fireworks": {"type": "api", "key": $key}}' > ~/.config/opencode/auth.json)
+if [ ! -f ~/.config/opencode/auth.json ] || ! jq -e . ~/.config/opencode/auth.json >/dev/null 2>&1; then
+    echo "Error: Failed to create valid auth.json"
+    exit 1
+fi
 
 # 5. Clone gamedata-recorder
 cd ~
