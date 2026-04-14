@@ -117,9 +117,7 @@ impl KbmCapture {
 
             RegisterRawInputDevices(
                 &raw_input_devices,
-                size_of::<RAWINPUTDEVICE>()
-                    .try_into()
-                    .expect("size of RAWINPUTDEVICE should fit in u32"),
+                size_of::<RAWINPUTDEVICE>() as u32,
             )
             .wrap_err("failed to register raw input devices")?;
 
@@ -343,9 +341,7 @@ impl KbmCapture {
 
             // Get required buffer size first - RAWINPUT is variable-length
             let mut pcbsize = 0u32;
-            let header_size = size_of::<RAWINPUTHEADER>()
-                .try_into()
-                .expect("size of HRAWINPUT should fit in u32");
+            let header_size = size_of::<RAWINPUTHEADER>() as u32;
 
             if GetRawInputData(hrawinput, RID_INPUT, None, &mut pcbsize, header_size) == u32::MAX {
                 return Vec::new();
