@@ -36,11 +36,12 @@ pub fn validate_folder(path: &Path) -> eyre::Result<ValidationResult> {
     match validate_folder_impl(path) {
         Ok(result) => Ok(result),
         Err(e) => {
-            std::fs::write(
+            if let Err(write_err) = std::fs::write(
                 path.join(constants::filename::recording::INVALID),
                 e.join("\n"),
-            )
-            .ok();
+            ) {
+                tracing::error!("Failed to write invalid marker file: {}", write_err);
+            }
             eyre::bail!("Validation failures: {}", e.join("\n"));
         }
     }
