@@ -224,7 +224,7 @@ app_state.async_request_tx.send(AsyncRequest::SetOfflineMode { enabled: true, of
 **Status: COMPREHENSIVE** ✅
 
 Good coverage of:
-- Self (gamedata-recorder.exe, owl-control.exe)
+- Self (gamedata-recorder.exe)
 - System processes (explorer, taskmgr, etc.)
 - Launchers (steam, epic, gog, origin, uplay, battlenet)
 - Browsers (chrome, firefox, edge)
