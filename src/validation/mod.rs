@@ -1,4 +1,6 @@
 use std::{
+    fs::File,
+    io::Write as _,
     path::{Path, PathBuf},
     str::FromStr as _,
 };
@@ -130,10 +132,16 @@ fn validate_folder_impl(path: &Path) -> Result<ValidationResult, Vec<String>> {
             // fs::write will completely overwrite existing metadata file, and if the OS is
             // out of available memory (either due to user skill issue or a bug with owlc),
             // it becomes a nightmare case where the metadata just gets deleted.
-            // To be safe, we use atomic write pattern: write to temp file, then rename
+            // To be safe, we use atomic write pattern: write to temp file, sync to disk, then rename
             // This prevents corruption if the process crashes or runs out of memory
             let temp_path = meta_path.with_extension("tmp");
-            if let Err(e) = std::fs::write(&temp_path, metadata) {
+            let write_result = File::create(&temp_path)
+                .and_then(|mut file| {
+                    file.write_all(metadata.as_bytes())?;
+                    file.sync_all()?;
+                    Ok(())
+                });
+            if let Err(e) = write_result {
                 invalid_reasons.push(format!("Error writing metadata temp file: {e:?}"));
             } else if let Err(e) = std::fs::rename(&temp_path, &meta_path) {
                 invalid_reasons.push(format!("Error renaming metadata temp file: {e:?}"));
