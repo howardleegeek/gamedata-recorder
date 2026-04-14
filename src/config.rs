@@ -263,7 +263,15 @@ impl Config {
     pub fn save(&self) -> Result<()> {
         let config_path = Self::get_path()?;
         tracing::info!("Saving configs to {}", config_path.to_string_lossy());
-        fs::write(&config_path, serde_json::to_string_pretty(&self)?)?;
+
+        // Write to a temporary file first, then rename atomically to avoid corruption
+        // if the process crashes or system loses power during the write
+        let temp_path = config_path.with_extension("tmp");
+        fs::write(&temp_path, serde_json::to_string_pretty(&self)?)
+            .context("Failed to write temporary config file")?;
+        fs::rename(&temp_path, &config_path)
+            .context("Failed to rename temporary config file to final location")?;
+
         Ok(())
     }
 }
