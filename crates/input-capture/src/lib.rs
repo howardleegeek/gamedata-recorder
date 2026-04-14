@@ -80,7 +80,10 @@ pub struct InputCapture {
 impl InputCapture {
     pub fn new() -> Result<(Self, mpsc::Receiver<Event>)> {
         tracing::debug!("InputCapture::new() called");
-        let (input_tx, input_rx) = mpsc::channel(10);
+        // Capacity of 1000 to handle high-frequency input devices (1000Hz gaming mice,
+        // rapid keyboard input) without dropping events during intense gameplay bursts.
+        // This prevents backpressure that could cause input event loss.
+        let (input_tx, input_rx) = mpsc::channel(1000);
 
         tracing::debug!("Spawning raw input thread for keyboard/mouse capture");
         let active_keys = Arc::new(Mutex::new(kbm_capture::ActiveKeys::default()));
