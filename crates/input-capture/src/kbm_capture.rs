@@ -360,6 +360,9 @@ impl KbmCapture {
                 header_size,
             );
             if result == u32::MAX {
+                use windows::Win32::Foundation::GetLastError;
+                let error = GetLastError();
+                tracing::warn!("GetRawInputData failed: {:?}, dropping input event", error);
                 return Vec::new();
             }
 
