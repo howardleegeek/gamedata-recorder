@@ -293,6 +293,13 @@ class Game(Base):
     demand_level: Mapped[int] = mapped_column(Integer, default=1)  # 1-5
     earnings_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
 
+    def validate(self):
+        """Validate game data constraints."""
+        if self.demand_level < 1 or self.demand_level > 5:
+            raise ValueError(f"demand_level must be between 1 and 5, got {self.demand_level}")
+        if self.earnings_multiplier < 0:
+            raise ValueError(f"earnings_multiplier cannot be negative, got {self.earnings_multiplier}")
+
     # Metadata
     game_metadata: Mapped[Optional[dict]] = mapped_column(
         "metadata", JSONB, nullable=True

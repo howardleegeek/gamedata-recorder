@@ -457,20 +457,26 @@ round_14_unicode() {
 
 round_15_concurrent_login() {
     log_round "15" "并发登录测试 (Concurrent Logins)"
-    
+
+    # Use unique temp file prefix with PID to avoid collisions
+    local TMP_PREFIX="/tmp/login_r15_$$"
+
+    # Ensure cleanup even if script exits early
+    trap "rm -f ${TMP_PREFIX}_*.json 2>/dev/null" RETURN
+
     log_test "10 concurrent logins same email"
     PIDS=()
     for i in {1..10}; do
-        (curl -s -o /tmp/login_r15_$i.json -X POST "${API_URL}/api/v1/auth/login" \
+        (curl -s -o "${TMP_PREFIX}_$i.json" -X POST "${API_URL}/api/v1/auth/login" \
             -H "Content-Type: application/json" \
             -d '{"email": "sameuser_r15@test.com", "provider": "email"}' 2>/dev/null) &
         PIDS+=($!)
     done
     for pid in "${PIDS[@]}"; do wait $pid 2>/dev/null || true; done
-    
-    SUCCESS=$(grep -l '"token"' /tmp/login_r15_*.json 2>/dev/null | wc -l)
+
+    SUCCESS=$(grep -l '"token"' "${TMP_PREFIX}_"*.json 2>/dev/null | wc -l)
     log_pass "$SUCCESS/10 concurrent logins succeeded"
-    rm -f /tmp/login_r15_*.json
+    rm -f "${TMP_PREFIX}_"*.json 2>/dev/null
 }
 
 round_16_duplicate_operations() {

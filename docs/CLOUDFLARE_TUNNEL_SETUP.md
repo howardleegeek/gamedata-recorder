@@ -29,7 +29,7 @@ cloudflared tunnel create gamedata-backend
 
 ```yaml
 tunnel: <你的-tunnel-id>
-credentials-file: /Users/howardlee/.cloudflared/<你的-tunnel-id>.json
+credentials-file: /Users/<username>/.cloudflared/<你的-tunnel-id>.json
 
 ingress:
   - hostname: api.gamedatalabs.com
@@ -69,9 +69,9 @@ cloudflared tunnel run gamedata-backend
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/howardlee/.cloudflared/tunnel.log</string>
+    <string>/Users/<username>/.cloudflared/tunnel.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/howardlee/.cloudflared/tunnel.error.log</string>
+    <string>/Users/<username>/.cloudflared/tunnel.error.log</string>
 </dict>
 </plist>
 ```

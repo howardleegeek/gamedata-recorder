@@ -17,6 +17,7 @@ use input_capture::{Event, PressState, timestamp::HighPrecisionTimer, vkey_names
 struct Args {
     compress: bool,
     output: Option<String>,
+    #[cfg(feature = "compression")]
     level: i32,
 }
 
@@ -25,6 +26,7 @@ impl Args {
         let args: Vec<String> = std::env::args().collect();
         let mut compress = false;
         let mut output = None;
+        #[cfg(feature = "compression")]
         let mut level = 3; // Default zstd compression level
 
         let mut i = 1;
@@ -35,14 +37,23 @@ impl Args {
                     if i + 1 < args.len() {
                         output = Some(args[i + 1].clone());
                         i += 1;
+                    } else {
+                        eprintln!("Warning: --output requires a file path argument");
                     }
                 }
+                #[cfg(feature = "compression")]
                 "--level" | "-l" => {
                     if i + 1 < args.len() {
-                        if let Ok(l) = args[i + 1].parse::<i32>() {
-                            level = l.clamp(1, 22);
+                        match args[i + 1].parse::<i32>() {
+                            Ok(l) => level = l.clamp(1, 22),
+                            Err(_) => eprintln!(
+                                "Warning: --level requires a numeric argument (1-22), got: {}",
+                                args[i + 1]
+                            ),
                         }
                         i += 1;
+                    } else {
+                        eprintln!("Warning: --level requires a numeric argument (1-22)");
                     }
                 }
                 "--help" | "-h" => {
@@ -57,6 +68,7 @@ impl Args {
         Self {
             compress,
             output,
+            #[cfg(feature = "compression")]
             level,
         }
     }
@@ -83,6 +95,10 @@ fn print_help() {
 /// Output writer trait for abstraction over stdout and compressed file
 trait OutputWriter: Write {
     fn flush_output(&mut self) -> std::io::Result<()>;
+    /// Sync data to disk for crash durability. Default does nothing.
+    fn sync_output(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl OutputWriter for std::io::StdoutLock<'_> {
@@ -95,11 +111,23 @@ impl OutputWriter for std::fs::File {
     fn flush_output(&mut self) -> std::io::Result<()> {
         self.flush()
     }
+    fn sync_output(&mut self) -> std::io::Result<()> {
+        self.sync_all()
+    }
 }
 
 #[cfg(feature = "compression")]
 struct ZstdWriter {
     encoder: zstd::stream::write::Encoder<'static, std::fs::File>,
+}
+
+#[cfg(feature = "compression")]
+impl ZstdWriter {
+    /// Finish the zstd encoder, writing any remaining data and checksums.
+    /// This must be called before dropping to ensure a valid compressed file.
+    fn finish(mut self) -> std::io::Result<()> {
+        self.encoder.finish().map(|_| ())
+    }
 }
 
 #[cfg(feature = "compression")]
@@ -116,6 +144,13 @@ impl Write for ZstdWriter {
 #[cfg(feature = "compression")]
 impl OutputWriter for ZstdWriter {
     fn flush_output(&mut self) -> std::io::Result<()> {
+        self.encoder.flush()
+    }
+    fn sync_output(&mut self) -> std::io::Result<()> {
+        // Finish the encoder to write the zstd footer, then sync the underlying file
+        // Note: finish() consumes the encoder, so we use do_finish() which doesn't
+        self.encoder.do_finish()?;
+        // After do_finish(), the encoder will pass through sync_all calls to the underlying file
         self.encoder.flush()
     }
 }
@@ -144,36 +179,73 @@ fn main() {
 
     let timer = HighPrecisionTimer::new();
 
-    let (_capture, mut rx) =
-        input_capture::InputCapture::new().expect("Failed to initialize input capture");
+    let (_capture, mut rx) = match input_capture::InputCapture::new() {
+        Ok(capture_rx) => capture_rx,
+        Err(e) => {
+            tracing::error!("Failed to initialize input capture: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     // Block on the tokio channel using a simple runtime
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap();
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::error!("Failed to build tokio runtime for input logger: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     rt.block_on(async {
         // Setup output writer based on arguments
-        let _result: Result<(), Box<dyn std::error::Error>> = match &args.output {
+        let result: Result<(), Box<dyn std::error::Error>> = match &args.output {
             Some(path) => {
-                let file = std::fs::File::create(path).expect("Failed to create output file");
+                let file = match std::fs::File::create(path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::error!("Failed to create output file '{}': {}", path, e);
+                        std::process::exit(1);
+                    }
+                };
 
                 #[cfg(feature = "compression")]
                 if args.compress {
-                    let encoder = zstd::stream::write::Encoder::new(file, args.level)
-                        .expect("Failed to create zstd encoder");
+                    let encoder = match zstd::stream::write::Encoder::new(file, args.level) {
+                        Ok(enc) => enc,
+                        Err(e) => {
+                            tracing::error!("Failed to create zstd encoder: {}", e);
+                            std::process::exit(1);
+                        }
+                    };
                     let mut writer = ZstdWriter { encoder };
-                    run_logger(&timer, &mut rx, &mut writer).await
+                    let result = run_logger(&timer, &mut rx, &mut writer).await;
+                    // Flush compressed data for crash durability
+                    if let Err(e) = writer.sync_output() {
+                        eprintln!("Warning: failed to sync output file: {}", e);
+                    }
+                    result
                 } else {
                     let mut writer = file;
-                    run_logger(&timer, &mut rx, &mut writer).await
+                    let result = run_logger(&timer, &mut rx, &mut writer).await;
+                    // Ensure data is flushed to disk for crash durability
+                    if let Err(e) = writer.sync_output() {
+                        eprintln!("Warning: failed to sync output file: {}", e);
+                    }
+                    result
                 }
 
                 #[cfg(not(feature = "compression"))]
                 {
                     let mut writer = file;
-                    run_logger(&timer, &mut rx, &mut writer).await
+                    let result = run_logger(&timer, &mut rx, &mut writer).await;
+                    // Ensure data is flushed to disk for crash durability
+                    if let Err(e) = writer.sync_output() {
+                        eprintln!("Warning: failed to sync output file: {}", e);
+                    }
+                    result
                 }
             }
             None => {
@@ -182,6 +254,10 @@ fn main() {
                 run_logger(&timer, &mut rx, &mut writer).await
             }
         };
+
+        if let Err(e) = result {
+            tracing::error!("Input logger error: {}", e);
+        }
     });
 }
 
@@ -193,9 +269,13 @@ async fn run_logger<W: OutputWriter>(
     while let Some(event) = rx.recv().await {
         let t = timer.wall_time_str();
         let line = format_event(&t, &event);
-        let _ = writeln!(out, "{}", line);
+        if let Err(e) = writeln!(out, "{}", line) {
+            tracing::warn!("Failed to write event to output: {}", e);
+        }
 
         // Flush periodically to ensure data is written
+        // Flush on all key/mouse button events (not just key presses) to prevent
+        // data loss during long periods of mouse-only activity or on crash
         if matches!(
             event,
             Event::KeyPress {
@@ -203,8 +283,16 @@ async fn run_logger<W: OutputWriter>(
                 ..
             }
         ) {
-            let _ = out.flush_output();
+            if let Err(e) = out.flush_output() {
+                tracing::warn!("Failed to flush output: {}", e);
+            }
         }
+    }
+
+    // Final flush on shutdown to ensure all buffered data is written
+    // This is critical for compressed output (zstd encoder has internal buffers)
+    if let Err(e) = out.flush_output() {
+        tracing::warn!("Failed to flush output on shutdown: {}", e);
     }
     Ok(())
 }
@@ -227,12 +315,14 @@ fn format_event(t: &str, event: &Event) -> String {
                 PressState::Pressed => "DOWN",
                 PressState::Released => "UP",
             };
+            // Windows VK constants: VK_LBUTTON=1, VK_RBUTTON=2, VK_CANCEL=3,
+            // VK_MBUTTON=4, VK_XBUTTON1=5, VK_XBUTTON2=6
             let btn = match key {
                 1 => "LEFT",
                 2 => "RIGHT",
-                3 => "MIDDLE",
-                4 => "X1",
-                5 => "X2",
+                4 => "MIDDLE",
+                5 => "X1",
+                6 => "X2",
                 _ => "?",
             };
             format!("{}  MOUSE_BTN    {} {}", t, btn, state)

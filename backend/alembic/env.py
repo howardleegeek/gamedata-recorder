@@ -2,6 +2,7 @@
 
 import asyncio
 from logging.config import fileConfig
+from urllib.parse import quote_plus
 
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
@@ -35,8 +36,12 @@ def get_database_url():
     # Use DATABASE_URL if set, otherwise construct from components
     database_url = os.getenv("DATABASE_URL")
     if database_url:
-        # Ensure asyncpg driver
-        if database_url.startswith("postgresql://"):
+        # Ensure asyncpg driver - handle both 'postgres://' and 'postgresql://' prefixes
+        if database_url.startswith("postgres://") and not database_url.startswith("postgresql://"):
+            database_url = database_url.replace(
+                "postgres://", "postgresql+asyncpg://", 1
+            )
+        elif database_url.startswith("postgresql://"):
             database_url = database_url.replace(
                 "postgresql://", "postgresql+asyncpg://", 1
             )
@@ -49,7 +54,11 @@ def get_database_url():
     port = os.getenv("DB_PORT", "5432")
     database = os.getenv("DB_NAME", "gamedata")
 
-    return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{database}"
+    # URL-encode credentials to handle special characters in passwords
+    return (
+        f"postgresql+asyncpg://{quote_plus(user)}:{quote_plus(password)}"
+        f"@{quote_plus(host)}:{port}/{quote_plus(database)}"
+    )
 
 
 def run_migrations_offline() -> None:

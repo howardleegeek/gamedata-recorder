@@ -3,8 +3,13 @@ name = "input-capture"
 version = "0.0.0"
 edition = "2024"
 
+[features]
+default = []
+compression = ["dep:zstd"]
+
 [dependencies]
 tracing.workspace = true
+zstd = { version = "0.13", optional = true }
 windows = { workspace = true, features = [
     "Win32_System_SystemInformation",
     "Win32_System_LibraryLoader",

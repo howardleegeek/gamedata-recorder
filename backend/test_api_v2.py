@@ -30,13 +30,17 @@ TestSessionLocal = async_sessionmaker(
 async def override_get_db():
     """Override database dependency for testing."""
     async with TestSessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
+        yield session
 
 
 app.dependency_overrides[get_db] = override_get_db
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def cleanup_test_engine():
+    """Cleanup fixture to dispose test engine after all tests."""
+    yield
+    await test_engine.dispose()
 
 
 @pytest_asyncio.fixture(scope="function")
@@ -109,10 +113,11 @@ async def test_register_user(client):
 async def test_register_duplicate_email(client):
     """Test registration with duplicate email."""
     # First registration
-    await client.post(
+    response = await client.post(
         "/api/v1/auth/register",
         json={"email": "duplicate@example.com", "password": "SecurePass123"},
     )
+    assert response.status_code == 200
 
     # Second registration with same email
     response = await client.post(

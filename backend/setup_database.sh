@@ -53,7 +53,9 @@ if psql -h "$DB_HOST" -p "$DB_PORT" -U postgres -tc "SELECT 1 FROM pg_roles WHER
     echo "⚠️  User '$DB_USER' already exists"
 else
     echo "   Creating user '$DB_USER'..."
-    psql -h "$DB_HOST" -p "$DB_PORT" -U postgres -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASSWORD';"
+    # Escape single quotes in password for SQL (PostgreSQL uses '' to escape ')
+    DB_PASSWORD_ESCAPED=$(echo "$DB_PASSWORD" | sed "s/'/''/g")
+    psql -h "$DB_HOST" -p "$DB_PORT" -U postgres -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASSWORD_ESCAPED';"
 fi
 
 # Grant privileges
@@ -111,13 +113,14 @@ async def seed():
         )
         session.add(test_user)
         
-        # Add some test games
+        # Add some test games with validation
         games = [
             Game(id="game_001", exe_name="cs2.exe", title="Counter-Strike 2", genre="FPS", is_supported=True, demand_level=5),
             Game(id="game_002", exe_name="valorant.exe", title="Valorant", genre="FPS", is_supported=True, demand_level=5),
             Game(id="game_003", exe_name="genshinimpact.exe", title="Genshin Impact", genre="RPG", is_supported=True, demand_level=4),
         ]
         for game in games:
+            game.validate()  # Validate constraints before adding
             session.add(game)
         
         await session.commit()

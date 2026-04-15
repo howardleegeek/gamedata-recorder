@@ -359,7 +359,7 @@ round_8_sql_injection() {
     log_test "SQL injection in email"
     RESPONSE=$(curl -s -X POST "${API_URL}/api/v1/auth/login" \
         -H "Content-Type: application/json" \
-        -d '{"email": "test@test.com\'; DROP TABLE users; --", "provider": "email"}' 2>/dev/null)
+        -d "{\"email\": \"test@test.com'; DROP TABLE users; --\", \"provider\": \"email\"}" 2>/dev/null)
     if echo "$RESPONSE" | grep -q '"token"'; then
         log_pass "SQL injection in email handled safely"
     else
@@ -371,10 +371,7 @@ round_8_sql_injection() {
     RESPONSE=$(curl -s -X POST "${API_URL}/api/v1/upload/init" \
         -H "Authorization: Bearer ${TOKEN}" \
         -H "Content-Type: application/json" \
-        -d '{
-            "filename": "test.mp4\'; DELETE FROM uploads; --",
-            "total_size_bytes": 1000000
-        }' 2>/dev/null)
+        -d "{\n            \"filename\": \"test.mp4'; DELETE FROM uploads; --\",\n            \"total_size_bytes\": 1000000\n        }" 2>/dev/null)
     if echo "$RESPONSE" | grep -q '"upload_id"'; then
         log_pass "SQL injection in filename handled safely"
     else
@@ -607,12 +604,18 @@ round_14_unicode() {
 round_15_concurrent_login() {
     log_round "15" "并发登录测试 (Concurrent Logins)"
     
+    # Use unique temp file prefix with PID to avoid collisions
+    local TMP_PREFIX="/tmp/login_r15_$$"
+    
+    # Ensure cleanup even if script exits early
+    trap "rm -f ${TMP_PREFIX}_*.json 2>/dev/null" RETURN
+    
     log_test "Same email, 5 concurrent logins"
     PIDS=()
     for i in {1..5}; do
         (curl -s -X POST "${API_URL}/api/v1/auth/login" \
             -H "Content-Type: application/json" \
-            -d '{"email": "sameuser@test.com", "provider": "email"}' > /tmp/login_$i.json 2>&1) &
+            -d '{"email": "sameuser@test.com", "provider": "email"}' > "${TMP_PREFIX}_$i.json" 2>&1) &
         PIDS+=($!)
     done
     
@@ -623,7 +626,7 @@ round_15_concurrent_login() {
     # 检查是否都成功
     SUCCESS=0
     for i in {1..5}; do
-        if [ -f "/tmp/login_$i.json" ] && grep -q '"token"' "/tmp/login_$i.json" 2>/dev/null; then
+        if [ -f "${TMP_PREFIX}_$i.json" ] && grep -q '"token"' "${TMP_PREFIX}_$i.json" 2>/dev/null; then
             ((SUCCESS++))
         fi
     done
@@ -633,8 +636,6 @@ round_15_concurrent_login() {
     else
         log_warn "Only $SUCCESS/5 concurrent logins succeeded"
     fi
-    
-    rm -f /tmp/login_*.json
 }
 
 # ==========================================

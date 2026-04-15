@@ -52,9 +52,21 @@ pub struct KbmCapture {
 impl Drop for KbmCapture {
     fn drop(&mut self) {
         unsafe {
-            DestroyWindow(self.hwnd).expect("failed to destroy window");
-            UnregisterClassA(self.class_name, Some(self.h_instance))
-                .expect("failed to unregister class");
+            // Destroy window first; only unregister class if window was successfully destroyed.
+            // UnregisterClassA fails with ERROR_CLASS_HAS_WINDOWS if any windows still exist.
+            match DestroyWindow(self.hwnd) {
+                Ok(_) => {
+                    if let Err(e) = UnregisterClassA(self.class_name, Some(self.h_instance)) {
+                        tracing::error!(
+                            "Failed to unregister window class during cleanup: {:?}",
+                            e
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to destroy window during cleanup: {:?}", e);
+                }
+            }
         }
     }
 }
@@ -106,13 +118,9 @@ impl KbmCapture {
                 hwndTarget: hwnd,
             });
 
-            RegisterRawInputDevices(
-                &raw_input_devices,
-                size_of::<RAWINPUTDEVICE>()
-                    .try_into()
-                    .expect("size of RAWINPUTDEVICE should fit in u32"),
-            )
-            .wrap_err("failed to register raw input devices")?;
+            let device_count = raw_input_devices.len() as u32;
+            RegisterRawInputDevices(&raw_input_devices, device_count)
+                .wrap_err("failed to register raw input devices")?;
 
             Ok(Self {
                 hwnd,
@@ -128,7 +136,22 @@ impl KbmCapture {
             let mut msg = MSG::default();
             let mut last_absolute: Option<(i32, i32)> = None;
 
-            while GetMessageA(&mut msg, None, 0, 0).as_bool() {
+            // GetMessageA returns:
+            // - 0 if WM_QUIT is received (exit loop)
+            // - -1 if an error occurs (handle error)
+            // - positive non-zero if a message is retrieved
+            // We must check for -1 explicitly; .as_bool() would treat it as true.
+            loop {
+                let result = GetMessageA(&mut msg, None, 0, 0);
+                let result_i32 = result.0;
+                if result_i32 == 0 {
+                    break; // WM_QUIT received
+                }
+                if result.0 == -1 {
+                    use windows::Win32::Foundation::GetLastError;
+                    let error = GetLastError();
+                    bail!("GetMessageA failed: {error:?}");
+                }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageA(&msg);
 
@@ -155,6 +178,7 @@ impl KbmCapture {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        // SAFETY: Windows API callback - unsafe required for FFI boundary
         unsafe {
             use windows::Win32::UI::WindowsAndMessaging;
             match msg {
@@ -174,13 +198,14 @@ impl KbmCapture {
     }
 
     fn active_keys(&self) -> MutexGuard<'_, ActiveKeys> {
-        self.active_keys.lock().unwrap()
+        self.active_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Parse raw input from GetRawInputBuffer batch reading.
     /// Includes message time for latency tracking.
     #[allow(dead_code)]
-    #[allow(clippy::unnecessary_unsafe)]
     fn parse_raw_input(
         &mut self,
         rawinput: &RAWINPUT,
@@ -192,186 +217,33 @@ impl KbmCapture {
         // SAFETY: We trust the RAWINPUT data from Windows. Union field access
         // is required because RAWINPUT.data is a union of mouse/keyboard/hid.
         // The dwType field tells us which union variant is valid.
-        match Input::RID_DEVICE_INFO_TYPE(rawinput.header.dwType) {
-            Input::RIM_TYPEMOUSE => {
-                let mut events = Vec::new();
-                let mouse = unsafe { rawinput.data.mouse };
-                let us_flags = mouse.usFlags.0;
-
-                // Handle mouse movement
-                if mouse.lLastX != 0 || mouse.lLastY != 0 {
-                    let (delta_x, delta_y) = if (us_flags & MOUSE_MOVE_ABSOLUTE.0) != 0 {
-                        let is_virtual_desktop = (us_flags & MOUSE_VIRTUAL_DESKTOP.0) != 0;
-                        let (screen_x, screen_y) = convert_absolute_to_screen_coords(
-                            mouse.lLastX,
-                            mouse.lLastY,
-                            is_virtual_desktop,
-                        );
-                        let delta = last_absolute
-                            .map(|(last_x, last_y)| (screen_x - last_x, screen_y - last_y))
-                            .unwrap_or_default();
-                        *last_absolute = Some((screen_x, screen_y));
-                        delta
-                    } else {
-                        (mouse.lLastX, mouse.lLastY)
-                    };
-
-                    if delta_x != 0 || delta_y != 0 {
-                        events.push(Event::MouseMove([delta_x, delta_y]));
-                    }
-                }
-
-                let us_button_flags = unsafe { u32::from(mouse.Anonymous.Anonymous.usButtonFlags) };
-
-                if us_button_flags & RI_MOUSE_LEFT_BUTTON_DOWN != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_LBUTTON.0,
-                        press_state: PressState::Pressed,
-                    });
-                    self.active_keys().mouse.insert(VK_LBUTTON.0);
-                }
-                if us_button_flags & RI_MOUSE_LEFT_BUTTON_UP != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_LBUTTON.0,
-                        press_state: PressState::Released,
-                    });
-                    self.active_keys().mouse.remove(&VK_LBUTTON.0);
-                }
-                if us_button_flags & RI_MOUSE_RIGHT_BUTTON_DOWN != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_RBUTTON.0,
-                        press_state: PressState::Pressed,
-                    });
-                    self.active_keys().mouse.insert(VK_RBUTTON.0);
-                }
-                if us_button_flags & RI_MOUSE_RIGHT_BUTTON_UP != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_RBUTTON.0,
-                        press_state: PressState::Released,
-                    });
-                    self.active_keys().mouse.remove(&VK_RBUTTON.0);
-                }
-                if us_button_flags & RI_MOUSE_MIDDLE_BUTTON_DOWN != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_MBUTTON.0,
-                        press_state: PressState::Pressed,
-                    });
-                    self.active_keys().mouse.insert(VK_MBUTTON.0);
-                }
-                if us_button_flags & RI_MOUSE_MIDDLE_BUTTON_UP != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_MBUTTON.0,
-                        press_state: PressState::Released,
-                    });
-                    self.active_keys().mouse.remove(&VK_MBUTTON.0);
-                }
-                if us_button_flags & RI_MOUSE_BUTTON_4_DOWN != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_XBUTTON1.0,
-                        press_state: PressState::Pressed,
-                    });
-                    self.active_keys().mouse.insert(VK_XBUTTON1.0);
-                }
-                if us_button_flags & RI_MOUSE_BUTTON_4_UP != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_XBUTTON1.0,
-                        press_state: PressState::Released,
-                    });
-                    self.active_keys().mouse.remove(&VK_XBUTTON1.0);
-                }
-                if us_button_flags & RI_MOUSE_BUTTON_5_DOWN != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_XBUTTON2.0,
-                        press_state: PressState::Pressed,
-                    });
-                    self.active_keys().mouse.insert(VK_XBUTTON2.0);
-                }
-                if us_button_flags & RI_MOUSE_BUTTON_5_UP != 0 {
-                    events.push(Event::MousePress {
-                        key: VK_XBUTTON2.0,
-                        press_state: PressState::Released,
-                    });
-                    self.active_keys().mouse.remove(&VK_XBUTTON2.0);
-                }
-
-                if us_button_flags & RI_MOUSE_WHEEL != 0 {
-                    events.push(Event::MouseScroll {
-                        scroll_amount: unsafe { mouse.Anonymous.Anonymous.usButtonData as i16 },
-                    });
-                }
-
-                events
-            }
-            Input::RIM_TYPEKEYBOARD => {
-                let keyboard = unsafe { rawinput.data.keyboard };
-                let key = keyboard.VKey;
-                let flags = u32::from(keyboard.Flags);
-                let press_state = if flags & RI_KEY_BREAK != 0 {
-                    PressState::Released
-                } else {
-                    PressState::Pressed
-                };
-                if press_state == PressState::Pressed {
-                    self.active_keys().keyboard.insert(key);
-                } else {
-                    self.active_keys().keyboard.remove(&key);
-                }
-                vec![Event::KeyPress { key, press_state }]
-            }
-            _ => vec![],
-        }
-    }
-
-    fn parse_wm_input(
-        &mut self,
-        lparam: LPARAM,
-        last_absolute: &mut Option<(i32, i32)>,
-    ) -> Vec<Event> {
         unsafe {
-            let hrawinput = HRAWINPUT(std::ptr::with_exposed_provenance_mut(lparam.0 as usize));
-            let mut rawinput = RAWINPUT::default();
-            let mut pcbsize = size_of_val(&rawinput) as u32;
-            let result = GetRawInputData(
-                hrawinput,
-                RID_INPUT,
-                Some(&mut rawinput as *mut _ as *mut _),
-                &mut pcbsize,
-                size_of::<RAWINPUTHEADER>()
-                    .try_into()
-                    .expect("size of HRAWINPUT should fit in u32"),
-            );
-            if result == u32::MAX {
-                return Vec::new();
-            }
-
             match Input::RID_DEVICE_INFO_TYPE(rawinput.header.dwType) {
                 Input::RIM_TYPEMOUSE => {
                     let mut events = Vec::new();
-
                     let mouse = rawinput.data.mouse;
                     let us_flags = mouse.usFlags.0;
 
                     // Handle mouse movement
                     if mouse.lLastX != 0 || mouse.lLastY != 0 {
                         let (delta_x, delta_y) = if (us_flags & MOUSE_MOVE_ABSOLUTE.0) != 0 {
-                            // Absolute movement - convert to screen coordinates and calculate delta
                             let is_virtual_desktop = (us_flags & MOUSE_VIRTUAL_DESKTOP.0) != 0;
                             let (screen_x, screen_y) = convert_absolute_to_screen_coords(
                                 mouse.lLastX,
                                 mouse.lLastY,
                                 is_virtual_desktop,
                             );
-
                             let delta = last_absolute
-                                .map(|(last_x, last_y)| (screen_x - last_x, screen_y - last_y))
+                                .map(|(last_x, last_y)| {
+                                    (
+                                        screen_x.saturating_sub(last_x),
+                                        screen_y.saturating_sub(last_y),
+                                    )
+                                })
                                 .unwrap_or_default();
-
-                            // Update stored absolute position
                             *last_absolute = Some((screen_x, screen_y));
-
                             delta
                         } else {
-                            // Relative movement - use raw values directly
                             (mouse.lLastX, mouse.lLastY)
                         };
 
@@ -380,8 +252,7 @@ impl KbmCapture {
                         }
                     }
 
-                    let us_button_flags =
-                        unsafe { u32::from(mouse.Anonymous.Anonymous.usButtonFlags) };
+                    let us_button_flags = u32::from(mouse.Anonymous.Anonymous.usButtonFlags);
 
                     if us_button_flags & RI_MOUSE_LEFT_BUTTON_DOWN != 0 {
                         events.push(Event::MousePress {
@@ -455,16 +326,15 @@ impl KbmCapture {
                     }
 
                     if us_button_flags & RI_MOUSE_WHEEL != 0 {
-                        let scroll = unsafe { mouse.Anonymous.Anonymous.usButtonData as i16 };
                         events.push(Event::MouseScroll {
-                            scroll_amount: scroll,
+                            scroll_amount: mouse.Anonymous.Anonymous.usButtonData as i16,
                         });
                     }
 
                     events
                 }
                 Input::RIM_TYPEKEYBOARD => {
-                    let keyboard = unsafe { rawinput.data.keyboard };
+                    let keyboard = rawinput.data.keyboard;
                     let key = keyboard.VKey;
                     let flags = u32::from(keyboard.Flags);
                     let press_state = if flags & RI_KEY_BREAK != 0 {
@@ -483,6 +353,195 @@ impl KbmCapture {
             }
         }
     }
+
+    fn parse_wm_input(
+        &mut self,
+        lparam: LPARAM,
+        last_absolute: &mut Option<(i32, i32)>,
+    ) -> Vec<Event> {
+        unsafe {
+            let hrawinput = HRAWINPUT(lparam.0 as *mut _);
+            let header_size = match size_of::<RAWINPUTHEADER>().try_into() {
+                Ok(size) => size,
+                Err(e) => {
+                    tracing::error!("size of RAWINPUTHEADER should fit in u32: {e}");
+                    return Vec::new();
+                }
+            };
+
+            // Query required buffer size first - some devices send larger data
+            let mut pcbsize: u32 = 0;
+            let size_result =
+                GetRawInputData(hrawinput, RID_INPUT, None, &mut pcbsize, header_size);
+            if size_result == u32::MAX {
+                return Vec::new();
+            }
+
+            // Allocate buffer with required size (handles oversized input data)
+            let mut buffer: Vec<u8> = vec![0; pcbsize as usize];
+            let result = GetRawInputData(
+                hrawinput,
+                RID_INPUT,
+                Some(buffer.as_mut_ptr() as *mut _),
+                &mut pcbsize,
+                header_size,
+            );
+            if result == u32::MAX {
+                use windows::Win32::Foundation::GetLastError;
+                let error = GetLastError();
+                tracing::warn!("GetRawInputData failed: {:?}, dropping input event", error);
+                return Vec::new();
+            }
+
+            let rawinput = &*(buffer.as_ptr() as *const RAWINPUT);
+            match Input::RID_DEVICE_INFO_TYPE(rawinput.header.dwType) {
+                Input::RIM_TYPEMOUSE => {
+                    let mut events = Vec::new();
+
+                    let mouse = rawinput.data.mouse;
+                    let us_flags = mouse.usFlags.0;
+
+                    // Handle mouse movement
+                    if mouse.lLastX != 0 || mouse.lLastY != 0 {
+                        let (delta_x, delta_y) = if (us_flags & MOUSE_MOVE_ABSOLUTE.0) != 0 {
+                            // Absolute movement - convert to screen coordinates and calculate delta
+                            let is_virtual_desktop = (us_flags & MOUSE_VIRTUAL_DESKTOP.0) != 0;
+                            let (screen_x, screen_y) = convert_absolute_to_screen_coords(
+                                mouse.lLastX,
+                                mouse.lLastY,
+                                is_virtual_desktop,
+                            );
+
+                            let delta = last_absolute
+                                .map(|(last_x, last_y)| {
+                                    (
+                                        screen_x.saturating_sub(last_x),
+                                        screen_y.saturating_sub(last_y),
+                                    )
+                                })
+                                .unwrap_or_default();
+
+                            // Update stored absolute position
+                            *last_absolute = Some((screen_x, screen_y));
+
+                            delta
+                        } else {
+                            // Relative movement - use raw values directly
+                            (mouse.lLastX, mouse.lLastY)
+                        };
+
+                        if delta_x != 0 || delta_y != 0 {
+                            events.push(Event::MouseMove([delta_x, delta_y]));
+                        }
+                    }
+
+                    let us_button_flags = u32::from(mouse.Anonymous.Anonymous.usButtonFlags);
+
+                    if us_button_flags & RI_MOUSE_LEFT_BUTTON_DOWN != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_LBUTTON.0,
+                            press_state: PressState::Pressed,
+                        });
+                        self.active_keys().mouse.insert(VK_LBUTTON.0);
+                    }
+                    if us_button_flags & RI_MOUSE_LEFT_BUTTON_UP != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_LBUTTON.0,
+                            press_state: PressState::Released,
+                        });
+                        self.active_keys().mouse.remove(&VK_LBUTTON.0);
+                    }
+                    if us_button_flags & RI_MOUSE_RIGHT_BUTTON_DOWN != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_RBUTTON.0,
+                            press_state: PressState::Pressed,
+                        });
+                        self.active_keys().mouse.insert(VK_RBUTTON.0);
+                    }
+                    if us_button_flags & RI_MOUSE_RIGHT_BUTTON_UP != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_RBUTTON.0,
+                            press_state: PressState::Released,
+                        });
+                        self.active_keys().mouse.remove(&VK_RBUTTON.0);
+                    }
+                    if us_button_flags & RI_MOUSE_MIDDLE_BUTTON_DOWN != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_MBUTTON.0,
+                            press_state: PressState::Pressed,
+                        });
+                        self.active_keys().mouse.insert(VK_MBUTTON.0);
+                    }
+                    if us_button_flags & RI_MOUSE_MIDDLE_BUTTON_UP != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_MBUTTON.0,
+                            press_state: PressState::Released,
+                        });
+                        self.active_keys().mouse.remove(&VK_MBUTTON.0);
+                    }
+                    if us_button_flags & RI_MOUSE_BUTTON_4_DOWN != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_XBUTTON1.0,
+                            press_state: PressState::Pressed,
+                        });
+                        self.active_keys().mouse.insert(VK_XBUTTON1.0);
+                    }
+                    if us_button_flags & RI_MOUSE_BUTTON_4_UP != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_XBUTTON1.0,
+                            press_state: PressState::Released,
+                        });
+                        self.active_keys().mouse.remove(&VK_XBUTTON1.0);
+                    }
+                    if us_button_flags & RI_MOUSE_BUTTON_5_DOWN != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_XBUTTON2.0,
+                            press_state: PressState::Pressed,
+                        });
+                        self.active_keys().mouse.insert(VK_XBUTTON2.0);
+                    }
+                    if us_button_flags & RI_MOUSE_BUTTON_5_UP != 0 {
+                        events.push(Event::MousePress {
+                            key: VK_XBUTTON2.0,
+                            press_state: PressState::Released,
+                        });
+                        self.active_keys().mouse.remove(&VK_XBUTTON2.0);
+                    }
+
+                    if us_button_flags & RI_MOUSE_WHEEL != 0 {
+                        let scroll = mouse.Anonymous.Anonymous.usButtonData as i16;
+                        events.push(Event::MouseScroll {
+                            scroll_amount: scroll,
+                        });
+                    }
+
+                    events
+                }
+                Input::RIM_TYPEKEYBOARD => {
+                    let keyboard = rawinput.data.keyboard;
+                    let key = keyboard.VKey;
+                    let flags = u32::from(keyboard.Flags);
+                    let press_state = if flags & RI_KEY_BREAK != 0 {
+                        PressState::Released
+                    } else {
+                        PressState::Pressed
+                    };
+                    if press_state == PressState::Pressed {
+                        // Only emit event if key wasn't already pressed (filters autorepeat)
+                        if self.active_keys().keyboard.insert(key) {
+                            vec![Event::KeyPress { key, press_state }]
+                        } else {
+                            vec![] // Key was already pressed (autorepeat), don't record duplicate
+                        }
+                    } else {
+                        self.active_keys().keyboard.remove(&key);
+                        vec![Event::KeyPress { key, press_state }]
+                    }
+                }
+                _ => vec![],
+            }
+        }
+    }
 }
 
 /// Convert normalized absolute mouse coordinates to screen coordinates
@@ -491,11 +550,17 @@ impl KbmCapture {
 fn convert_absolute_to_screen_coords(x: i32, y: i32, is_virtual_desktop: bool) -> (i32, i32) {
     let (left, top, right, bottom) = unsafe {
         if is_virtual_desktop {
+            let left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            // SM_CXVIRTUALSCREEN/SM_CYVIRTUALSCREEN return width/height, not coordinates
+            // Calculate right/bottom by adding width/height to left/top
             (
-                GetSystemMetrics(SM_XVIRTUALSCREEN),
-                GetSystemMetrics(SM_YVIRTUALSCREEN),
-                GetSystemMetrics(SM_CXVIRTUALSCREEN),
-                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+                left,
+                top,
+                left.saturating_add(width),
+                top.saturating_add(height),
             )
         } else {
             (
@@ -509,8 +574,11 @@ fn convert_absolute_to_screen_coords(x: i32, y: i32, is_virtual_desktop: bool) -
 
     // Convert from normalized coordinates (0-65535) to screen coordinates
     // Using MulDiv equivalent: (x * (right - left)) / 65535 + left
-    let screen_x = (x * (right - left)) / 65535 + left;
-    let screen_y = (y * (bottom - top)) / 65535 + top;
+    // Use i64 for intermediate calculations to prevent integer overflow
+    let width = (right - left) as i64;
+    let height = (bottom - top) as i64;
+    let screen_x = (((x as i64 * width) / 65535) + left as i64) as i32;
+    let screen_y = (((y as i64 * height) / 65535) + top as i64) as i32;
 
     (screen_x, screen_y)
 }

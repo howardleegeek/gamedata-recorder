@@ -53,7 +53,7 @@ pub enum ActionType {
         screen_y: i32,
     },
     /// Keyboard key press
-    KeyPress { key: u16, key_name: String },
+    KeyPress { key: u16, key_name: &'static str },
     /// Scroll wheel
     Scroll { delta: i16 },
 }
@@ -67,17 +67,29 @@ pub fn build_actions(
     trajectories: &[Trajectory],
     fps: f64,
 ) -> Vec<Action> {
+    // Validate FPS to prevent division by zero and ensure valid frame calculations
+    let fps = if fps > 0.0 && fps.is_finite() {
+        fps
+    } else {
+        tracing::warn!("Invalid FPS value: {}. Using default 60.0", fps);
+        60.0
+    };
     let frame_interval_ns = (1_000_000_000.0 / fps) as u64;
+    // Ensure frame_interval_ns is at least 1 to prevent division by zero
+    let frame_interval_ns = frame_interval_ns.max(1);
     let mut actions = Vec::new();
     let mut action_index: u32 = 0;
     let mut cursor_x: i32 = 0;
     let mut cursor_y: i32 = 0;
+    // Track trajectories with a moving pointer since both inputs are sorted by timestamp
+    let mut traj_idx: usize = 0;
 
     for event in events {
         // Track cursor position
         if let super::trajectory::RawEventKind::MouseMove { dx, dy } = &event.kind {
-            cursor_x += dx;
-            cursor_y += dy;
+            // Use saturating_add to prevent overflow on extreme mouse movements
+            cursor_x = cursor_x.saturating_add(*dx);
+            cursor_y = cursor_y.saturating_add(*dy);
             continue;
         }
 
@@ -90,13 +102,10 @@ pub fn build_actions(
                 screen_x: cursor_x,
                 screen_y: cursor_y,
             }),
-            super::trajectory::RawEventKind::KeyDown { vkey, .. } => {
-                let key_name = super::vkey_names::vkey_to_name(*vkey).to_string();
-                Some(ActionType::KeyPress {
-                    key: *vkey,
-                    key_name,
-                })
-            }
+            super::trajectory::RawEventKind::KeyDown { vkey, .. } => Some(ActionType::KeyPress {
+                key: *vkey,
+                key_name: super::vkey_names::vkey_to_name(*vkey),
+            }),
             super::trajectory::RawEventKind::Scroll { delta } => {
                 Some(ActionType::Scroll { delta: *delta })
             }
@@ -104,12 +113,15 @@ pub fn build_actions(
         };
 
         if let Some(action_type) = action_type {
-            // Find the preceding trajectory (the one that ended at or just before this action)
-            let preceding_traj = trajectories
-                .iter()
-                .rev()
-                .find(|t| t.end_ns <= event.timestamp_ns)
-                .map(|t| t.index);
+            // Advance trajectory pointer to find the one that ended at or just before this action
+            while traj_idx + 1 < trajectories.len()
+                && trajectories[traj_idx + 1].end_ns <= event.timestamp_ns
+            {
+                traj_idx += 1;
+            }
+            let preceding_traj = (traj_idx < trajectories.len())
+                .then(|| trajectories[traj_idx].index)
+                .filter(|_| trajectories[traj_idx].end_ns <= event.timestamp_ns);
 
             let frame_id = event.timestamp_ns / frame_interval_ns;
 
@@ -124,7 +136,7 @@ pub fn build_actions(
                 target_entity: None,
                 bounding_box: None,
             });
-            action_index += 1;
+            action_index = action_index.saturating_add(1);
         }
     }
 

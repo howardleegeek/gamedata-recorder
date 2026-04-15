@@ -14,6 +14,7 @@ use windows::Win32::{
 /// High-precision timer based on QueryPerformanceCounter (Windows)
 /// or std::time::Instant (other platforms).
 /// Optionally integrates GetMessageTime for Windows message correlation.
+#[derive(Clone)]
 pub struct HighPrecisionTimer {
     #[cfg(target_os = "windows")]
     frequency: i64,
@@ -47,7 +48,17 @@ impl HighPrecisionTimer {
             }
 
             // Get initial message time for correlation
-            let msg_time_offset_ms = unsafe { GetMessageTime() };
+            // GetMessageTime returns -1 on error (rare on modern Windows, but possible)
+            let msg_time_offset_ms = unsafe {
+                let result = GetMessageTime();
+                if result < 0 {
+                    tracing::warn!(
+                        "GetMessageTime returned negative value at timer init: {}",
+                        result
+                    );
+                }
+                result
+            };
 
             Self {
                 frequency,
@@ -77,7 +88,8 @@ impl HighPrecisionTimer {
                     return self.start_instant.elapsed().as_millis() as u64;
                 }
             }
-            let elapsed = current - self.start_counter;
+            // Use saturating_sub to prevent underflow if QPC goes backwards (rare hardware quirk)
+            let elapsed = current.saturating_sub(self.start_counter);
             ((elapsed as u128 * 1000) / self.frequency as u128) as u64
         }
 
@@ -100,7 +112,8 @@ impl HighPrecisionTimer {
                     return self.start_instant.elapsed().as_micros() as u64;
                 }
             }
-            let elapsed = current - self.start_counter;
+            // Use saturating_sub to prevent underflow if QPC goes backwards (rare hardware quirk)
+            let elapsed = current.saturating_sub(self.start_counter);
             ((elapsed as u128 * 1_000_000) / self.frequency as u128) as u64
         }
 
@@ -124,7 +137,8 @@ impl HighPrecisionTimer {
                     return self.start_instant.elapsed().as_nanos() as u64;
                 }
             }
-            let elapsed = current - self.start_counter;
+            // Use saturating_sub to prevent underflow if QPC goes backwards (rare hardware quirk)
+            let elapsed = current.saturating_sub(self.start_counter);
             ((elapsed as u128 * 1_000_000_000) / self.frequency as u128) as u64
         }
 
@@ -138,7 +152,10 @@ impl HighPrecisionTimer {
     pub fn wall_time_str(&self) -> String {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                tracing::warn!("System time is before UNIX epoch: {}", e);
+                std::time::Duration::default()
+            });
         let secs = now.as_secs();
         let ms = now.subsec_millis();
         let hours = (secs / 3600) % 24;
@@ -150,9 +167,18 @@ impl HighPrecisionTimer {
     /// Get the current GetMessageTime value (Windows only).
     /// Returns milliseconds since system start.
     /// This is useful for correlating input events with Windows message timestamps.
+    /// Returns 0 if the call fails (should not happen on modern Windows).
     #[cfg(target_os = "windows")]
     pub fn message_time_ms(&self) -> i32 {
-        unsafe { GetMessageTime() }
+        unsafe {
+            // GetMessageTime returns the time in milliseconds; on error it returns -1
+            // but this should not fail on modern Windows. We check and log just in case.
+            let result = GetMessageTime();
+            if result < 0 {
+                tracing::warn!("GetMessageTime returned negative value: {}", result);
+            }
+            result
+        }
     }
 
     /// Get hybrid timestamp combining QPC precision with message time correlation.
@@ -177,14 +203,35 @@ impl HighPrecisionTimer {
     }
 
     /// Calculate the drift between QPC and GetMessageTime.
-    /// Returns the difference in milliseconds.
+    /// Returns the difference in milliseconds (QPC-based time minus message-time-based time).
     /// Useful for detecting timing anomalies.
+    ///
+    /// The drift is calculated as: elapsed_qpc_ms - (current_msg_time - initial_msg_time).
+    /// This avoids i32 overflow when the timer runs for extended periods (>24 days).
     #[cfg(target_os = "windows")]
     pub fn time_drift_ms(&self) -> i32 {
-        let current_msg_time = unsafe { GetMessageTime() };
-        let elapsed = self.elapsed_ms() as i32;
-        let expected_msg_time = self.msg_time_offset_ms + elapsed;
-        current_msg_time - expected_msg_time
+        // Capture both timestamps atomically to prevent measurement jitter
+        let mut current_qpc = 0i64;
+        let (qpc_ok, current_msg_time) = unsafe {
+            // Query QPC first, then GetMessageTime immediately after
+            // to minimize time delta between the two measurements
+            let qpc_result = QueryPerformanceCounter(&mut current_qpc);
+            let msg_time = GetMessageTime();
+            (qpc_result.is_ok(), msg_time)
+        };
+
+        // Handle QPC failure gracefully - return 0 to indicate no drift measurable
+        if !qpc_ok {
+            tracing::error!("QueryPerformanceCounter failed in time_drift_ms");
+            return 0;
+        }
+        // Use i64 for calculation to prevent overflow when elapsed_ms exceeds i32::MAX (~24.8 days)
+        let elapsed_ticks = current_qpc - self.start_counter;
+        let elapsed_ms = ((elapsed_ticks as u128 * 1000) / self.frequency as u128) as i64;
+        let expected_msg_time = self.msg_time_offset_ms as i64 + elapsed_ms;
+        let drift = current_msg_time as i64 - expected_msg_time;
+        // Clamp to i32 range to avoid overflow on return
+        drift.clamp(i32::MIN as i64, i32::MAX as i64) as i32
     }
 }
 
@@ -219,7 +266,7 @@ mod tests {
     fn test_wall_time_format() {
         let timer = HighPrecisionTimer::new();
         let time_str = timer.wall_time_str();
-        // Format should be HH:MM:SS.mmm (15 chars)
+        // Format should be HH:MM:SS.mmm (12 chars)
         assert_eq!(
             time_str.len(),
             12,

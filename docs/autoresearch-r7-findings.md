@@ -6,34 +6,24 @@
 
 ---
 
-## 1. Critical: GAME_WHITELIST Not Defined
+## 1. GAME_WHITELIST Constant ✅ FIXED
 
-### Problem
-`src/record/recorder.rs` references `GAME_WHITELIST` at line 396, but this constant **does not exist** anywhere in the codebase:
+### Status
+**FIXED** - The `GAME_WHITELIST` constant has been added to `crates/constants/src/lib.rs`.
 
-```rust
-// Line 396 in recorder.rs
-if !GAME_WHITELIST.iter().any(|g| exe_lower == *g) {
-    tracing::debug!("{} is not in game whitelist, skipping", exe_name);
-    return Ok(None);
-}
-```
+### Original Issue
+`src/record/recorder.rs` referenced `GAME_WHITELIST` but the constant did not exist.
 
-This will cause a **compilation error**.
-
-### Root Cause
-The `supported_games.json` exists (60 games, 301 lines) but there's no corresponding Rust constant `GAME_WHITELIST` that exports the binary names.
-
-### Solution Required
-Add to `crates/constants/src/lib.rs`:
+### Solution Applied
+Added to `crates/constants/src/lib.rs`:
 ```rust
 /// Game whitelist - binaries that are allowed to be recorded
+/// Generated from supported_games.json
 pub const GAME_WHITELIST: &[&str] = &[
-    // Generated from supported_games.json
     "abyssus", "rgame",
     "amenti",
     "arma3", "arma3_x64",
-    // ... (all 60 games)
+    // ... (60+ games)
 ];
 ```
 
@@ -224,7 +214,7 @@ app_state.async_request_tx.send(AsyncRequest::SetOfflineMode { enabled: true, of
 **Status: COMPREHENSIVE** ✅
 
 Good coverage of:
-- Self (gamedata-recorder.exe, owl-control.exe)
+- Self (gamedata-recorder.exe)
 - System processes (explorer, taskmgr, etc.)
 - Launchers (steam, epic, gog, origin, uplay, battlenet)
 - Browsers (chrome, firefox, edge)
@@ -250,7 +240,7 @@ Fails safe when module enumeration fails (warns but allows).
 ## 7. Action Items
 
 ### Must Fix (Blocking)
-1. **Add GAME_WHITELIST constant** to `crates/constants/src/lib.rs`
+1. ~~**Add GAME_WHITELIST constant** to `crates/constants/src/lib.rs`~~ ✅ **COMPLETED**
 2. **Fix user_stopped_game_exe check** in auto-record logic
 
 ### Should Fix (Quality)
@@ -267,6 +257,7 @@ Fails safe when module enumeration fails (warns but allows).
 
 | Commit | Description |
 |--------|-------------|
+| autoresearch S15 R4 | docs: mark GAME_WHITELIST finding as fixed in autoresearch-r7-findings |
 | (pending) | fix: add GAME_WHITELIST constant and fix auto-record user_stopped check |
 | (pending) | style: cargo fmt on recently modified files |
 | (pending) | feat: add Tier 1 popular games to whitelist |
