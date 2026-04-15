@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "tools/*"]
+members = ["crates/constants", "crates/game-process", "crates/input-capture"]
 exclude = ["tools/vm"]
 default-members = ["."]
 
