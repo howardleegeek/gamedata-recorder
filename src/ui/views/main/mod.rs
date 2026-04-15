@@ -946,7 +946,7 @@ fn delete_recording_confirmation_window(
                         // Really Delete button
                         if ui
                             .add_sized(
-                                vec2(ui.available_width(), 32.0),
+                                vec2(ui.available_width() / 2.0, 32.0),
                                 Button::new(
                                     RichText::new("Really Delete")
                                         .size(13.0)
@@ -956,11 +956,17 @@ fn delete_recording_confirmation_window(
                             )
                             .clicked()
                         {
-                            app_state
+                            match app_state
                                 .async_request_tx
                                 .blocking_send(AsyncRequest::DeleteRecording(folder_path.clone()))
-                                .ok();
-                            *pending_delete_recording = None;
+                            {
+                                Ok(_) => {
+                                    *pending_delete_recording = None;
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to send delete request: {}", e);
+                                }
+                            }
                         }
                     });
                 });

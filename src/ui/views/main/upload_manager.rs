@@ -1082,12 +1082,14 @@ fn render_recording_entry(
                                 }
 
                                 if delete_button(ui, font_size).clicked() {
-                                    app_state
+                                    if let Err(e) = app_state
                                         .async_request_tx
                                         .blocking_send(AsyncRequest::DeleteRecording(
                                             info.folder_path.clone(),
                                         ))
-                                        .ok();
+                                    {
+                                        tracing::error!("Failed to send delete request for invalid recording: {}", e);
+                                    }
                                 }
 
                                 filesize(ui, info.folder_size as f64 / 1024.0 / 1024.0, font_size);

@@ -494,32 +494,53 @@ async fn main(
                         });
                     }
                     AsyncRequest::DeleteRecording(path) => {
-                        if let Some(recording) = LocalRecording::from_path(&path) {
+                        let delete_result = if let Some(recording) = LocalRecording::from_path(&path) {
                             // Check if we have an API key for server cleanup
                             if let Some((api_key, _)) = valid_api_key_and_user_id.as_ref() {
                                 // Delete with server cleanup (abort multipart uploads if needed)
-                                if let Err(e) = recording.delete(&api_client, api_key).await {
-                                    tracing::error!(e=?e, "Failed to delete recording: {}", path.display());
-                                } else {
-                                    tracing::info!("Deleted recording with server cleanup: {}", path.display());
+                                match recording.delete(&api_client, api_key).await {
+                                    Ok(_) => {
+                                        tracing::info!("Deleted recording with server cleanup: {}", path.display());
+                                        Ok(())
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(e=?e, "Failed to delete recording: {}", path.display());
+                                        Err(format!("Failed to delete recording: {}", e))
+                                    }
                                 }
                             } else {
                                 // No API key - just delete locally without server cleanup
                                 tracing::info!("Deleting recording locally (no API key for server cleanup): {}", path.display());
-                                if let Err(e) = recording.delete_without_abort_sync() {
-                                    tracing::error!(e=?e, "Failed to delete recording locally: {}", path.display());
-                                } else {
-                                    tracing::info!("Deleted recording locally: {}", path.display());
+                                match recording.delete_without_abort_sync() {
+                                    Ok(_) => {
+                                        tracing::info!("Deleted recording locally: {}", path.display());
+                                        Ok(())
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(e=?e, "Failed to delete recording locally: {}", path.display());
+                                        Err(format!("Failed to delete recording locally: {}", e))
+                                    }
                                 }
                             }
                         } else {
-                            tracing::error!("Cannot delete non-recording folder: {}", path.display());
-                        }
+                            let error_msg = format!("Cannot delete non-recording folder: {}", path.display());
+                            tracing::error!("{}", error_msg);
+                            Err(error_msg)
+                        };
 
                         // Send LoadLocalRecordings to refresh UI
                         if let Err(e) = app_state.async_request_tx.send(AsyncRequest::LoadLocalRecordings).await {
                             tracing::error!("Failed to send LoadLocalRecordings after delete: {}", e);
                         }
+
+                        // Show error to user if deletion failed
+                        if let Err(error_msg) = delete_result {
+                            app_state
+                                .ui_update_tx
+                                .send(UiUpdate::UploadFailed(error_msg))
+                                .ok();
+                        }
+
                         // Also send ForceUpdate to ensure UI repaints
                         if let Err(e) = app_state.ui_update_tx.send(UiUpdate::ForceUpdate) {
                             tracing::error!("Failed to send ForceUpdate after delete: {}", e);
