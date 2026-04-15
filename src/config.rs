@@ -1,4 +1,4 @@
-use color_eyre::eyre::{Context, Result, eyre};
+use color_eyre::eyre::{eyre, Context, Result};
 use constants::encoding::VideoEncoderType;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
@@ -199,6 +199,50 @@ pub struct Config {
     pub credentials: Credentials,
     #[serde(default)]
     pub preferences: Preferences,
+    #[serde(default)]
+    pub output_format: Option<OutputFormat>,
+}
+
+/// Output format configuration for LEM support
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutputFormat {
+    /// Output format version
+    pub version: OutputFormatVersion,
+    /// Enable LEM format directory structure
+    pub use_lem_format: bool,
+    /// Record depth video (LEM only)
+    pub record_depth: bool,
+    /// Record game states (LEM only)
+    pub record_states: bool,
+    /// Record game events (LEM only)
+    pub record_events: bool,
+}
+
+impl Default for OutputFormat {
+    fn default() -> Self {
+        Self {
+            version: OutputFormatVersion::Legacy,
+            use_lem_format: false,
+            record_depth: false,
+            record_states: false,
+            record_events: false,
+        }
+    }
+}
+
+/// Output format version
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OutputFormatVersion {
+    #[serde(rename = "legacy")]
+    Legacy,
+    #[serde(rename = "lem_v1")]
+    LemV1,
+}
+
+impl Default for OutputFormatVersion {
+    fn default() -> Self {
+        OutputFormatVersion::Legacy
+    }
 }
 
 impl Config {
@@ -257,6 +301,22 @@ impl Config {
         tracing::info!("Saving configs to {}", config_path.to_string_lossy());
         fs::write(&config_path, serde_json::to_string_pretty(&self)?)?;
         Ok(())
+    }
+
+    /// Check if LEM format is enabled
+    pub fn is_lem_format(&self) -> bool {
+        self.output_format
+            .as_ref()
+            .map(|f| f.use_lem_format)
+            .unwrap_or(false)
+    }
+
+    /// Get output format version
+    pub fn output_format_version(&self) -> OutputFormatVersion {
+        self.output_format
+            .as_ref()
+            .map(|f| f.version)
+            .unwrap_or(OutputFormatVersion::Legacy)
     }
 }
 
