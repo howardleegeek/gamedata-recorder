@@ -289,6 +289,11 @@ impl Recorder {
     pub async fn check_hook_timeout(&mut self) -> bool {
         self.video_recorder.check_hook_timeout().await
     }
+
+    /// Returns the current game exe name if recording, None otherwise
+    pub fn current_game_exe(&self) -> Option<String> {
+        self.recording.as_ref().map(|r| r.game_exe().to_string())
+    }
 }
 
 fn get_free_space_in_mb(path: &std::path::Path) -> Option<u64> {

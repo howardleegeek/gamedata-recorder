@@ -807,6 +807,44 @@ async fn main(
 /// not trivial to handle diff function signatures for on_input, tick, etc. for every state. This would indicate
 /// that RecordingState should be a struct for each state, but that's disgustingly overcomplicated and would mean match
 /// statements in the tokio thread itself to match the correct function signatures anyway, which defeats the purpose.
+/// Updates the game configuration to use window capture mode and persists it to disk
+fn enable_window_capture_for_game(app_state: &AppState, game_exe: &str) -> Result<()> {
+    let exe_without_ext = std::path::Path::new(game_exe)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(game_exe)
+        .to_lowercase();
+
+    let mut config = app_state.config.write().unwrap();
+    let game_config = config
+        .preferences
+        .games
+        .entry(exe_without_ext.clone())
+        .or_default();
+
+    // Only update if not already set
+    if !game_config.use_window_capture {
+        tracing::info!(
+            game = exe_without_ext,
+            "Automatically enabling window capture mode due to hook timeout"
+        );
+        game_config.use_window_capture = true;
+
+        // Persist to disk
+        if let Err(e) = config.save() {
+            tracing::error!(e=?e, "Failed to save config after enabling window capture");
+            // Continue anyway - the setting will apply for this session
+        }
+    } else {
+        tracing::warn!(
+            game = exe_without_ext,
+            "Window capture already enabled, skipping config update"
+        );
+    }
+
+    Ok(())
+}
+
 /// This then indicates that we should move all the variables into RecordingState, but thats not possible with enums we would
 /// have to split it into a struct and the enum portion. This seems the cleanest possible, and we would have
 /// on_input/tick() as non-arg accepting fns (or like maybe 1 arg for the tracing str reason, something consistent),
@@ -965,28 +1003,97 @@ impl State {
                         "restart recording on window resolution changed",
                     ))
                 } else if self.recorder.check_hook_timeout().await {
-                    // OBS failed to hook the application
+                    // OBS failed to hook the application - attempt automatic fallback to window capture
                     tracing::error!(
-                        "OBS failed to hook application after {} seconds, stopping recording",
+                        "OBS failed to hook application after {} seconds, attempting fallback to window capture",
                         constants::HOOK_TIMEOUT.as_secs()
                     );
 
-                    let message = format!(
-                        "Failed to hook into {}.\n\n\
-                     GameData Recorder was unable to capture the game window after {} seconds.\n\n\
-                     This may happen if:\n\
-                     - The game has anti-cheat software\n\
-                     - The game is running with elevated privileges\n\
-                     - The game uses a rendering method that OBS cannot capture\n\n\
-                     Please try:\n\
-                     - Running GameData Recorder as administrator\n\
-                     - Checking if the game is on the supported games list\n\
-                     - Testing a different game on the supported games list",
-                        game_name,
-                        constants::HOOK_TIMEOUT.as_secs()
+                    // Get the current game exe
+                    let game_exe = match self.recorder.current_game_exe() {
+                        Some(exe) => exe,
+                        None => {
+                            tracing::error!("No active recording when hook timeout detected");
+                            let message = format!(
+                                "Failed to hook into {}.\n\n\
+                                 GameData Recorder was unable to capture the game window after {} seconds.\n\n\
+                                 This may happen if:\n\
+                                 - The game has anti-cheat software\n\
+                                 - The game is running with elevated privileges\n\
+                                 - The game uses a rendering method that OBS cannot capture\n\n\
+                                 Please try:\n\
+                                 - Running GameData Recorder as administrator\n\
+                                 - Checking if the game is on the supported games list",
+                                game_name,
+                                constants::HOOK_TIMEOUT.as_secs()
+                            );
+                            crate::ui::notification::warning_message_box(&message);
+                            return Some((RecordingState::Idle, "stop recording on hook timeout"));
+                        }
+                    };
+
+                    // Check if we should attempt fallback (only if window capture is not already enabled)
+                    let exe_without_ext = std::path::Path::new(&game_exe)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&game_exe)
+                        .to_lowercase();
+
+                    let should_fallback = {
+                        let config = self.app_state.config.read().unwrap();
+                        let game_config = config.preferences.games.get(&exe_without_ext);
+                        game_config.map_or(true, |gc| !gc.use_window_capture)
+                    };
+
+                    if !should_fallback {
+                        tracing::warn!(
+                            game = exe_without_ext,
+                            "Window capture already enabled but hook still timed out, not retrying"
+                        );
+                        let message = format!(
+                            "Failed to record {} even with window capture mode.\n\n\
+                             This game may not be compatible with automatic recording.\n\n\
+                             Please check if the game is on the supported games list.",
+                            game_exe
+                        );
+                        crate::ui::notification::warning_message_box(&message);
+                        return Some((RecordingState::Idle, "stop recording on hook timeout"));
+                    }
+
+                    tracing::info!(
+                        game = game_exe,
+                        "Hook timeout detected, attempting automatic fallback to window capture mode"
                     );
-                    crate::ui::notification::warning_message_box(&message);
-                    Some((RecordingState::Idle, "stop recording on hook timeout"))
+
+                    // Update config to enable window capture
+                    if let Err(e) = enable_window_capture_for_game(&self.app_state, &game_exe) {
+                        tracing::error!(e=?e, "Failed to update game config for window capture");
+                    }
+
+                    // Show informational message about fallback
+                    let message = format!(
+                        "Automatically switched to window capture mode for {}.\n\n\
+                         Game capture failed to hook, but window capture should work.\n\n\
+                         This preference has been saved for future recordings of this game.",
+                        game_exe
+                    );
+                    crate::ui::notification::info_message_box(&message);
+
+                    // Stop current recording and restart with window capture
+                    tracing::info!(
+                        game = game_exe,
+                        "Stopping current recording to restart with window capture mode"
+                    );
+                    if let Err(e) = self.recorder.stop(&self.input_capture).await {
+                        tracing::error!(e=?e, "Failed to stop recording before fallback");
+                    }
+
+                    // Restart recording with window capture enabled
+                    tracing::info!(
+                        game = game_exe,
+                        "Restarting recording with window capture mode"
+                    );
+                    Some((RecordingState::Recording, "restart recording with window capture"))
                 } else {
                     None
                 };
