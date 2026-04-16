@@ -2,10 +2,7 @@
 //!
 //! Records input events in LEM format to actions.jsonl and timestamps.jsonl
 
-use std::{
-    path::Path,
-    sync::Arc,
-};
+use std::{path::Path, sync::Arc};
 
 use color_eyre::{Result, eyre::eyre};
 use tokio::{fs::File, io::AsyncWriteExt, sync::mpsc};
@@ -32,7 +29,7 @@ impl LemInputStream {
             .map_err(|_| eyre!("Input stream receiver closed"))?;
         Ok(())
     }
-    
+
     /// Send a timestamp mapping
     pub fn send_timestamp(&self, mapping: TimestampMapping) -> Result<()> {
         self.tx
@@ -40,7 +37,7 @@ impl LemInputStream {
             .map_err(|_| eyre!("Input stream receiver closed"))?;
         Ok(())
     }
-    
+
     /// Signal to stop recording
     pub fn stop(&self) -> Result<()> {
         self.tx
@@ -68,23 +65,29 @@ pub struct LemInputRecorder {
 
 impl LemInputRecorder {
     /// Start a new LEM input recording session
-    pub async fn start(
-        session_manager: Arc<SessionManager>,
-    ) -> Result<(Self, LemInputStream)> {
+    pub async fn start(session_manager: Arc<SessionManager>) -> Result<(Self, LemInputStream)> {
         let actions_path = session_manager.actions_path();
         let timestamps_path = session_manager.timestamps_path();
-        
+
         let actions_file = File::create_new(&actions_path).await.map_err(|e| {
-            eyre!("Failed to create actions file at {}: {}", actions_path.display(), e)
+            eyre!(
+                "Failed to create actions file at {}: {}",
+                actions_path.display(),
+                e
+            )
         })?;
-        
+
         let timestamps_file = File::create_new(&timestamps_path).await.map_err(|e| {
-            eyre!("Failed to create timestamps file at {}: {}", timestamps_path.display(), e)
+            eyre!(
+                "Failed to create timestamps file at {}: {}",
+                timestamps_path.display(),
+                e
+            )
         })?;
-        
+
         let (tx, rx) = mpsc::unbounded_channel();
         let stream = LemInputStream { tx };
-        
+
         let mut recorder = Self {
             actions_file,
             timestamps_file,
@@ -92,19 +95,19 @@ impl LemInputRecorder {
             rx,
             total_actions: 0,
         };
-        
+
         // Write initial timestamp mapping for frame 0
         recorder.write_initial_timestamp().await?;
-        
+
         tracing::info!(
             actions_path = %actions_path.display(),
             timestamps_path = %timestamps_path.display(),
             "Started LEM input recording"
         );
-        
+
         Ok((recorder, stream))
     }
-    
+
     /// Write initial timestamp for frame 0
     async fn write_initial_timestamp(&mut self) -> Result<()> {
         let mapping = TimestampMapping {
@@ -116,7 +119,7 @@ impl LemInputRecorder {
         self.write_timestamp(mapping).await?;
         Ok(())
     }
-    
+
     /// Main recording loop
     pub async fn run(mut self) -> Result<u64> {
         while let Some(cmd) = self.rx.recv().await {
@@ -137,67 +140,67 @@ impl LemInputRecorder {
                 }
             }
         }
-        
+
         self.actions_file.flush().await?;
         self.timestamps_file.flush().await?;
-        
+
         tracing::info!(
             total_actions = self.total_actions,
             "LEM input recording finalized"
         );
-        
+
         Ok(self.total_actions)
     }
-    
+
     /// Process a single input event
     async fn process_event(&mut self, event: InputEventType) -> Result<()> {
         let frame_idx = self.session_manager.current_frame();
         let t_ns = self.session_manager.now_ns();
-        
+
         if let Some(action) = convert_to_action_event(&event, t_ns, frame_idx) {
             self.write_action(action).await?;
             self.total_actions += 1;
         }
-        
+
         Ok(())
     }
-    
+
     /// Write an action event to actions.jsonl
     async fn write_action(&mut self, action: ActionEvent) -> Result<()> {
         let json = serde_json::to_string(&action)
             .map_err(|e| eyre!("Failed to serialize action: {}", e))?;
-        
+
         self.actions_file
             .write_all(json.as_bytes())
             .await
             .map_err(|e| eyre!("Failed to write action: {}", e))?;
-        
+
         self.actions_file
             .write_all(b"\n")
             .await
             .map_err(|e| eyre!("Failed to write newline: {}", e))?;
-        
+
         Ok(())
     }
-    
+
     /// Write a timestamp mapping to timestamps.jsonl
     async fn write_timestamp(&mut self, mapping: TimestampMapping) -> Result<()> {
         let json = serde_json::to_string(&mapping)
             .map_err(|e| eyre!("Failed to serialize timestamp mapping: {}", e))?;
-        
+
         self.timestamps_file
             .write_all(json.as_bytes())
             .await
             .map_err(|e| eyre!("Failed to write timestamp: {}", e))?;
-        
+
         self.timestamps_file
             .write_all(b"\n")
             .await
             .map_err(|e| eyre!("Failed to write newline: {}", e))?;
-        
+
         Ok(())
     }
-    
+
     /// Get total actions recorded
     pub fn total_actions(&self) -> u64 {
         self.total_actions
@@ -211,15 +214,13 @@ fn convert_to_action_event(
     frame_idx: u64,
 ) -> Option<ActionEvent> {
     use InputEventType;
-    
+
     let action = match event {
-        InputEventType::MouseMove { dx, dy } => {
-            ActionType::MouseMove {
-                x: 0,
-                y: 0,
-                delta_xy: [*dx, *dy],
-            }
-        }
+        InputEventType::MouseMove { dx, dy } => ActionType::MouseMove {
+            x: 0,
+            y: 0,
+            delta_xy: [*dx, *dy],
+        },
         InputEventType::MouseButton { button, pressed } => {
             let button_str = match *button {
                 0 => "left",
@@ -246,15 +247,13 @@ fn convert_to_action_event(
                 }
             }
         }
-        InputEventType::Scroll { amount } => {
-            ActionType::MouseWheel {
-                direction: if *amount > 0 { "up" } else { "down" }.to_string(),
-                amount: amount.abs(),
-            }
-        }
+        InputEventType::Scroll { amount } => ActionType::MouseWheel {
+            direction: if *amount > 0 { "up" } else { "down" }.to_string(),
+            amount: amount.abs(),
+        },
         _ => return None,
     };
-    
+
     Some(ActionEvent {
         t_ns,
         frame_idx,
@@ -289,25 +288,38 @@ fn vkey_to_string(vkey: u16) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    
+
     #[tokio::test]
     async fn test_lem_input_recorder() {
         let temp_dir = TempDir::new().unwrap();
         let session_manager = Arc::new(
-            SessionManager::create(temp_dir.path(), "TestGame").await.unwrap()
+            SessionManager::create(temp_dir.path(), "TestGame")
+                .await
+                .unwrap(),
         );
-        
-        let (recorder, stream) = LemInputRecorder::start(session_manager.clone()).await.unwrap();
-        
-        stream.send_event(InputEventType::MouseMove { dx: 10, dy: 5 }).unwrap();
-        stream.send_event(InputEventType::MouseButton { button: 0, pressed: true }).unwrap();
-        
+
+        let (recorder, stream) = LemInputRecorder::start(session_manager.clone())
+            .await
+            .unwrap();
+
+        stream
+            .send_event(InputEventType::MouseMove { dx: 10, dy: 5 })
+            .unwrap();
+        stream
+            .send_event(InputEventType::MouseButton {
+                button: 0,
+                pressed: true,
+            })
+            .unwrap();
+
         stream.stop().unwrap();
         let total = recorder.run().await.unwrap();
-        
+
         assert_eq!(total, 2);
-        
-        let actions_content = tokio::fs::read_to_string(session_manager.actions_path()).await.unwrap();
+
+        let actions_content = tokio::fs::read_to_string(session_manager.actions_path())
+            .await
+            .unwrap();
         assert!(!actions_content.is_empty());
     }
 }

@@ -964,79 +964,81 @@ impl State {
             // Extract game name early to avoid borrow issues later
             let game_name = recording.game_exe().to_string();
 
-            let state_request: Option<(RecordingState, &str)> =
-                if !does_process_exist(recording.pid()).unwrap_or_default() {
-                    // game closed
-                    tracing::info!(
-                        pid = recording.pid().0,
-                        "Game process no longer exists, stopping recording"
-                    );
-                    Some((RecordingState::Idle, "stop recording on game process exit"))
-                } else if self.last_active.elapsed() > MAX_IDLE_DURATION {
-                    // idle timeout
-                    tracing::info!(
-                        "No input detected for {} seconds, stopping recording",
-                        MAX_IDLE_DURATION.as_secs()
-                    );
-                    Some((
-                        RecordingState::Paused {
-                            pid: recording.pid(),
-                        },
-                        "stop recording on idle timeout",
-                    ))
-                } else if recording.elapsed() > MAX_FOOTAGE {
-                    // restart recording once max duration met
-                    tracing::info!(
-                        "Recording duration exceeded {} s, restarting recording",
-                        MAX_FOOTAGE.as_secs()
-                    );
-                    Some((
-                        RecordingState::Recording,
-                        "restart recording on recording duration exceeded",
-                    ))
-                } else if self
-                    .actively_recording_window
-                    .is_some_and(|window| !is_window_focused(window))
-                {
-                    // user alt-tabbed out
-                    tracing::info!(
-                        "Window {:?} lost focus, pausing recording",
-                        self.actively_recording_window
-                    );
-                    Some((
-                        RecordingState::Paused {
-                            pid: recording.pid(),
-                        },
-                        "pause recording on window lost focus",
-                    ))
-                } else if let Ok(current_resolution) =
-                    get_recording_base_resolution(recording.hwnd())
-                    && current_resolution != recording.game_resolution()
-                {
-                    // Check if the window resolution has changed and restart the recording
-                    tracing::info!(
-                        old_resolution=?recording.game_resolution(),
-                        new_resolution=?current_resolution,
-                        "Window resolution changed, restarting recording"
-                    );
-                    Some((
-                        RecordingState::Recording,
-                        "restart recording on window resolution changed",
-                    ))
-                } else if self.recorder.check_hook_timeout().await {
-                    // OBS failed to hook the application - attempt automatic fallback to window capture
-                    tracing::error!(
-                        "OBS failed to hook application after {} seconds, attempting fallback to window capture",
-                        constants::HOOK_TIMEOUT.as_secs()
-                    );
+            let state_request: Option<(RecordingState, &str)> = if !does_process_exist(
+                recording.pid(),
+            )
+            .unwrap_or_default()
+            {
+                // game closed
+                tracing::info!(
+                    pid = recording.pid().0,
+                    "Game process no longer exists, stopping recording"
+                );
+                Some((RecordingState::Idle, "stop recording on game process exit"))
+            } else if self.last_active.elapsed() > MAX_IDLE_DURATION {
+                // idle timeout
+                tracing::info!(
+                    "No input detected for {} seconds, stopping recording",
+                    MAX_IDLE_DURATION.as_secs()
+                );
+                Some((
+                    RecordingState::Paused {
+                        pid: recording.pid(),
+                    },
+                    "stop recording on idle timeout",
+                ))
+            } else if recording.elapsed() > MAX_FOOTAGE {
+                // restart recording once max duration met
+                tracing::info!(
+                    "Recording duration exceeded {} s, restarting recording",
+                    MAX_FOOTAGE.as_secs()
+                );
+                Some((
+                    RecordingState::Recording,
+                    "restart recording on recording duration exceeded",
+                ))
+            } else if self
+                .actively_recording_window
+                .is_some_and(|window| !is_window_focused(window))
+            {
+                // user alt-tabbed out
+                tracing::info!(
+                    "Window {:?} lost focus, pausing recording",
+                    self.actively_recording_window
+                );
+                Some((
+                    RecordingState::Paused {
+                        pid: recording.pid(),
+                    },
+                    "pause recording on window lost focus",
+                ))
+            } else if let Ok(current_resolution) = get_recording_base_resolution(recording.hwnd())
+                && current_resolution != recording.game_resolution()
+            {
+                // Check if the window resolution has changed and restart the recording
+                tracing::info!(
+                    old_resolution=?recording.game_resolution(),
+                    new_resolution=?current_resolution,
+                    "Window resolution changed, restarting recording"
+                );
+                Some((
+                    RecordingState::Recording,
+                    "restart recording on window resolution changed",
+                ))
+            } else if self.recorder.check_hook_timeout().await {
+                // OBS failed to hook the application - attempt automatic fallback to window capture
+                tracing::error!(
+                    "OBS failed to hook application after {} seconds, attempting fallback to window capture",
+                    constants::HOOK_TIMEOUT.as_secs()
+                );
 
-                    // Get the current game exe
-                    let game_exe = match self.recorder.current_game_exe() {
-                        Some(exe) => exe,
-                        None => {
-                            tracing::error!("No active recording when hook timeout detected");
-                            let message = format!(
-                                "Failed to hook into {}.\n\n\
+                // Get the current game exe
+                let game_exe = match self.recorder.current_game_exe() {
+                    Some(exe) => exe,
+                    None => {
+                        tracing::error!("No active recording when hook timeout detected");
+                        let message = format!(
+                            "Failed to hook into {}.\n\n\
                                  GameData Recorder was unable to capture the game window after {} seconds.\n\n\
                                  This may happen if:\n\
                                  - The game has anti-cheat software\n\
@@ -1045,79 +1047,82 @@ impl State {
                                  Please try:\n\
                                  - Running GameData Recorder as administrator\n\
                                  - Checking if the game is on the supported games list",
-                                game_name,
-                                constants::HOOK_TIMEOUT.as_secs()
-                            );
-                            crate::ui::notification::warning_message_box(&message);
-                            return Some((RecordingState::Idle, "stop recording on hook timeout"));
-                        }
-                    };
-
-                    // Check if we should attempt fallback (only if window capture is not already enabled)
-                    let exe_without_ext = std::path::Path::new(&game_exe)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(&game_exe)
-                        .to_lowercase();
-
-                    let should_fallback = {
-                        let config = self.app_state.config.read().unwrap();
-                        let game_config = config.preferences.games.get(&exe_without_ext);
-                        game_config.map_or(true, |gc| !gc.use_window_capture)
-                    };
-
-                    if !should_fallback {
-                        tracing::warn!(
-                            game = exe_without_ext,
-                            "Window capture already enabled but hook still timed out, not retrying"
-                        );
-                        let message = format!(
-                            "Failed to record {} even with window capture mode.\n\n\
-                             This game may not be compatible with automatic recording.\n\n\
-                             Please check if the game is on the supported games list.",
-                            game_exe
+                            game_name,
+                            constants::HOOK_TIMEOUT.as_secs()
                         );
                         crate::ui::notification::warning_message_box(&message);
                         return Some((RecordingState::Idle, "stop recording on hook timeout"));
                     }
+                };
 
-                    tracing::info!(
-                        game = game_exe,
-                        "Hook timeout detected, attempting automatic fallback to window capture mode"
+                // Check if we should attempt fallback (only if window capture is not already enabled)
+                let exe_without_ext = std::path::Path::new(&game_exe)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&game_exe)
+                    .to_lowercase();
+
+                let should_fallback = {
+                    let config = self.app_state.config.read().unwrap();
+                    let game_config = config.preferences.games.get(&exe_without_ext);
+                    game_config.map_or(true, |gc| !gc.use_window_capture)
+                };
+
+                if !should_fallback {
+                    tracing::warn!(
+                        game = exe_without_ext,
+                        "Window capture already enabled but hook still timed out, not retrying"
                     );
-
-                    // Update config to enable window capture
-                    if let Err(e) = enable_window_capture_for_game(&self.app_state, &game_exe) {
-                        tracing::error!(e=?e, "Failed to update game config for window capture");
-                    }
-
-                    // Show informational message about fallback
                     let message = format!(
-                        "Automatically switched to window capture mode for {}.\n\n\
-                         Game capture failed to hook, but window capture should work.\n\n\
-                         This preference has been saved for future recordings of this game.",
+                        "Failed to record {} even with window capture mode.\n\n\
+                             This game may not be compatible with automatic recording.\n\n\
+                             Please check if the game is on the supported games list.",
                         game_exe
                     );
-                    crate::ui::notification::info_message_box(&message);
+                    crate::ui::notification::warning_message_box(&message);
+                    return Some((RecordingState::Idle, "stop recording on hook timeout"));
+                }
 
-                    // Stop current recording and restart with window capture
-                    tracing::info!(
-                        game = game_exe,
-                        "Stopping current recording to restart with window capture mode"
-                    );
-                    if let Err(e) = self.recorder.stop(&self.input_capture).await {
-                        tracing::error!(e=?e, "Failed to stop recording before fallback");
-                    }
+                tracing::info!(
+                    game = game_exe,
+                    "Hook timeout detected, attempting automatic fallback to window capture mode"
+                );
 
-                    // Restart recording with window capture enabled
-                    tracing::info!(
-                        game = game_exe,
-                        "Restarting recording with window capture mode"
-                    );
-                    Some((RecordingState::Recording, "restart recording with window capture"))
-                } else {
-                    None
-                };
+                // Update config to enable window capture
+                if let Err(e) = enable_window_capture_for_game(&self.app_state, &game_exe) {
+                    tracing::error!(e=?e, "Failed to update game config for window capture");
+                }
+
+                // Show informational message about fallback
+                let message = format!(
+                    "Automatically switched to window capture mode for {}.\n\n\
+                         Game capture failed to hook, but window capture should work.\n\n\
+                         This preference has been saved for future recordings of this game.",
+                    game_exe
+                );
+                crate::ui::notification::info_message_box(&message);
+
+                // Stop current recording and restart with window capture
+                tracing::info!(
+                    game = game_exe,
+                    "Stopping current recording to restart with window capture mode"
+                );
+                if let Err(e) = self.recorder.stop(&self.input_capture).await {
+                    tracing::error!(e=?e, "Failed to stop recording before fallback");
+                }
+
+                // Restart recording with window capture enabled
+                tracing::info!(
+                    game = game_exe,
+                    "Restarting recording with window capture mode"
+                );
+                Some((
+                    RecordingState::Recording,
+                    "restart recording with window capture",
+                ))
+            } else {
+                None
+            };
             if let Some((to_state, task)) = state_request
                 && let Err(e) = self.handle_transition(to_state).await
             {
