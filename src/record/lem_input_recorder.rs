@@ -278,8 +278,10 @@ fn vkey_to_string(vkey: u16) -> String {
         0x26 => "Up".to_string(),
         0x27 => "Right".to_string(),
         0x28 => "Down".to_string(),
-        0x30..=0x39 => ((vkey - 0x30) as u8 as char).to_string(),
-        0x41..=0x5A => ((vkey - 0x41 + b'A') as char).to_string(),
+        0x30..=0x39 => char::from_digit(vkey - 0x30, 10).unwrap().to_string(),
+        0x41..=0x5A => char::from_u32(vkey as u32 - 0x41 + b'A' as u32)
+            .unwrap()
+            .to_string(),
         _ => format!("VK_{:02X}", vkey),
     }
 }

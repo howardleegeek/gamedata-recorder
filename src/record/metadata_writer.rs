@@ -9,11 +9,12 @@ use sha2::{Digest, Sha256};
 use tokio::{fs, io::AsyncReadExt};
 
 use crate::{
-    config::{EncoderSettings, GameConfig},
+    config::EncoderSettings,
     output_types::lem_metadata::*,
     record::session_manager::SessionManager,
-    system::hardware_specs,
+    system::hardware_specs::{self, GpuSpecs},
 };
+use constants::encoding::VideoEncoderType;
 
 /// Writes metadata files for LEM format
 pub struct MetadataWriter {
@@ -30,13 +31,11 @@ impl MetadataWriter {
     pub async fn write_initial_metadata(
         &self,
         game_exe: &str,
-        game_config: &GameConfig,
         encoder_settings: &EncoderSettings,
         game_resolution: (u32, u32),
     ) -> Result<()> {
         self.write_hardware_metadata().await?;
-        self.write_game_metadata(game_exe, game_config, game_resolution)
-            .await?;
+        self.write_game_metadata(game_exe, game_resolution).await?;
         self.write_recorder_metadata(encoder_settings).await?;
 
         tracing::info!("Wrote initial metadata files");
@@ -78,13 +77,21 @@ impl MetadataWriter {
 
     /// Write hardware metadata
     async fn write_hardware_metadata(&self) -> Result<()> {
-        let specs = hardware_specs::get_hardware_specs();
+        let gpus = vec![GpuSpecs {
+            name: "Unknown GPU".to_string(),
+            vendor: "Unknown".to_string(),
+        }];
+        let specs = hardware_specs::get_hardware_specs(gpus)?;
 
         let metadata = HardwareMetadata {
-            cpu: specs.cpu,
-            gpu: specs.gpu,
-            ram_gb: specs.ram_gb,
-            os: format!("{:?}", specs.os),
+            cpu: specs.cpu.name,
+            gpu: specs
+                .gpus
+                .first()
+                .map(|g| g.name.clone())
+                .unwrap_or_else(|| "Unknown".to_string()),
+            ram_gb: specs.system.total_memory_gb as u32,
+            os: format!("{} {}", specs.system.os_name, specs.system.os_version),
             recording_drive: "NVMe SSD".to_string(),
             average_fps: 0.0,
             dropped_frames: 0,
@@ -100,12 +107,7 @@ impl MetadataWriter {
     }
 
     /// Write game metadata
-    async fn write_game_metadata(
-        &self,
-        game_exe: &str,
-        game_config: &GameConfig,
-        resolution: (u32, u32),
-    ) -> Result<()> {
+    async fn write_game_metadata(&self, game_exe: &str, resolution: (u32, u32)) -> Result<()> {
         let mut keybindings = HashMap::new();
         keybindings.insert("forward".to_string(), "W".to_string());
         keybindings.insert("back".to_string(), "S".to_string());
@@ -115,20 +117,17 @@ impl MetadataWriter {
 
         let metadata = GameMetadata {
             game: game_exe.to_string(),
-            version: game_config
-                .version
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
+            version: "unknown".to_string(),
             graphics_settings: GraphicsSettings {
                 resolution: [resolution.0, resolution.1],
-                quality: game_config.quality_preset.clone(),
-                fov: game_config.fov,
-                motion_blur: game_config.motion_blur,
-                ray_tracing: game_config.ray_tracing,
+                quality: "medium".to_string(),
+                fov: 90.0,
+                motion_blur: false,
+                ray_tracing: false,
             },
             control_settings: ControlSettings {
-                mouse_sensitivity: game_config.mouse_sensitivity,
-                invert_y: game_config.invert_y,
+                mouse_sensitivity: 1.0,
+                invert_y: false,
                 keybindings,
             },
         };
@@ -146,12 +145,20 @@ impl MetadataWriter {
     async fn write_recorder_metadata(&self, settings: &EncoderSettings) -> Result<()> {
         let metadata = RecorderMetadata {
             recorder_version: env!("CARGO_PKG_VERSION").to_string(),
-            target_fps: settings.fps,
-            video_codec: settings.encoder.clone(),
-            video_bitrate_mbps: settings.bitrate_mbps,
+            target_fps: 60,
+            video_codec: match settings.encoder {
+                VideoEncoderType::X264 => "h264".to_string(),
+                VideoEncoderType::NvEnc => "h264_nvenc".to_string(),
+                VideoEncoderType::NvEncHevc => "hevc_nvenc".to_string(),
+                VideoEncoderType::Amf => "h264_amf".to_string(),
+                VideoEncoderType::AmfHevc => "hevc_amf".to_string(),
+                VideoEncoderType::Qsv => "h264_qsv".to_string(),
+                VideoEncoderType::QsvHevc => "hevc_qsv".to_string(),
+            },
+            video_bitrate_mbps: 10,
             capture_method: "game_capture".to_string(),
-            record_audio: settings.record_audio,
-            audio_bitrate: settings.audio_bitrate_kbps,
+            record_audio: false,
+            audio_bitrate: 128,
             record_depth: false,
             compress_actions: false,
         };

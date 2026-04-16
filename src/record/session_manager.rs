@@ -12,7 +12,7 @@ use std::{
     time::SystemTime,
 };
 
-use chrono::Utc;
+use chrono::{Datelike, Timelike, Utc};
 use color_eyre::{Result, eyre::eyre};
 
 use crate::output_types::lem_metadata::SessionMetadata;

@@ -810,7 +810,11 @@ async fn main(
                 }
                 *app_state.last_foregrounded_game.write().unwrap() = foregrounded;
                 // Tick state machine
-                state.tick().await;
+                if let Some((to_state, task)) = state.tick().await {
+                    if let Err(e) = state.handle_transition(to_state).await {
+                        tracing::error!(e=?e, "Failed to {task}");
+                    }
+                }
                 // Periodically force the UI to rerender so that it will process events, even if not visible
                 app_state.ui_update_tx.send(UiUpdate::ForceUpdate).ok();
             },
@@ -954,7 +958,7 @@ impl State {
         }
     }
 
-    async fn tick(&mut self) {
+    async fn tick(&mut self) -> Option<(RecordingState, &'static str)> {
         if let RecordingState::Recording = self.recording_state {
             let Some(recording) = self.recorder.recording() else {
                 tracing::error!("Expected recording to exist in Recording state, but found None");
@@ -1195,6 +1199,7 @@ impl State {
 
         // Remember to poll the recorder for its own internal work
         self.recorder.poll().await;
+        None
     }
 
     async fn handle_transition(&mut self, to_state: RecordingState) -> Result<()> {

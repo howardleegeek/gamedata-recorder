@@ -27,7 +27,7 @@ fn show_message_box(body: &str, title: &str, icon: u32) {
             parent,
             &HSTRING::from(body),
             &HSTRING::from(title),
-            icon | MB_TOPMOST | MB_SETFOREGROUND,
+            icon | MB_TOPMOST.0 | MB_SETFOREGROUND.0,
         );
         // Ensure the message box window gets focus
         let _ = SetForegroundWindow(GetForegroundWindow());
@@ -36,13 +36,17 @@ fn show_message_box(body: &str, title: &str, icon: u32) {
 }
 
 pub fn error_message_box(body: &str) {
-    show_message_box(body, "GameData Recorder - Error", MB_ICONERROR);
+    show_message_box(body, "GameData Recorder - Error", MB_ICONERROR.0);
 }
 
 pub fn warning_message_box(body: &str) {
-    show_message_box(body, "GameData Recorder - Warning", MB_ICONWARNING);
+    show_message_box(body, "GameData Recorder - Warning", MB_ICONWARNING.0);
 }
 
 pub fn info_message_box(body: &str) {
-    show_message_box(body, "GameData Recorder - Information", MB_ICONINFORMATION);
+    show_message_box(
+        body,
+        "GameData Recorder - Information",
+        MB_ICONINFORMATION.0,
+    );
 }
