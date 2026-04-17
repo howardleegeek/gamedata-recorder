@@ -205,15 +205,6 @@ async fn main(
                         break;
                     }
                 };
-                let recording_location = {
-                    app_state
-                        .config
-                        .read()
-                        .unwrap()
-                        .preferences
-                        .recording_location
-                        .clone()
-                };
                 match e {
                     AsyncRequest::ValidateApiKey { api_key } => {
                         let response = api_client.validate_api_key(&api_key).await;
@@ -259,7 +250,14 @@ async fn main(
                         ).is_err() {
                             tracing::info!("Upload already in progress, skipping duplicate UploadData request");
                         } else {
-                            tokio::spawn(upload::start(app_state.clone(), api_client.clone(), recording_location.clone()));
+                            let recording_location = app_state
+                                .config
+                                .read()
+                                .unwrap()
+                                .preferences
+                                .recording_location
+                                .clone();
+                            tokio::spawn(upload::start(app_state.clone(), api_client.clone(), recording_location));
                         }
                     }
                     AsyncRequest::PauseUpload => {
@@ -274,6 +272,13 @@ async fn main(
                         set_auto_upload_queue_count(&app_state, 0);
                     }
                     AsyncRequest::OpenDataDump => {
+                        let recording_location = app_state
+                            .config
+                            .read()
+                            .unwrap()
+                            .preferences
+                            .recording_location
+                            .clone();
                         if !recording_location.exists() {
                             let _ = std::fs::create_dir_all(&recording_location);
                         }
@@ -357,11 +362,19 @@ async fn main(
                         }
                     }
                     AsyncRequest::LoadLocalRecordings => {
+                        let recording_location = app_state
+                            .config
+                            .read()
+                            .unwrap()
+                            .preferences
+                            .recording_location
+                            .clone();
                         tokio::spawn({
                             let app_state = app_state.clone();
                             async move {
-                                let local_recordings = tokio::task::spawn_blocking(move || {
-                                    LocalRecording::scan_directory(&recording_location)
+                                let local_recordings = tokio::task::spawn_blocking({
+                                    let recording_location = recording_location.clone();
+                                    move || LocalRecording::scan_directory(&recording_location)
                                 }).await.unwrap_or_default();
 
                                 tracing::info!("Found {} local recordings", local_recordings.len());
@@ -385,6 +398,13 @@ async fn main(
                         tokio::spawn({
                             let app_state = app_state.clone();
                             let api_client = api_client.clone();
+                            let recording_location = app_state
+                                .config
+                                .read()
+                                .unwrap()
+                                .preferences
+                                .recording_location
+                                .clone();
                             async move {
                                 // Get current list of local recordings
                                 let local_recordings = tokio::task::spawn_blocking({
@@ -447,6 +467,13 @@ async fn main(
                         tokio::spawn({
                             let app_state = app_state.clone();
                             let api_client = api_client.clone();
+                            let recording_location = app_state
+                                .config
+                                .read()
+                                .unwrap()
+                                .preferences
+                                .recording_location
+                                .clone();
                             async move {
                                 // Get current list of local recordings
                                 let mut local_recordings = tokio::task::spawn_blocking({
@@ -580,11 +607,17 @@ async fn main(
                         // Update queue count before triggering next batch
                         set_auto_upload_queue_count(&app_state, new_count);
 
-                        // If there are still queued recordings, start another upload batch
-                        if new_count > 0 {
+                        // Use atomic compare-and-swap to safely trigger next upload
+                        // if there are still queued recordings. This avoids race conditions
+                        // where another thread might modify the queue count between our check
+                        // and the upload request.
+                        if app_state.auto_upload_queue_count.fetch_update(
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                            |count| if count > 0 { Some(count) } else { None }
+                        ).is_ok() {
                             tracing::info!(
-                                "Auto-upload queue has {} remaining, starting next upload batch",
-                                new_count
+                                "Auto-upload queue has remaining recordings, starting next upload batch"
                             );
                             app_state
                                 .async_request_tx
@@ -1212,8 +1245,12 @@ impl State {
         self.recording_state = match (&self.recording_state, to_state) {
             (RecordingState::Idle | RecordingState::Paused { .. }, RecordingState::Recording) => {
                 // Start recording from Idle or Paused state
-                let honk = self.app_state.config.read().unwrap().preferences.honk;
-                let unsupported_games = self.app_state.unsupported_games.read().unwrap().clone();
+                // Acquire both locks atomically to avoid race condition
+                let (honk, unsupported_games) = {
+                    let config = self.app_state.config.read().unwrap();
+                    let unsupported_games = self.app_state.unsupported_games.read().unwrap();
+                    (config.preferences.honk, unsupported_games.clone())
+                };
                 start_recording_safely(
                     &mut self.recorder,
                     &self.input_capture,

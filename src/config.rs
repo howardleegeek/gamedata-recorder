@@ -180,6 +180,26 @@ impl Credentials {
         self.api_key = String::new();
         self.has_consented = false;
     }
+
+    /// Validate the API key format.
+    /// Returns an error if the API key is non-empty and doesn't match the expected format.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.api_key.is_empty() {
+            // Basic validation: API key should be at least 10 characters
+            if self.api_key.len() < 10 {
+                return Err("API key is too short (minimum 10 characters)".to_string());
+            }
+            // API key should only contain alphanumeric characters, underscores, and hyphens
+            if !self
+                .api_key
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err("API key contains invalid characters".to_string());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The directory in which all persistent config data should be stored.

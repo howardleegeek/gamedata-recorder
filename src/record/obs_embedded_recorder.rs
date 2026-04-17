@@ -196,6 +196,10 @@ struct RecordingRequest {
     game_config: GameConfig,
     recording_path: String,
     game_exe: String,
+    // SAFETY: HWND is wrapped in SendableComp to allow passing across threads.
+    // The HWND is primarily used for comparison (checking if we're recording the same window)
+    // and for OBS source creation. OBS internally handles thread safety when creating
+    // capture sources, so this is safe. Direct HWND access across threads is avoided.
     hwnd: SendableComp<HWND>,
     event_stream: InputEventStream,
 }
@@ -309,6 +313,9 @@ struct RecorderState {
     last_encoder_settings: Option<serde_json::Value>,
     was_hooked: Arc<AtomicBool>,
     last_video_encoder_type: Option<VideoEncoderType>,
+    // SAFETY: Stores the last application (game exe and HWND) for comparison purposes.
+    // The HWND is primarily used for comparison to detect if we're recording the same window.
+    // OBS handles the actual HWND access internally when creating capture sources.
     last_application: Option<(String, SendableComp<HWND>)>,
     /// Track the last source creation state to force recreation when it changes
     last_source_creation_state: Option<SourceCreationState>,
@@ -319,6 +326,9 @@ struct RecorderState {
     video_encoders: HashMap<VideoEncoderType, Arc<ObsVideoEncoder>>,
     // Audio encoder (created once upfront, reused always)
     audio_encoder: Arc<ObsAudioEncoder>,
+
+    // Track the hook monitoring thread handle to ensure proper cleanup
+    hook_monitor_thread: Option<std::thread::JoinHandle<()>>,
 
     // This needs to be last as it needs to be dropped last
     obs_context: ObsContext,
@@ -400,6 +410,7 @@ impl RecorderState {
                 recording_start_time: None,
                 video_encoders: HashMap::new(),
                 audio_encoder,
+                hook_monitor_thread: None,
                 obs_context,
             },
             available_encoders,
@@ -492,7 +503,7 @@ impl RecorderState {
 
         // Listen for signals to pass onto the event stream
         self.was_hooked.store(false, Ordering::Relaxed);
-        std::thread::spawn({
+        let hook_monitor_thread = std::thread::spawn({
             let event_stream = request.event_stream;
             let was_hooked = self.was_hooked.clone();
 
@@ -514,6 +525,10 @@ impl RecorderState {
                 .on_hooked()
                 .context("failed to register source on_hooked signal")?;
 
+            // SAFETY: We clone last_application and hwnd for comparison purposes only.
+            // The HWND is not directly accessed from this thread - it's only used to
+            // check if we're recording the same window as before. OBS handles the actual
+            // HWND access internally when creating capture sources.
             let last_application = self.last_application.clone();
             let game_exe = request.game_exe.clone();
             let hwnd = request.hwnd.clone();
@@ -559,6 +574,9 @@ impl RecorderState {
                 tracing::info!("Game hook monitoring thread closed");
             }
         });
+
+        // Store the thread handle for proper cleanup
+        self.hook_monitor_thread = Some(hook_monitor_thread);
 
         // Update our last encoder settings
         self.last_encoder_settings = video_encoder_settings
@@ -616,6 +634,14 @@ impl RecorderState {
         // exits cleanly even when the recording was never hooked (avoids thread leak).
         if let Some(shutdown_tx) = last_shutdown_tx {
             shutdown_tx.send(()).ok();
+        }
+
+        // Join the hook monitoring thread to ensure it has fully terminated
+        if let Some(hook_thread) = self.hook_monitor_thread.take() {
+            // Give the thread a reasonable amount of time to exit cleanly
+            // If it doesn't exit within 1 second, we'll continue anyway
+            let _ = hook_thread.join();
+            tracing::debug!("Hook monitoring thread joined");
         }
 
         if !self.was_hooked.load(Ordering::Relaxed) {

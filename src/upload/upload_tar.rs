@@ -201,11 +201,13 @@ pub async fn run(
         // Pipeline Channels
         // Channel 1: Producer -> Signer
         // Payload: (Chunk Data, Chunk Hash, Chunk Number)
-        let (tx_hashed, mut rx_hashed) = tokio::sync::mpsc::channel(2);
+        // Use a larger buffer (100) to handle network latency and prevent blocking
+        let (tx_hashed, mut rx_hashed) = tokio::sync::mpsc::channel(100);
 
         // Channel 2: Signer -> Uploader
         // Payload: (Chunk Data, Upload URL, Chunk Number)
-        let (tx_signed, mut rx_signed) = tokio::sync::mpsc::channel(2);
+        // Use a larger buffer (100) to handle network latency and prevent blocking
+        let (tx_signed, mut rx_signed) = tokio::sync::mpsc::channel(100);
 
         // --- STAGE 1: PRODUCER (Read & Hash) ---
         let producer_handle = tokio::spawn({

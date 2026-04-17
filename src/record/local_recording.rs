@@ -199,14 +199,9 @@ impl LocalRecordingPaused {
         &mut self,
         chunk: CompleteMultipartUploadChunk,
     ) -> eyre::Result<()> {
-        // Update in-memory
-        self.upload_progress.chunk_etags.push(chunk.clone());
-
-        // Append to disk (efficient log append)
-        // We construct the path manually here or use the one from info,
-        // but UploadProgressState doesn't store the full progress file path, only tar path.
-        // We can use the helper method on self.
-
+        // Append to disk first (before updating in-memory state)
+        // This ensures that if the process crashes, the disk state is consistent
+        // and can be recovered on restart, even if in-memory state is lost.
         let path = self.upload_progress_path();
         let mut file = std::fs::OpenOptions::new()
             .append(true)
@@ -216,6 +211,10 @@ impl LocalRecordingPaused {
         serde_json::to_writer(&mut file, &chunk)?;
         use std::io::Write;
         writeln!(&mut file)?;
+        file.sync_all()?; // Ensure data is flushed to disk before updating in-memory state
+
+        // Update in-memory state after successful disk write
+        self.upload_progress.chunk_etags.push(chunk);
 
         Ok(())
     }

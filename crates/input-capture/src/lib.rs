@@ -121,8 +121,12 @@ impl InputCapture {
     }
 
     pub fn active_input(&self) -> ActiveInput {
-        let active_keys = self.active_keys.lock().unwrap();
-        let active_gamepad = self.active_gamepad.lock().unwrap();
+        // Handle poisoned mutexes gracefully to avoid application crashes
+        let active_keys = self.active_keys.lock().unwrap_or_else(|e| e.into_inner());
+        let active_gamepad = self
+            .active_gamepad
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         ActiveInput {
             keyboard: active_keys.keyboard.clone(),
             mouse: active_keys.mouse.clone(),

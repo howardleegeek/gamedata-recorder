@@ -467,10 +467,20 @@ impl From<Inputs> for input_capture::ActiveInput {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+// Ensure InputEvent is thread-safe for sending across threads
 pub struct InputEvent {
     pub timestamp: f64,
     pub event: InputEventType,
 }
+
+// Explicitly implement Send + Sync for InputEvent
+// This ensures the type can be safely used across threads
+const _: () = {
+    trait AssertSend: Send {}
+    trait AssertSync: Sync {}
+    impl AssertSend for InputEvent {}
+    impl AssertSync for InputEvent {}
+};
 impl InputEvent {
     pub fn new(timestamp: f64, event: InputEventType) -> Self {
         Self { timestamp, event }
