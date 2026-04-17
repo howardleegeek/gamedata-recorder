@@ -1,7 +1,7 @@
 use windows::{
     Win32::UI::WindowsAndMessaging::{
         GetForegroundWindow, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_SETFOREGROUND,
-        MB_TOPMOST, MessageBoxW, SetForegroundWindow,
+        MB_TOPMOST, MessageBoxW, MESSAGEBOX_STYLE, SetForegroundWindow,
     },
     core::HSTRING,
 };
@@ -27,7 +27,7 @@ fn show_message_box(body: &str, title: &str, icon: u32) {
             parent,
             &HSTRING::from(body),
             &HSTRING::from(title),
-            icon | MB_TOPMOST.0 | MB_SETFOREGROUND.0,
+            MESSAGEBOX_STYLE(icon | MB_TOPMOST.0 | MB_SETFOREGROUND.0),
         );
         // Ensure the message box window gets focus
         let _ = SetForegroundWindow(GetForegroundWindow());

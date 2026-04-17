@@ -962,7 +962,7 @@ impl State {
         if let RecordingState::Recording = self.recording_state {
             let Some(recording) = self.recorder.recording() else {
                 tracing::error!("Expected recording to exist in Recording state, but found None");
-                return;
+                return None;
             };
 
             // Extract game name early to avoid borrow issues later

@@ -121,7 +121,7 @@ impl MetadataWriter {
             graphics_settings: GraphicsSettings {
                 resolution: [resolution.0, resolution.1],
                 quality: "medium".to_string(),
-                fov: 90.0,
+                fov: 90,
                 motion_blur: false,
                 ray_tracing: false,
             },
