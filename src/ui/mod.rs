@@ -133,12 +133,30 @@ impl WinitApp {
                 .map_err(|e| eyre::eyre!("Failed to create window icon: {e}"))
         }
 
-        let default_icon_bytes = assets::get_logo_default_bytes()
-            .ok_or_else(|| eyre::eyre!("Failed to load default logo asset"))?;
-        let default_icon = load_icon_from_bytes(default_icon_bytes)?;
-        let recording_icon_bytes = assets::get_logo_recording_bytes()
-            .ok_or_else(|| eyre::eyre!("Failed to load recording logo asset"))?;
-        let recording_icon = load_icon_from_bytes(recording_icon_bytes)?;
+        // Generate a simple 1x1 pixel fallback icon if assets are missing.
+        // This lets the app start on machines where assets/ dir isn't found
+        // (e.g. running from a different working directory).
+        let fallback_pixel: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // minimal data
+        let make_fallback_icon = || -> eyre::Result<winit::window::Icon> {
+            // 1x1 red pixel RGBA
+            winit::window::Icon::from_rgba(vec![255, 0, 0, 255], 1, 1)
+                .map_err(|e| eyre::eyre!("Failed to create fallback icon: {e}"))
+        };
+
+        let default_icon = match assets::get_logo_default_bytes() {
+            Some(bytes) => load_icon_from_bytes(bytes).unwrap_or_else(|_| make_fallback_icon().unwrap()),
+            None => {
+                tracing::warn!("Default logo asset not found, using fallback icon");
+                make_fallback_icon()?
+            }
+        };
+        let recording_icon = match assets::get_logo_recording_bytes() {
+            Some(bytes) => load_icon_from_bytes(bytes).unwrap_or_else(|_| make_fallback_icon().unwrap()),
+            None => {
+                tracing::warn!("Recording logo asset not found, using fallback icon");
+                make_fallback_icon()?
+            }
+        };
         tracing::debug!("Window icons loaded");
 
         tracing::debug!("WinitApp::new() complete");

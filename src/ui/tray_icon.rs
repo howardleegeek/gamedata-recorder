@@ -39,14 +39,27 @@ impl TrayIconState {
                 .ok_or_else(|| eyre::eyre!("Failed to load icon data from bytes"))?;
             Ok(tray_icon::Icon::from_rgba(rgba, width, height)?)
         }
-        let default_icon_bytes = assets::get_logo_default_bytes()
-            .ok_or_else(|| eyre::eyre!("Failed to load default logo asset"))?;
-        let default_tray_icon_data = create_tray_icon_data_from_bytes(default_icon_bytes)
-            .context("Failed to create default tray icon")?;
-        let recording_icon_bytes = assets::get_logo_recording_bytes()
-            .ok_or_else(|| eyre::eyre!("Failed to load recording logo asset"))?;
-        let recording_tray_icon_data = create_tray_icon_data_from_bytes(recording_icon_bytes)
-            .context("Failed to create recording tray icon")?;
+        let make_fallback_tray_icon = || -> eyre::Result<tray_icon::Icon> {
+            // 1x1 red pixel RGBA as fallback when assets are missing
+            Ok(tray_icon::Icon::from_rgba(vec![255, 0, 0, 255], 1, 1)?)
+        };
+
+        let default_tray_icon_data = match assets::get_logo_default_bytes() {
+            Some(bytes) => create_tray_icon_data_from_bytes(bytes)
+                .unwrap_or_else(|_| make_fallback_tray_icon().unwrap()),
+            None => {
+                tracing::warn!("Default tray icon asset not found, using fallback");
+                make_fallback_tray_icon()?
+            }
+        };
+        let recording_tray_icon_data = match assets::get_logo_recording_bytes() {
+            Some(bytes) => create_tray_icon_data_from_bytes(bytes)
+                .unwrap_or_else(|_| make_fallback_tray_icon().unwrap()),
+            None => {
+                tracing::warn!("Recording tray icon asset not found, using fallback");
+                make_fallback_tray_icon()?
+            }
+        };
 
         tracing::debug!("Building tray icon");
         let tray_icon = TrayIconBuilder::new()

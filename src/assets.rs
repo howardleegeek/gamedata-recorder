@@ -17,16 +17,34 @@ impl AssetData {
     }
 
     pub fn get(&'static self, filename: &'static str) -> Option<&'static [u8]> {
-        self.0
-            .get_or_init(move || match std::fs::read(get_asset_path(filename)) {
-                Ok(data) => data,
-                Err(e) => {
-                    tracing::error!("Failed to load asset {filename}: {e}");
-                    Vec::new()
+        let data = self
+            .0
+            .get_or_init(move || {
+                // Try multiple paths: current_dir/assets/, exe_dir/assets/
+                let paths = [
+                    get_asset_path(filename),
+                    std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(|d| d.join("assets").join(filename)))
+                        .unwrap_or_default(),
+                ];
+                for path in &paths {
+                    if path.as_os_str().is_empty() {
+                        continue;
+                    }
+                    if let Ok(data) = std::fs::read(path) {
+                        return data;
+                    }
                 }
+                tracing::warn!("Asset {filename} not found in any search path, app will use fallback");
+                Vec::new()
             })
-            .as_slice()
-            .into()
+            .as_slice();
+        if data.is_empty() {
+            None
+        } else {
+            Some(data)
+        }
     }
 }
 
