@@ -283,8 +283,10 @@ pub const MIN_FOOTAGE: Duration = Duration::from_secs(20);
 pub const MAX_FOOTAGE: Duration = duration_from_mins(10);
 /// Maximum idle duration before stopping recording
 pub const MAX_IDLE_DURATION: Duration = Duration::from_secs(30);
-/// Maximum time to wait for OBS to hook into the application before stopping recording
-pub const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum time to wait for OBS to hook into the application before falling back
+/// to window capture. 15 seconds gives anti-cheat games (BattlEye, EAC, Vanguard)
+/// enough time to complete their initialization before we give up on game capture.
+pub const HOOK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Minimum average FPS. We allow some leeway below 60 FPS, but we want to make sure
 /// we aren't getting 30-40 FPS data.

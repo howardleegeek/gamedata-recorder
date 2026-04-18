@@ -1073,21 +1073,11 @@ impl State {
                 let game_exe = match self.recorder.current_game_exe() {
                     Some(exe) => exe,
                     None => {
-                        tracing::error!("No active recording when hook timeout detected");
-                        let message = format!(
-                            "Failed to hook into {}.\n\n\
-                                 GameData Recorder was unable to capture the game window after {} seconds.\n\n\
-                                 This may happen if:\n\
-                                 - The game has anti-cheat software\n\
-                                 - The game is running with elevated privileges\n\
-                                 - The game uses a rendering method that OBS cannot capture\n\n\
-                                 Please try:\n\
-                                 - Running GameData Recorder as administrator\n\
-                                 - Checking if the game is on the supported games list",
-                            game_name,
-                            constants::HOOK_TIMEOUT.as_secs()
+                        tracing::error!(
+                            "No active recording when hook timeout detected for {}. \
+                             Will retry with window capture on next detection cycle.",
+                            game_name
                         );
-                        crate::ui::notification::warning_message_box(&message);
                         return Some((RecordingState::Idle, "stop recording on hook timeout"));
                     }
                 };
@@ -1108,16 +1098,12 @@ impl State {
                 if !should_fallback {
                     tracing::warn!(
                         game = exe_without_ext,
-                        "Window capture already enabled but hook still timed out, not retrying"
+                        "Window capture already enabled but hook still timed out. \
+                         Continuing recording anyway — video may still contain valid frames."
                     );
-                    let message = format!(
-                        "Failed to record {} even with window capture mode.\n\n\
-                             This game may not be compatible with automatic recording.\n\n\
-                             Please check if the game is on the supported games list.",
-                        game_exe
-                    );
-                    crate::ui::notification::warning_message_box(&message);
-                    return Some((RecordingState::Idle, "stop recording on hook timeout"));
+                    // Don't stop recording — let it continue. Window capture often works
+                    // even when the hook reports failure, producing usable video data.
+                    return None;
                 }
 
                 tracing::info!(
@@ -1130,14 +1116,15 @@ impl State {
                     tracing::error!(e=?e, "Failed to update game config for window capture");
                 }
 
-                // Show informational message about fallback
-                let message = format!(
-                    "Automatically switched to window capture mode for {}.\n\n\
-                         Game capture failed to hook, but window capture should work.\n\n\
-                         This preference has been saved for future recordings of this game.",
-                    game_exe
+                // Log the fallback — no blocking message box, just continue recording.
+                // Modal dialogs block the recording pipeline and steal game window focus,
+                // causing the exact problem users reported (game unfocused, recording stalls).
+                tracing::info!(
+                    game = game_exe,
+                    "Automatically switched to window capture mode. \
+                     Game capture failed to hook (likely anti-cheat), but window capture should work. \
+                     Preference saved for future recordings."
                 );
-                crate::ui::notification::info_message_box(&message);
 
                 // Stop current recording and restart with window capture
                 tracing::info!(
