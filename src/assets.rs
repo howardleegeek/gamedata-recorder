@@ -40,11 +40,7 @@ impl AssetData {
                 Vec::new()
             })
             .as_slice();
-        if data.is_empty() {
-            None
-        } else {
-            Some(data)
-        }
+        if data.is_empty() { None } else { Some(data) }
     }
 }
 

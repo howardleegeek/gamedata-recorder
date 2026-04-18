@@ -144,14 +144,18 @@ impl WinitApp {
         };
 
         let default_icon = match assets::get_logo_default_bytes() {
-            Some(bytes) => load_icon_from_bytes(bytes).unwrap_or_else(|_| make_fallback_icon().unwrap()),
+            Some(bytes) => {
+                load_icon_from_bytes(bytes).unwrap_or_else(|_| make_fallback_icon().unwrap())
+            }
             None => {
                 tracing::warn!("Default logo asset not found, using fallback icon");
                 make_fallback_icon()?
             }
         };
         let recording_icon = match assets::get_logo_recording_bytes() {
-            Some(bytes) => load_icon_from_bytes(bytes).unwrap_or_else(|_| make_fallback_icon().unwrap()),
+            Some(bytes) => {
+                load_icon_from_bytes(bytes).unwrap_or_else(|_| make_fallback_icon().unwrap())
+            }
             None => {
                 tracing::warn!("Recording logo asset not found, using fallback icon");
                 make_fallback_icon()?
