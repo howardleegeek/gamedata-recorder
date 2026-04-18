@@ -124,11 +124,22 @@ impl Default for AudioCues {
 }
 
 /// Per-game configuration settings
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct GameConfig {
-    /// Use window capture instead of game capture for this game
+    /// Use window capture instead of game capture for this game.
+    /// Default: true — window capture works with all games including anti-cheat.
+    /// Game capture (hook injection) is opt-in for advanced users who want
+    /// slightly better performance at the cost of anti-cheat compatibility.
     pub use_window_capture: bool,
+}
+
+impl Default for GameConfig {
+    fn default() -> Self {
+        Self {
+            use_window_capture: true, // window capture by default — works everywhere
+        }
+    }
 }
 
 /// by default now start and stop recording are mapped to same key

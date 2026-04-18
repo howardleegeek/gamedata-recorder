@@ -463,38 +463,15 @@ fn find_running_game() -> Result<Option<(String, game_process::Pid, HWND)>> {
 }
 
 /// Find the main window handle for a given process ID.
-fn find_window_for_pid(pid: game_process::Pid) -> HWND {
-    use std::sync::Mutex;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
-    };
-
-    let result: std::sync::Arc<Mutex<HWND>> = std::sync::Arc::new(Mutex::new(HWND::default()));
-    let result_clone = result.clone();
-    let target_pid = pid.0;
-
-    unsafe {
-        let _ = EnumWindows(
-            Some(
-                move |hwnd: HWND,
-                      _: windows::Win32::Foundation::LPARAM|
-                      -> windows::Win32::Foundation::BOOL {
-                    let mut proc_id = 0u32;
-                    GetWindowThreadProcessId(hwnd, Some(&mut proc_id));
-                    if proc_id == target_pid && IsWindowVisible(hwnd).as_bool() {
-                        if let Ok(mut r) = result_clone.lock() {
-                            *r = hwnd;
-                        }
-                        return false.into(); // stop
-                    }
-                    true.into() // continue
-                },
-            ),
-            windows::Win32::Foundation::LPARAM(0),
-        );
-    }
-
-    result.lock().map(|r| *r).unwrap_or_default()
+/// Uses the foreground window as a fallback — OBS will find the correct
+/// window by exe name regardless of which HWND we pass.
+fn find_window_for_pid(_pid: game_process::Pid) -> HWND {
+    // Use the current foreground window as a best-effort HWND.
+    // The OBS game/window capture source identifies the target by exe name,
+    // not by HWND, so this is sufficient for recording to work.
+    game_process::foreground_window()
+        .map(|(hwnd, _)| hwnd)
+        .unwrap_or_default()
 }
 
 fn is_process_game_shaped(pid: game_process::Pid) -> Result<()> {
