@@ -36,7 +36,9 @@ impl AssetData {
                         return data;
                     }
                 }
-                tracing::warn!("Asset {filename} not found in any search path, app will use fallback");
+                tracing::warn!(
+                    "Asset {filename} not found in any search path, app will use fallback"
+                );
                 Vec::new()
             })
             .as_slice();
