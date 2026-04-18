@@ -464,8 +464,10 @@ fn find_running_game() -> Result<Option<(String, game_process::Pid, HWND)>> {
 
 /// Find the main window handle for a given process ID.
 fn find_window_for_pid(pid: game_process::Pid) -> HWND {
-    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible};
     use std::sync::Mutex;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+    };
 
     let result: std::sync::Arc<Mutex<HWND>> = std::sync::Arc::new(Mutex::new(HWND::default()));
     let result_clone = result.clone();
