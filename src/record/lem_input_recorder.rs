@@ -33,9 +33,7 @@ impl LemInputStream {
                 tracing::trace!("LEM input channel full, dropping event");
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                Err(eyre!("Input stream receiver closed"))
-            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(eyre!("Input stream receiver closed")),
         }
     }
 
@@ -47,9 +45,7 @@ impl LemInputStream {
                 tracing::trace!("LEM timestamp channel full, dropping timestamp");
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                Err(eyre!("Input stream receiver closed"))
-            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(eyre!("Input stream receiver closed")),
         }
     }
 
