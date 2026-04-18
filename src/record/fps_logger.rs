@@ -16,9 +16,13 @@ pub struct FpsLogEntry {
     pub frame_time_max_ms: f64,
 }
 
+/// Maximum FPS log entries to keep in memory (10 minutes at 1 entry/second = 600).
+/// Older entries are dropped to prevent unbounded growth during long sessions.
+const MAX_FPS_ENTRIES: usize = 600;
+
 /// Accumulates frame timing data and produces per-second FPS statistics.
 pub struct FpsLogger {
-    /// All completed per-second entries
+    /// All completed per-second entries (capped at MAX_FPS_ENTRIES)
     entries: Vec<FpsLogEntry>,
     /// Frame times (ms) accumulated within the current second
     current_second_frame_times: Vec<f64>,
@@ -92,6 +96,13 @@ impl FpsLogger {
             frame_time_avg_ms: (avg * 100.0).round() / 100.0,
             frame_time_max_ms: (max * 100.0).round() / 100.0,
         });
+
+        // Cap entries to prevent unbounded memory growth during long sessions.
+        // Keep the most recent entries (tail).
+        if self.entries.len() > MAX_FPS_ENTRIES {
+            let drain_count = self.entries.len() - MAX_FPS_ENTRIES;
+            self.entries.drain(..drain_count);
+        }
     }
 
     /// Get the current real-time FPS (frames in the last completed second).

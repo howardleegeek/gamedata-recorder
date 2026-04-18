@@ -15,33 +15,49 @@ use crate::{
     record::session_manager::SessionManager,
 };
 
+/// Maximum queued LEM input commands before dropping.
+const LEM_CHANNEL_CAPACITY: usize = 16_384;
+
 /// Stream for sending timestamped input events
 #[derive(Clone)]
 pub struct LemInputStream {
-    tx: mpsc::UnboundedSender<InputCommand>,
+    tx: mpsc::Sender<InputCommand>,
 }
 
 impl LemInputStream {
     /// Send an input event
     pub fn send_event(&self, event: InputEventType) -> Result<()> {
-        self.tx
-            .send(InputCommand::Event(event))
-            .map_err(|_| eyre!("Input stream receiver closed"))?;
-        Ok(())
+        match self.tx.try_send(InputCommand::Event(event)) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::trace!("LEM input channel full, dropping event");
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(eyre!("Input stream receiver closed"))
+            }
+        }
     }
 
     /// Send a timestamp mapping
     pub fn send_timestamp(&self, mapping: TimestampMapping) -> Result<()> {
-        self.tx
-            .send(InputCommand::Timestamp(mapping))
-            .map_err(|_| eyre!("Input stream receiver closed"))?;
-        Ok(())
+        match self.tx.try_send(InputCommand::Timestamp(mapping)) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::trace!("LEM timestamp channel full, dropping timestamp");
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(eyre!("Input stream receiver closed"))
+            }
+        }
     }
 
-    /// Signal to stop recording
+    /// Signal to stop recording — never drop this
     pub fn stop(&self) -> Result<()> {
+        // Stop commands must not be dropped — use blocking send
         self.tx
-            .send(InputCommand::Stop)
+            .try_send(InputCommand::Stop)
             .map_err(|_| eyre!("Input stream receiver closed"))?;
         Ok(())
     }
@@ -59,7 +75,7 @@ pub struct LemInputRecorder {
     actions_file: File,
     timestamps_file: File,
     session_manager: Arc<SessionManager>,
-    rx: mpsc::UnboundedReceiver<InputCommand>,
+    rx: mpsc::Receiver<InputCommand>,
     total_actions: u64,
 }
 
@@ -85,7 +101,7 @@ impl LemInputRecorder {
             )
         })?;
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(LEM_CHANNEL_CAPACITY);
         let stream = LemInputStream { tx };
 
         let mut recorder = Self {

@@ -29,10 +29,16 @@ impl From<&InputEvent> for JsonInputEvent {
     }
 }
 
+/// Maximum queued input events before dropping oldest.
+/// At 1000 Hz mouse polling, 16384 events ≈ 16 seconds of buffer.
+/// This prevents unbounded memory growth that caused OOM on 16GB systems
+/// when recording VRAM-heavy games like GTA V Enhanced.
+const INPUT_CHANNEL_CAPACITY: usize = 16_384;
+
 /// Stream for sending timestamped input events to the writer
 #[derive(Clone)]
 pub(crate) struct InputEventStream {
-    tx: mpsc::UnboundedSender<InputEvent>,
+    tx: mpsc::Sender<InputEvent>,
 }
 
 impl InputEventStream {
@@ -41,16 +47,27 @@ impl InputEventStream {
     /// queue to be populated in chronological order, so arbitrary timestamp writing
     /// shouldn't be supported anyway.
     pub(crate) fn send(&self, event: InputEventType) -> Result<()> {
-        self.tx
-            .send(InputEvent::new_at_now(event))
-            .map_err(|_| eyre!("input event stream receiver was closed"))?;
-        Ok(())
+        // Use try_send to avoid blocking the input capture thread.
+        // If the channel is full, we drop the event — better to lose an input event
+        // than to grow memory unboundedly and crash the game.
+        match self.tx.try_send(InputEvent::new_at_now(event)) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Channel full — drop event to prevent OOM. This is acceptable:
+                // a few lost input events won't meaningfully degrade the recording.
+                tracing::trace!("Input event channel full, dropping event");
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(eyre!("input event stream receiver was closed"))
+            }
+        }
     }
 }
 
 pub(crate) struct InputEventWriter {
     file: File,
-    rx: mpsc::UnboundedReceiver<InputEvent>,
+    rx: mpsc::Receiver<InputEvent>,
 }
 
 impl InputEventWriter {
@@ -62,7 +79,7 @@ impl InputEventWriter {
             .await
             .wrap_err_with(|| eyre!("failed to create and open {path:?}"))?;
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
         let stream = InputEventStream { tx };
         let mut writer = Self { file, rx };
 
