@@ -473,17 +473,21 @@ fn find_window_for_pid(pid: game_process::Pid) -> HWND {
 
     unsafe {
         let _ = EnumWindows(
-            Some(move |hwnd: HWND, _: windows::Win32::Foundation::LPARAM| -> windows::Win32::Foundation::BOOL {
-                let mut proc_id = 0u32;
-                GetWindowThreadProcessId(hwnd, Some(&mut proc_id));
-                if proc_id == target_pid && IsWindowVisible(hwnd).as_bool() {
-                    if let Ok(mut r) = result_clone.lock() {
-                        *r = hwnd;
+            Some(
+                move |hwnd: HWND,
+                      _: windows::Win32::Foundation::LPARAM|
+                      -> windows::Win32::Foundation::BOOL {
+                    let mut proc_id = 0u32;
+                    GetWindowThreadProcessId(hwnd, Some(&mut proc_id));
+                    if proc_id == target_pid && IsWindowVisible(hwnd).as_bool() {
+                        if let Ok(mut r) = result_clone.lock() {
+                            *r = hwnd;
+                        }
+                        return false.into(); // stop
                     }
-                    return false.into(); // stop
-                }
-                true.into() // continue
-            }),
+                    true.into() // continue
+                },
+            ),
             windows::Win32::Foundation::LPARAM(0),
         );
     }
