@@ -394,23 +394,101 @@ pub fn get_foregrounded_game() -> Result<Option<(String, game_process::Pid, HWND
     // Never record ourselves or known non-game processes
     let exe_lower = exe_name.to_lowercase();
     if SELF_AND_SYSTEM_BLACKLIST.iter().any(|b| exe_lower == *b) {
-        return Ok(None);
+        // Foreground is not a game — try scanning all running processes for a known game
+        return find_running_game();
     }
 
     // Validate executable has .exe extension and strip it for whitelist comparison
-    // (blacklist uses "chrome.exe" format, whitelist uses "gta5" format)
     let Some(exe_stem) = exe_lower.strip_suffix(".exe") else {
-        tracing::debug!("{} does not have .exe extension, skipping", exe_name);
-        return Ok(None);
+        // Not a .exe in foreground — try scanning all processes
+        return find_running_game();
     };
 
     // Only record games in the whitelist
     if !constants::GAME_WHITELIST.iter().any(|g| exe_stem == *g) {
-        tracing::debug!("{} is not in game whitelist, skipping", exe_name);
-        return Ok(None);
+        // Foreground is not a whitelisted game — try scanning all processes
+        return find_running_game();
     }
 
     Ok(Some((exe_name, pid, hwnd)))
+}
+
+/// Scan all running processes for a known game (fallback when foreground isn't a game).
+/// This enables recording even when the game window isn't in focus — common when
+/// the recorder UI, Steam overlay, or a Rockstar launcher is in front.
+fn find_running_game() -> Result<Option<(String, game_process::Pid, HWND)>> {
+    let mut found: Option<(String, game_process::Pid)> = None;
+
+    game_process::for_each_process(|entry| {
+        let name_bytes: Vec<u8> = entry
+            .szExeFile
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| c as u8)
+            .collect();
+        let Ok(name) = std::str::from_utf8(&name_bytes) else {
+            return true; // continue
+        };
+        let name_lower = name.to_lowercase();
+
+        // Skip blacklisted processes
+        if SELF_AND_SYSTEM_BLACKLIST.iter().any(|b| name_lower == *b) {
+            return true;
+        }
+
+        // Check whitelist
+        if let Some(stem) = name_lower.strip_suffix(".exe") {
+            if constants::GAME_WHITELIST.iter().any(|g| stem == *g) {
+                found = Some((name.to_owned(), game_process::Pid(entry.th32ProcessID)));
+                return false; // stop scanning
+            }
+        }
+        true // continue
+    })?;
+
+    let Some((exe_name, pid)) = found else {
+        return Ok(None);
+    };
+
+    // Try to find the game's main window handle
+    let hwnd = find_window_for_pid(pid);
+    tracing::info!(
+        "Found running game via process scan (not foreground): {} (pid={}, hwnd={:?})",
+        exe_name,
+        pid.0,
+        hwnd
+    );
+
+    Ok(Some((exe_name, pid, hwnd)))
+}
+
+/// Find the main window handle for a given process ID.
+fn find_window_for_pid(pid: game_process::Pid) -> HWND {
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible};
+    use std::sync::Mutex;
+
+    let result: std::sync::Arc<Mutex<HWND>> = std::sync::Arc::new(Mutex::new(HWND::default()));
+    let result_clone = result.clone();
+    let target_pid = pid.0;
+
+    unsafe {
+        let _ = EnumWindows(
+            Some(move |hwnd: HWND, _: windows::Win32::Foundation::LPARAM| -> windows::Win32::Foundation::BOOL {
+                let mut proc_id = 0u32;
+                GetWindowThreadProcessId(hwnd, Some(&mut proc_id));
+                if proc_id == target_pid && IsWindowVisible(hwnd).as_bool() {
+                    if let Ok(mut r) = result_clone.lock() {
+                        *r = hwnd;
+                    }
+                    return false.into(); // stop
+                }
+                true.into() // continue
+            }),
+            windows::Win32::Foundation::LPARAM(0),
+        );
+    }
+
+    result.lock().map(|r| *r).unwrap_or_default()
 }
 
 fn is_process_game_shaped(pid: game_process::Pid) -> Result<()> {
