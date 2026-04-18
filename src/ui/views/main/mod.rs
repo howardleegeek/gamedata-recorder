@@ -151,6 +151,12 @@ impl App {
                                 .blocking_send(AsyncRequest::OpenLog)
                                 .ok();
                         }
+                        if ui.button("Recordings").clicked() {
+                            self.app_state
+                                .async_request_tx
+                                .blocking_send(AsyncRequest::OpenDataDump)
+                                .ok();
+                        }
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.hyperlink_to(
