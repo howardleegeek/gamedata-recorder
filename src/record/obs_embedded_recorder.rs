@@ -645,7 +645,13 @@ impl RecorderState {
         }
 
         if !self.was_hooked.load(Ordering::Relaxed) {
-            bail!("Application was never hooked, recording will be blank");
+            // Don't reject the recording — window capture may have produced valid video.
+            // Anti-cheat software (BattlEye, EAC, Vanguard) often blocks game capture hooks
+            // but window capture still works and produces usable training data.
+            tracing::warn!(
+                "Game capture hook never succeeded — recording used window capture fallback. \
+                 Video may still be valid."
+            );
         }
 
         // Extremely ugly hack: We want to get the skipped frames percentage from the logs,
