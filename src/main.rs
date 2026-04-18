@@ -18,6 +18,7 @@ mod upload;
 mod util;
 mod validation;
 
+use crate::util::log_rotation::RotatingFileWriter;
 use color_eyre::Result;
 use egui_wgpu::wgpu;
 use tracing_subscriber::{Layer, layer::SubscriberExt as _, util::SubscriberInitExt as _};
@@ -27,12 +28,11 @@ use std::sync::Arc;
 use crate::system::ensure_single_instance::ensure_single_instance;
 
 fn main() -> Result<()> {
-    // Set up logging, including to file
-    let log_path = config::get_persistent_dir()?.join("gamedata-recorder-debug.log");
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
+    // Set up logging, including to file with rotation (20MB max, 3 files)
+    let log_dir = config::get_persistent_dir()?;
+    let log_path = log_dir.join("gamedata-recorder-debug.log");
+    let log_file =
+        RotatingFileWriter::new(log_dir.clone(), "gamedata-recorder-debug.log".to_string())?;
 
     let mut env_filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
