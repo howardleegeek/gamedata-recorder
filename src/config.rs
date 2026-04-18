@@ -146,7 +146,11 @@ fn default_honk_volume() -> u8 {
     255
 }
 fn default_recording_location() -> std::path::PathBuf {
-    std::path::PathBuf::from("./data_dump/games")
+    // Use the system-standard local data directory (e.g. C:\Users\<user>\AppData\Local\GameData Recorder\recordings)
+    // Falls back to ./data_dump/games if the system directory can't be determined
+    dirs::data_local_dir()
+        .map(|d| d.join("GameData Recorder").join("recordings"))
+        .unwrap_or_else(|| std::path::PathBuf::from("./data_dump/games"))
 }
 
 // For some reason, previous electron configs saved hasConsented as a string instead of a boolean? So now we need a custom deserializer

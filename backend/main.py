@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote
 
 import boto3
+from botocore.config import Config as BotoConfig
 from fastapi import FastAPI, HTTPException, Header, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse

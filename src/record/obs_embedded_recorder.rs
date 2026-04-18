@@ -672,6 +672,13 @@ impl RecorderState {
             }
         }
 
+        // Clear encoder cache to release GPU memory between recordings.
+        // Encoders hold GPU-side frame buffers; keeping them cached across
+        // multiple recordings can accumulate VRAM and contribute to OOM
+        // in VRAM-heavy games like GTA V Enhanced.
+        self.video_encoders.clear();
+        tracing::debug!("Cleared encoder cache to release GPU memory");
+
         Ok(settings)
     }
 
