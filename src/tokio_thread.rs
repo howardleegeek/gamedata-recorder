@@ -1265,8 +1265,10 @@ impl State {
                 // Start recording from Idle or Paused state
                 // Acquire both locks atomically to avoid race condition
                 let (honk, unsupported_games) = {
-                    let config = self.app_state.config.read().unwrap();
-                    let unsupported_games = self.app_state.unsupported_games.read().unwrap();
+                    let config = self.app_state.config.read()
+                        .map_err(|_| color_eyre::eyre::eyre!("Config RwLock poisoned during recording start"))?;
+                    let unsupported_games = self.app_state.unsupported_games.read()
+                        .map_err(|_| color_eyre::eyre::eyre!("Unsupported games RwLock poisoned during recording start"))?;
                     (config.preferences.honk, unsupported_games.clone())
                 };
                 start_recording_safely(
