@@ -142,13 +142,15 @@ impl Default for GameConfig {
     }
 }
 
-/// by default now start and stop recording are mapped to same key
-/// f5 instead of f4 so users can alt+f4 properly.
+/// Start and stop recording are mapped to the same key (F9 toggle).
+/// F9 matches the competitor's hotkey convention. F5 was previously
+/// used but users reported it didn't work — F9 is less likely to
+/// conflict with game keybinds.
 fn default_start_key() -> String {
-    "F5".to_string()
+    "F9".to_string()
 }
 fn default_stop_key() -> String {
-    "F5".to_string()
+    "F9".to_string()
 }
 fn default_opacity() -> u8 {
     85
