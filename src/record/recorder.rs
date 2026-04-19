@@ -97,7 +97,7 @@ impl Recorder {
 
         tracing::info!(
             "Initializing recorder with adapter index {adapter_index} ({:?})",
-            app_state.adapter_infos[adapter_index]
+            app_state.adapter_infos.get(adapter_index)
         );
 
         tracing::debug!("Creating video recorder backend");
