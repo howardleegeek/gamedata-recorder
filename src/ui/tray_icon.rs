@@ -18,6 +18,7 @@ use crate::{
 pub struct TrayIconState {
     icon: TrayIcon,
     quit_item_id: MenuId,
+    open_recordings_item_id: MenuId,
 
     default_tray_icon_data: tray_icon::Icon,
     recording_tray_icon_data: tray_icon::Icon,
@@ -27,9 +28,12 @@ impl TrayIconState {
         tracing::debug!("TrayIconState::new() called");
         // tray icon right click menu for quit option
         tracing::debug!("Creating tray menu");
+        let open_recordings_item = MenuItem::new("Open Recordings", true, None);
+        let open_recordings_item_id = open_recordings_item.id().clone();
         let quit_item = MenuItem::new("Quit", true, None);
         let quit_item_id = quit_item.id().clone();
         let tray_menu = Menu::new();
+        let _ = tray_menu.append(&open_recordings_item);
         let _ = tray_menu.append(&quit_item);
 
         // create tray icon
@@ -64,7 +68,7 @@ impl TrayIconState {
         tracing::debug!("Building tray icon");
         let tray_icon = TrayIconBuilder::new()
             .with_icon(default_tray_icon_data.clone())
-            .with_tooltip("GameData Recorder")
+            .with_tooltip("GameData Recorder \u{2014} F9 to record")
             .with_menu(Box::new(tray_menu))
             .build()?;
         tracing::debug!("Tray icon built successfully");
@@ -73,6 +77,7 @@ impl TrayIconState {
         Ok(TrayIconState {
             icon: tray_icon,
             quit_item_id,
+            open_recordings_item_id,
             default_tray_icon_data,
             recording_tray_icon_data,
         })
@@ -86,13 +91,20 @@ impl TrayIconState {
         visible: Arc<AtomicBool>,
         stopped_tx: tokio::sync::broadcast::Sender<()>,
         ui_update_tx: UiUpdateSender,
+        async_request_tx: tokio::sync::mpsc::Sender<crate::app_state::AsyncRequest>,
     ) {
         tracing::debug!("TrayIconState::post_initialize() called");
         MenuEvent::set_event_handler({
             let quit_item_id = self.quit_item_id.clone();
+            let open_recordings_item_id = self.open_recordings_item_id.clone();
             let window = window.clone();
             let visible = visible.clone();
+            let async_request_tx = async_request_tx.clone();
             Some(move |event: MenuEvent| match event.id() {
+                id if id == &open_recordings_item_id => {
+                    // Send async request to open the recordings folder
+                    let _ = async_request_tx.try_send(crate::app_state::AsyncRequest::OpenDataDump);
+                }
                 id if id == &quit_item_id => {
                     tracing::info!("Tray icon requested shutdown");
                     if let Err(e) = stopped_tx.send(()) {

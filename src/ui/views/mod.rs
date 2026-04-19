@@ -277,6 +277,7 @@ impl App {
             self.visible.clone(),
             self.stopped_tx.clone(),
             self.app_state.ui_update_tx.clone(),
+            self.app_state.async_request_tx.clone(),
         );
     }
 
