@@ -249,8 +249,12 @@ fn recorder_thread(
         recorder_thread_impl(adapter_index, rx, init_success_tx);
     }));
     if let Err(e) = result {
-        tracing::error!("OBS recorder thread panicked: {e:?}");
-        std::panic::resume_unwind(e);
+        // Log the panic but do NOT resume_unwind — that would crash the entire application.
+        // The OBS thread dying is bad but recoverable; the user can restart the app.
+        // The tokio thread will detect the channel closure and handle it gracefully.
+        tracing::error!(
+            "OBS recorder thread panicked (recording will stop but app won't crash): {e:?}"
+        );
     }
 }
 
