@@ -1,0 +1,96 @@
+name: Nightly Nucbox E2E
+
+on:
+  schedule:
+    # 03:00 America/New_York -> 07:00 UTC (standard), 08:00 UTC (daylight).
+    # We use 07:00 UTC year-round as requested.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      game_app_id:
+        description: 'Steam App ID to drive (default 730 = CS2)'
+        required: false
+        default: '730'
+      duration_sec:
+        description: 'Recording duration in seconds'
+        required: false
+        default: '90'
+
+concurrency:
+  group: nightly-nucbox-e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e-smoke:
+    name: E2E smoke on nucbox
+    runs-on: [self-hosted, windows, nucbox]
+    timeout-minutes: 15
+    env:
+      # Pull workflow_dispatch inputs into env vars so we don't splice
+      # ${{ github.event.inputs.* }} directly into shell commands.
+      INPUT_GAME_APP_ID: ${{ github.event.inputs.game_app_id }}
+      INPUT_DURATION_SEC: ${{ github.event.inputs.duration_sec }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run E2E smoke test
+        id: smoke
+        shell: pwsh
+        run: |
+          $app = if ($env:INPUT_GAME_APP_ID) { [int]$env:INPUT_GAME_APP_ID } else { 730 }
+          $dur = if ($env:INPUT_DURATION_SEC) { [int]$env:INPUT_DURATION_SEC } else { 90 }
+          $out = Join-Path $env:RUNNER_TEMP 'gdr-e2e-result.json'
+          pwsh -NoProfile -NonInteractive -File scripts/e2e-smoke.ps1 -GameAppId $app -DurationSec $dur -OutputJson $out
+          $code = $LASTEXITCODE
+          "result_json=$out" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "exit_code=$code"  | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          exit $code
+        continue-on-error: true
+
+      - name: Upload result JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-result-${{ github.run_id }}
+          path: ${{ steps.smoke.outputs.result_json }}
+          if-no-files-found: warn
+
+      - name: Open issue on failure
+        if: steps.smoke.outputs.exit_code != '0'
+        uses: actions/github-script@v7
+        env:
+          RESULT_JSON: ${{ steps.smoke.outputs.result_json }}
+          EXIT_CODE: ${{ steps.smoke.outputs.exit_code }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = process.env.RESULT_JSON;
+            const exitCode = process.env.EXIT_CODE;
+            const shortSha = context.sha.substring(0, 7);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            let body = `E2E smoke test failed on nucbox for commit \`${context.sha}\`.\n\n`;
+            body += `- Workflow run: ${runUrl}\n`;
+            body += `- Exit code: \`${exitCode}\`\n\n`;
+            try {
+              const json = fs.readFileSync(path, 'utf8');
+              body += '## Result JSON\n\n```json\n' + json + '\n```\n';
+            } catch (e) {
+              body += `_(could not read result JSON: ${e.message})_\n`;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `E2E smoke failed: ${shortSha}`,
+              body,
+              labels: ['e2e-failure', 'automated']
+            });
+
+      - name: Fail job if smoke failed
+        if: steps.smoke.outputs.exit_code != '0'
+        shell: pwsh
+        env:
+          EXIT_CODE: ${{ steps.smoke.outputs.exit_code }}
+        run: |
+          Write-Host "E2E smoke exited with $env:EXIT_CODE"
+          exit 1
