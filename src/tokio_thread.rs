@@ -1920,16 +1920,31 @@ async fn check_for_updates(app_state: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
+/// Generates a unique session directory name.
+///
+/// Format: `session_YYYYMMDD_HHMMSS_<8hex>` where `<8hex>` is the first 8
+/// characters of a UUIDv4. The random suffix prevents collisions when two
+/// recordings start within the same 1-second window (e.g. during restart
+/// loops), which otherwise caused silent overwrites.
+///
+/// The suffix is optional in the parse-back path — older session folders
+/// (pre-2.5.6) without a suffix remain readable.
 fn generate_session_dir_name() -> String {
     let now = Local::now();
+    // Take 8 hex chars of a UUIDv4 (~32 bits of entropy). For two concurrent
+    // recordings within the same second that's a collision probability of
+    // ~1 in 4 billion per pair, vs. ~100% at 1s resolution.
+    let uuid = uuid::Uuid::new_v4();
+    let suffix: String = uuid.simple().to_string().chars().take(8).collect();
     format!(
-        "session_{:04}{:02}{:02}_{:02}{:02}{:02}",
+        "session_{:04}{:02}{:02}_{:02}{:02}{:02}_{}",
         now.year(),
         now.month(),
         now.day(),
         now.hour(),
         now.minute(),
-        now.second()
+        now.second(),
+        suffix,
     )
 }
 
@@ -1963,5 +1978,54 @@ async fn wait_for_consent(
                 return None;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod session_dir_name_tests {
+    use super::generate_session_dir_name;
+    use std::collections::HashSet;
+
+    /// Rapid-fire generation must never produce duplicate folder names,
+    /// even when the wall-clock second hasn't advanced between calls.
+    #[test]
+    fn rapid_generation_produces_distinct_names() {
+        const N: usize = 1000;
+        let mut seen = HashSet::with_capacity(N);
+        for _ in 0..N {
+            let name = generate_session_dir_name();
+            assert!(
+                seen.insert(name.clone()),
+                "duplicate session dir name in tight loop: {name}"
+            );
+        }
+    }
+
+    /// Sanity-check the format: session_YYYYMMDD_HHMMSS_<suffix>.
+    #[test]
+    fn format_has_timestamp_and_suffix() {
+        let name = generate_session_dir_name();
+        let parts: Vec<&str> = name.split('_').collect();
+        assert_eq!(
+            parts.len(),
+            4,
+            "expected 4 underscore-separated parts, got {parts:?}"
+        );
+        assert_eq!(parts[0], "session");
+        assert_eq!(parts[1].len(), 8, "date part YYYYMMDD");
+        assert_eq!(parts[2].len(), 6, "time part HHMMSS");
+        assert_eq!(parts[3].len(), 8, "8-hex suffix");
+        assert!(
+            parts[1].chars().all(|c| c.is_ascii_digit()),
+            "date must be digits"
+        );
+        assert!(
+            parts[2].chars().all(|c| c.is_ascii_digit()),
+            "time must be digits"
+        );
+        assert!(
+            parts[3].chars().all(|c| c.is_ascii_hexdigit()),
+            "suffix must be hex"
+        );
     }
 }

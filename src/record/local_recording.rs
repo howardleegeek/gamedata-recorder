@@ -155,6 +155,74 @@ pub struct LocalRecordingInfo {
     pub timestamp: Option<std::time::SystemTime>,
 }
 
+/// Parse the timestamp out of a session folder name.
+///
+/// Supports three historical formats:
+/// 1. `session_YYYYMMDD_HHMMSS_<suffix>` — current (post bug-2 fix)
+/// 2. `session_YYYYMMDD_HHMMSS`          — pre-suffix
+/// 3. bare unix seconds (stringified `u64`) — very old
+///
+/// Returns `None` for folders that don't match any known format.
+fn parse_session_timestamp(folder_name: &str) -> Option<std::time::SystemTime> {
+    // Format 1 & 2: strip optional `_<suffix>` tail, then parse
+    // `session_YYYYMMDD_HHMMSS`.
+    if let Some(rest) = folder_name.strip_prefix("session_") {
+        // rest = "YYYYMMDD_HHMMSS" or "YYYYMMDD_HHMMSS_suffix"
+        // Take only the first two underscore-separated segments (date, time)
+        // so any trailing suffix is ignored.
+        let mut parts = rest.splitn(3, '_');
+        let date_part = parts.next()?;
+        let time_part = parts.next()?;
+        let combined = format!("{date_part}{time_part}");
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&combined, "%Y%m%d%H%M%S") {
+            // Interpret as local time since `generate_session_dir_name` uses Local.
+            let local: chrono::DateTime<chrono::Local> =
+                chrono::TimeZone::from_local_datetime(&chrono::Local, &naive).single()?;
+            let secs = local.timestamp();
+            if secs < 0 {
+                return None;
+            }
+            return Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64));
+        }
+    }
+    // Format 3 (legacy): bare u64 seconds
+    folder_name
+        .parse::<u64>()
+        .ok()
+        .map(|secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+}
+
+#[cfg(test)]
+mod parse_timestamp_tests {
+    use super::parse_session_timestamp;
+
+    #[test]
+    fn parses_new_format_with_suffix() {
+        // 2026-01-15 14:30:22 local
+        let ts = parse_session_timestamp("session_20260115_143022_deadbeef");
+        assert!(ts.is_some(), "should parse new format with suffix");
+    }
+
+    #[test]
+    fn parses_old_format_without_suffix() {
+        let ts = parse_session_timestamp("session_20260115_143022");
+        assert!(ts.is_some(), "should parse old format without suffix");
+    }
+
+    #[test]
+    fn parses_legacy_bare_seconds() {
+        let ts = parse_session_timestamp("1737000000");
+        assert!(ts.is_some(), "should parse legacy bare-seconds format");
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(parse_session_timestamp("not-a-session").is_none());
+        assert!(parse_session_timestamp("session_bad_time").is_none());
+        assert!(parse_session_timestamp("").is_none());
+    }
+}
+
 impl std::fmt::Display for LocalRecordingInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} ({})", self.folder_name, self.folder_path.display())
@@ -339,10 +407,7 @@ impl LocalRecording {
             .unwrap_or("Unknown")
             .to_string();
 
-        let timestamp = folder_name
-            .parse::<u64>()
-            .ok()
-            .map(|secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs));
+        let timestamp = parse_session_timestamp(&folder_name);
 
         let info = LocalRecordingInfo {
             folder_name,
@@ -424,11 +489,9 @@ impl LocalRecording {
             .unwrap_or("Unknown")
             .to_string();
 
-        // Parse the timestamp from the folder name (unix timestamp in seconds)
-        let timestamp = folder_name
-            .parse::<u64>()
-            .ok()
-            .map(|secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs));
+        // Parse the timestamp from the folder name. Handles all historical
+        // formats including the current `session_YYYYMMDD_HHMMSS_<suffix>`.
+        let timestamp = parse_session_timestamp(&folder_name);
 
         let info = LocalRecordingInfo {
             folder_name,

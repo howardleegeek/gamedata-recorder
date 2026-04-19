@@ -241,17 +241,24 @@ impl SessionManager {
     }
 }
 
-/// Generate a unique session ID
+/// Generate a unique session ID.
+///
+/// Format: `session_YYYYMMDD_HHMMSS_<8hex>`. The 8-hex suffix is drawn from
+/// a UUIDv4 and prevents collisions when two sessions are created within
+/// the same 1-second window (rare but possible with restart loops).
 fn generate_session_id() -> String {
     let now = Utc::now();
+    let uuid = uuid::Uuid::new_v4();
+    let suffix: String = uuid.simple().to_string().chars().take(8).collect();
     format!(
-        "session_{}{:02}{:02}_{:02}{:02}{:02}",
+        "session_{}{:02}{:02}_{:02}{:02}{:02}_{}",
         now.year(),
         now.month(),
         now.day(),
         now.hour(),
         now.minute(),
-        now.second()
+        now.second(),
+        suffix,
     )
 }
 
@@ -292,5 +299,36 @@ mod tests {
         assert_eq!(manager.current_frame(), 0);
         assert_eq!(manager.increment_frame(), 0);
         assert_eq!(manager.current_frame(), 1);
+    }
+
+    /// Two SessionManagers created back-to-back (within the same second) must
+    /// produce distinct session paths. Prior to the nanosecond/random suffix
+    /// fix this test would fail ~100% of the time.
+    #[tokio::test]
+    async fn back_to_back_sessions_have_distinct_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let a = SessionManager::create(temp_dir.path(), "TestGame")
+            .await
+            .unwrap();
+        let b = SessionManager::create(temp_dir.path(), "TestGame")
+            .await
+            .unwrap();
+
+        assert_ne!(
+            a.session_path(),
+            b.session_path(),
+            "two sessions created within the same second must have different paths"
+        );
+    }
+
+    /// Tight-loop stress: 50 sessions in under a second should all be unique.
+    #[test]
+    fn generate_session_id_is_unique_in_tight_loop() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for _ in 0..50 {
+            let id = generate_session_id();
+            assert!(seen.insert(id.clone()), "duplicate session id: {id}");
+        }
     }
 }
