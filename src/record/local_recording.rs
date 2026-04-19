@@ -12,6 +12,7 @@ use crate::{
     api::{ApiClient, ApiError, CompleteMultipartUploadChunk},
     output_types::Metadata,
     system::{hardware_id, hardware_specs},
+    util::durable_write,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -249,10 +250,15 @@ impl LocalRecordingPaused {
     pub fn mark_as_uploaded(self, game_control_id: String) -> std::io::Result<LocalRecording> {
         let info = self.info.clone();
         self.cleanup_upload_artifacts();
-        std::fs::write(
-            info.folder_path
+        // Atomic write: a crash between creating `.uploaded` and flushing its
+        // single-line payload could leave us with an empty marker file, which
+        // `LocalRecording::from_path` then reads as `game_control_id = ""`
+        // and treats as a successful upload we can no longer correlate.
+        durable_write::write_atomic(
+            &info
+                .folder_path
                 .join(constants::filename::recording::UPLOADED),
-            &game_control_id,
+            game_control_id.as_bytes(),
         )?;
         tracing::info!(
             "Marked recording as uploaded: game_control_id={}, folder_path={}",
@@ -271,10 +277,14 @@ impl LocalRecordingPaused {
         let info = self.info.clone();
         let metadata = self.metadata.clone();
         self.cleanup_upload_artifacts();
-        std::fs::write(
-            info.folder_path
+        // Atomic so the error message reaches disk as a unit — otherwise a
+        // truncated SERVER_INVALID file would still flip the recording into
+        // the Invalid variant but with garbled error_reasons.
+        durable_write::write_atomic(
+            &info
+                .folder_path
                 .join(constants::filename::recording::SERVER_INVALID),
-            message,
+            message.as_bytes(),
         )?;
         tracing::info!(
             "Marked recording as server-invalid: message={}, folder_path={}",
@@ -635,12 +645,22 @@ impl LocalRecording {
             wall_clock_end: Some(wall_clock_end),
         };
 
-        // Write metadata to disk using atomic write pattern (write .tmp then rename).
-        // Prevents corruption if the process crashes mid-write.
+        // Write metadata to disk using atomic + fsync'd write.
+        //
+        // The old implementation used `tokio::fs::write` + `tokio::fs::rename`,
+        // which is atomic at the directory-entry level BUT skipped the
+        // file-data fsync between write and rename. On power loss between
+        // those two steps, the new inode's name would commit while its data
+        // blocks sat in the page cache — leaving a 0-byte metadata.json
+        // referencing whatever MP4 was next to it. `write_atomic_async`
+        // inserts the missing `sync_all` call on the temp file and syncs
+        // the parent directory on POSIX so the rename itself is durable.
+        //
+        // Note: this runs via spawn_blocking inside write_atomic_async, so the
+        // tokio reactor isn't pinned while the fsync stalls (fsync on a busy
+        // NVMe can take tens of ms; on a networked drive, seconds).
         let metadata_json = serde_json::to_string_pretty(&metadata)?;
-        let temp_path = metadata_path.with_extension("json.tmp");
-        tokio::fs::write(&temp_path, &metadata_json).await?;
-        tokio::fs::rename(&temp_path, &metadata_path).await?;
+        durable_write::write_atomic_async(&metadata_path, metadata_json.into_bytes()).await?;
 
         // Validate the recording immediately after stopping to create [`constants::filename::recording::INVALID`] file if needed
         tracing::info!("Validating recording at {}", recording_location.display());
@@ -676,4 +696,97 @@ fn folder_size(path: &Path) -> Result<u64, std::io::Error> {
         }
     }
     Ok(size)
+}
+
+#[cfg(test)]
+mod durability_tests {
+    //! Durability tests for the session-metadata finalize path.
+    //!
+    //! We can't easily exercise the full
+    //! [`LocalRecording::write_metadata_and_validate`] from a unit test —
+    //! it pulls in OBS adapter info, input-capture gamepads, and git
+    //! version strings that aren't available in a `cargo test` context.
+    //! What we CAN test is the underlying invariant the bugfix relies on:
+    //! when we commit a metadata.json via the same `durable_write` helper
+    //! the finalize path now uses, the on-disk result satisfies:
+    //!   (a) the final file exists,
+    //!   (b) no `.tmp` sibling remains,
+    //!   (c) the content is valid JSON matching what we wrote.
+    //!
+    //! This is the pre-bugfix failure mode we were seeing: a crash between
+    //! `tokio::fs::write(tmp)` and `tokio::fs::rename(tmp, final)` could
+    //! leave either (a) missing or (b) present with a truncated payload.
+
+    use crate::util::durable_write;
+    use tempfile::TempDir;
+
+    #[test]
+    fn finalize_metadata_write_produces_valid_json_without_tmp_leftover() {
+        let session_dir = TempDir::new().expect("tempdir for fake session");
+        let metadata_path = session_dir
+            .path()
+            .join(constants::filename::recording::METADATA);
+
+        // Build a fake metadata blob shaped like the real
+        // `output_types::Metadata`. We don't import the full struct here —
+        // the point of this test is the file-system invariants, not the
+        // schema. Any valid JSON is sufficient.
+        let fake_metadata = serde_json::json!({
+            "game_exe": "eldenring.exe",
+            "session_id": "durability-test-0001",
+            "duration": 123.456,
+            "frame_count": 7400,
+        });
+        let json = serde_json::to_string_pretty(&fake_metadata).expect("serialize");
+
+        // Commit via the same helper the finalize path uses.
+        durable_write::write_atomic(&metadata_path, json.as_bytes())
+            .expect("atomic write should succeed on a healthy tempdir");
+
+        // (a) Final file exists.
+        assert!(
+            metadata_path.exists(),
+            "metadata.json must exist after finalize"
+        );
+
+        // (b) No `.tmp` sibling was left behind.
+        let tmp_sibling = session_dir
+            .path()
+            .join(format!("{}.tmp", constants::filename::recording::METADATA));
+        assert!(
+            !tmp_sibling.exists(),
+            "metadata.json.tmp must not remain after successful rename"
+        );
+
+        // (c) Content round-trips through JSON.
+        let read_back = std::fs::read_to_string(&metadata_path).expect("read metadata.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&read_back).expect("metadata.json must parse as JSON");
+        assert_eq!(parsed["game_exe"], "eldenring.exe");
+        assert_eq!(parsed["frame_count"], 7400);
+    }
+
+    #[test]
+    fn atomic_overwrite_does_not_merge_with_previous_contents() {
+        // Regression guard for the torn-write hazard the fix is designed
+        // to defeat: after atomic write, the reader sees EITHER the old
+        // or the NEW complete contents — never a mix.
+        let session_dir = TempDir::new().unwrap();
+        let p = session_dir
+            .path()
+            .join(constants::filename::recording::METADATA);
+        std::fs::write(
+            &p,
+            r#"{"schema":"v1","note":"this is the OLD, intentionally longer"}"#,
+        )
+        .unwrap();
+
+        let new = r#"{"schema":"v2"}"#;
+        durable_write::write_atomic(&p, new.as_bytes()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            new,
+            "atomic write must fully replace the file, not merge"
+        );
+    }
 }

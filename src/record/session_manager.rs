@@ -15,7 +15,7 @@ use std::{
 use chrono::{Datelike, Timelike, Utc};
 use color_eyre::{Result, eyre::eyre};
 
-use crate::output_types::lem_metadata::SessionMetadata;
+use crate::{output_types::lem_metadata::SessionMetadata, util::durable_write};
 
 /// Manages a recording session in LEM format
 pub struct SessionManager {
@@ -219,13 +219,19 @@ impl SessionManager {
     pub async fn write_session_metadata(&self, metadata: &SessionMetadata) -> Result<()> {
         let path = self.session_metadata_path();
         let json = serde_json::to_string_pretty(metadata)?;
-        tokio::fs::write(&path, json).await.map_err(|e| {
-            eyre!(
-                "Failed to write session metadata to {}: {}",
-                path.display(),
-                e
-            )
-        })?;
+        // Durable write: atomic rename + fsync on the temp file before rename
+        // so an unclean shutdown can't leave a 0-byte session.json under the
+        // final name. This is the session "create" marker and also the
+        // post-finalize write, so we use the same pattern for both.
+        durable_write::write_atomic_async(&path, json.into_bytes())
+            .await
+            .map_err(|e| {
+                eyre!(
+                    "Failed to write session metadata to {}: {}",
+                    path.display(),
+                    e
+                )
+            })?;
         Ok(())
     }
 

@@ -15,6 +15,7 @@ use crate::{
         recorder::VideoRecorder,
     },
     system::hardware_specs,
+    util::durable_write,
 };
 
 use super::fps_logger::FpsLogger;
@@ -224,17 +225,82 @@ impl Recording {
 
         if let Err(e) = result {
             tracing::error!("Error while stopping recording, invalidating recording: {e}");
-            // Best-effort write — may fail on disk full, which is acceptable
-            if let Err(write_err) = tokio::fs::write(
-                self.recording_location
-                    .join(constants::filename::recording::INVALID),
-                e.to_string(),
-            )
-            .await
-            {
-                tracing::error!("Failed to write INVALID marker (disk full?): {write_err}");
+            // Best-effort write — may fail on disk full, which is acceptable.
+            // Use atomic write so a partial INVALID marker from a second-level
+            // crash can't promote the recording back to Unuploaded. The helper
+            // runs on spawn_blocking; errors are reported but not propagated.
+            let invalid_path = self
+                .recording_location
+                .join(constants::filename::recording::INVALID);
+            let reason = e.to_string().into_bytes();
+            let write_result = tokio::task::spawn_blocking(move || {
+                durable_write::write_atomic(&invalid_path, &reason)
+            })
+            .await;
+            match write_result {
+                Ok(Ok(())) => {}
+                Ok(Err(write_err)) => {
+                    tracing::error!("Failed to write INVALID marker (disk full?): {write_err}");
+                }
+                Err(join_err) => {
+                    tracing::error!("Failed to join INVALID marker write task: {join_err}");
+                }
             }
             return Ok(());
+        }
+
+        // CRITICAL: fsync the MP4 before writing metadata.json.
+        //
+        // OBS closes the MP4 file inside its own thread as part of
+        // `stop_recording`, but "close" only schedules the final block
+        // flushes; on a clean shutdown the kernel flushes them shortly
+        // after. On an UNCLEAN shutdown (power loss, hard kill) the MP4's
+        // moov atom (written last by libobs-ffmpeg-mux) can still be sitting
+        // in the page cache when the process dies — at which point
+        // metadata.json will claim a valid recording exists but the MP4 is
+        // unplayable (no moov, no seek index, truncated at some arbitrary
+        // stream offset). The fsync here forces the MP4 to disk BEFORE we
+        // commit metadata, so the invariant "metadata.json exists ⇒ MP4 is
+        // playable" is preserved across power loss.
+        //
+        // Runs on spawn_blocking because fsync on a 10-min H.265 file can
+        // easily take >100ms on a spinning disk, and we don't want to stall
+        // the tokio reactor for that duration.
+        let mp4_path = self
+            .recording_location
+            .join(constants::filename::recording::VIDEO);
+        if mp4_path.exists() {
+            let mp4_for_fsync = mp4_path.clone();
+            let fsync_result =
+                tokio::task::spawn_blocking(move || durable_write::fsync_file(&mp4_for_fsync))
+                    .await;
+            match fsync_result {
+                Ok(Ok(())) => {
+                    tracing::debug!("MP4 fsync'd before metadata write: {}", mp4_path.display());
+                }
+                Ok(Err(e)) => {
+                    // Swallow the error — we still want to write metadata and
+                    // validate. The validator will catch an unplayable MP4
+                    // downstream and mark the recording INVALID. Logging at
+                    // warn so we see this in the field.
+                    tracing::warn!(
+                        "Failed to fsync MP4 before metadata write, continuing: {} (err={:?})",
+                        mp4_path.display(),
+                        e
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to join MP4 fsync task: {e}");
+                }
+            }
+        } else {
+            // The recorder reported success but produced no MP4 — rare, but
+            // possible on some encoder-failure paths. We let the validator
+            // flag it.
+            tracing::warn!(
+                "MP4 file missing after successful stop_recording: {}",
+                mp4_path.display()
+            );
         }
 
         let gamepads = input_capture.gamepads();

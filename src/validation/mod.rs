@@ -6,7 +6,10 @@ use std::{
 use color_eyre::eyre::{self, Context as _};
 use serde::{Deserialize, Serialize};
 
-use crate::output_types::{InputEvent, InputEventType, Metadata};
+use crate::{
+    output_types::{InputEvent, InputEventType, Metadata},
+    util::durable_write,
+};
 
 /// Parse a single JSONL input-event line directly into an `InputEvent`, bypassing
 /// the lossy CSV reconstruction we used in v2.5.4. The v2.5.4 code format-strung
@@ -65,7 +68,15 @@ pub fn validate_folder(path: &Path) -> eyre::Result<ValidationResult> {
                 path.display(),
                 reasons
             );
-            std::fs::write(path.join(constants::filename::recording::INVALID), &reasons).ok();
+            // Atomic write so a crash between create() and rename() can't leave
+            // a partial INVALID file (which would otherwise cause
+            // LocalRecording::from_path to pick up a Invalid recording with
+            // mangled reasons, or worse, classify it as Unuploaded).
+            durable_write::write_atomic(
+                &path.join(constants::filename::recording::INVALID),
+                reasons.as_bytes(),
+            )
+            .ok();
             eyre::bail!("Validation failures: {reasons}");
         }
     }
@@ -128,15 +139,12 @@ fn validate_folder_impl(path: &Path) -> Result<ValidationResult, Vec<String>> {
             // fs::write will completely overwrite existing metadata file, and if the OS is
             // out of available memory (either due to user skill issue or a bug with owlc),
             // it becomes a nightmare case where the metadata just gets deleted.
-            // To be safe, we use atomic write pattern: write to temp file, then rename
-            // This prevents corruption if the process crashes or runs out of memory
-            let temp_path = meta_path.with_extension("tmp");
-            if let Err(e) = std::fs::write(&temp_path, metadata) {
-                invalid_reasons.push(format!("Error writing metadata temp file: {e:?}"));
-            } else if let Err(e) = std::fs::rename(&temp_path, &meta_path) {
-                invalid_reasons.push(format!("Error renaming metadata temp file: {e:?}"));
-                // Clean up temp file on failure
-                std::fs::remove_file(&temp_path).ok();
+            // We use the durable_write helper: write-tmp → fsync → rename → sync_dir.
+            // Without the fsync step the old code could still leave a zero-length
+            // metadata.json under the final name if power dropped between the
+            // underlying `write` (page cache only) and the rename's journal flush.
+            if let Err(e) = durable_write::write_atomic(&meta_path, metadata.as_bytes()) {
+                invalid_reasons.push(format!("Error writing metadata file atomically: {e:?}"));
             }
         }
         Err(e) => invalid_reasons.push(format!("Error generating JSON for metadata file: {e:?}")),

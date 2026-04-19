@@ -458,21 +458,20 @@ impl Config {
         let config_path = Self::get_path()?;
         tracing::info!("Saving configs to {}", config_path.to_string_lossy());
         let json = serde_json::to_string_pretty(&self)?;
-        // Atomic write: write to temp file then rename to prevent corruption
-        // if the process crashes or disk becomes full mid-write.
-        let temp_path = config_path.with_extension("json.tmp");
-        if let Err(e) = fs::write(&temp_path, &json) {
+        // Atomic + fsync write: the helper writes <path>.tmp, calls
+        // `File::sync_all()` so the bytes reach durable storage, then
+        // renames into place and (on POSIX) syncs the containing directory.
+        // Replaces the prior tmp+rename pair that omitted the fsync and
+        // could leave a 0-byte config.json on power loss between write and
+        // rename.
+        if let Err(e) = crate::util::durable_write::write_atomic(&config_path, json.as_bytes()) {
             tracing::error!(
-                "Failed to write config to temp file {}: {e}. Disk may be full or read-only.",
-                temp_path.display()
+                "Atomic config write failed ({e}). Falling back to direct write to avoid \
+                 losing the user's preferences entirely."
             );
-            return Err(e.into());
-        }
-        if let Err(e) = fs::rename(&temp_path, &config_path) {
-            tracing::error!(
-                "Failed to rename temp config file: {e}. Falling back to direct write."
-            );
-            // Fallback: direct write (less safe but better than nothing)
+            // Fallback: direct write (less safe but better than nothing) —
+            // preserves v2.5.5 behaviour for systems where the atomic path
+            // keeps failing (e.g. weird network shares that disallow rename).
             fs::write(&config_path, &json)?;
         }
         Ok(())

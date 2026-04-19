@@ -13,6 +13,7 @@ use crate::{
     output_types::lem_metadata::*,
     record::session_manager::SessionManager,
     system::hardware_specs::{self, GpuSpecs},
+    util::durable_write,
 };
 use constants::encoding::VideoEncoderType;
 
@@ -60,8 +61,12 @@ impl MetadataWriter {
 
         metadata.finalize(duration, total_frames, total_actions);
 
+        // Atomic + fsync so the finalized session metadata survives unclean
+        // shutdown. This is the final metadata write in the LEM pipeline — if
+        // it is torn, the session on disk ends up marked "complete" with
+        // nonsense duration / frame counts.
         let json = serde_json::to_string_pretty(&metadata)?;
-        fs::write(&path, json)
+        durable_write::write_atomic_async(&path, json.into_bytes())
             .await
             .map_err(|e| eyre!("Failed to write finalized session metadata: {}", e))?;
 
@@ -99,7 +104,7 @@ impl MetadataWriter {
 
         let path = self.session_manager.hardware_metadata_path();
         let json = serde_json::to_string_pretty(&metadata)?;
-        fs::write(&path, json)
+        durable_write::write_atomic_async(&path, json.into_bytes())
             .await
             .map_err(|e| eyre!("Failed to write hardware metadata: {}", e))?;
 
@@ -134,7 +139,7 @@ impl MetadataWriter {
 
         let path = self.session_manager.game_metadata_path();
         let json = serde_json::to_string_pretty(&metadata)?;
-        fs::write(&path, json)
+        durable_write::write_atomic_async(&path, json.into_bytes())
             .await
             .map_err(|e| eyre!("Failed to write game metadata: {}", e))?;
 
@@ -165,7 +170,7 @@ impl MetadataWriter {
 
         let path = self.session_manager.recorder_metadata_path();
         let json = serde_json::to_string_pretty(&metadata)?;
-        fs::write(&path, json)
+        durable_write::write_atomic_async(&path, json.into_bytes())
             .await
             .map_err(|e| eyre!("Failed to write recorder metadata: {}", e))?;
 
@@ -176,7 +181,7 @@ impl MetadataWriter {
     pub async fn write_video_metadata(&self, metadata: &VideoMetadata) -> Result<()> {
         let path = self.session_manager.video_metadata_path();
         let json = serde_json::to_string_pretty(metadata)?;
-        fs::write(&path, json)
+        durable_write::write_atomic_async(&path, json.into_bytes())
             .await
             .map_err(|e| eyre!("Failed to write video metadata: {}", e))?;
 
@@ -266,7 +271,10 @@ impl MetadataWriter {
         for entry in entries {
             content.push_str(&format!("{}  {}\n", entry.sha256, entry.file));
         }
-        fs::write(path, content).await?;
+        // Checksum files are the last thing written when finalizing a session;
+        // a torn checksum file silently disagrees with the data it's supposed
+        // to attest to and breaks upload-time validation.
+        durable_write::write_atomic_async(path, content.into_bytes()).await?;
         Ok(())
     }
 }

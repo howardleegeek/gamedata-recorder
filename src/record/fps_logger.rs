@@ -3,6 +3,8 @@ use std::path::Path;
 use color_eyre::Result;
 use serde::Serialize;
 
+use crate::util::durable_write;
+
 /// Per-second FPS statistics entry (buyer spec requirement).
 #[derive(Debug, Serialize)]
 pub struct FpsLogEntry {
@@ -162,9 +164,14 @@ impl FpsLogger {
             self.finalize_current_second();
         }
 
+        // Use durable_write so fps_log.json reaches disk atomically and with
+        // its data fsync'd. Without the fsync, a crash after `write` committed
+        // the directory entry but before the page cache flushed could leave
+        // a 0-byte fps_log.json under the final name — breaking downstream
+        // FPS-based quality checks that treat missing == zero frames.
         let fps_log_path = session_dir.join(constants::filename::recording::FPS_LOG);
         let fps_json = serde_json::to_string_pretty(&self.entries)?;
-        tokio::fs::write(&fps_log_path, fps_json).await?;
+        durable_write::write_atomic_async(&fps_log_path, fps_json.into_bytes()).await?;
         tracing::info!(
             "FPS log saved: {} entries to {:?}",
             self.entries.len(),
@@ -180,7 +187,10 @@ impl FpsLogger {
             jsonl.push('\n');
         }
         let frames_path = session_dir.join(constants::filename::recording::FRAMES_JSONL);
-        tokio::fs::write(&frames_path, jsonl).await?;
+        // Same rationale as fps_log above — frames.jsonl is the per-frame
+        // timestamp ground truth for video-input alignment; a truncated copy
+        // silently mis-aligns training data by frames-to-seconds.
+        durable_write::write_atomic_async(&frames_path, jsonl.into_bytes()).await?;
         tracing::info!(
             "Frames JSONL saved: {} frames to {:?}",
             self.frame_timestamps.len(),

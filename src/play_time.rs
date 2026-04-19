@@ -121,7 +121,13 @@ impl PlayTimeTracker {
 
     pub fn save(&self) -> Result<()> {
         let state = SerializedState::from(self);
-        std::fs::write(Self::file_path()?, serde_json::to_string_pretty(&state)?)?;
+        let json = serde_json::to_string_pretty(&state)?;
+        // Atomic write with fsync: play-time state is persisted frequently
+        // (every tick while recording) and also on Drop. A torn write here
+        // would silently reset the user's accumulated play time across an
+        // unclean shutdown. Using the atomic helper guarantees either the
+        // previous state or the new state survives, never a half-written one.
+        crate::util::durable_write::write_atomic(&Self::file_path()?, json.as_bytes())?;
         Ok(())
     }
 
