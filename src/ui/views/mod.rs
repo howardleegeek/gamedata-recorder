@@ -332,12 +332,34 @@ impl App {
     }
 
     pub fn render(&mut self, ctx: &egui::Context) {
-        // TEMPORARILY DISABLED: API key login screen
-        // Focus on local recording only for now
-        // TODO: Re-enable when backend integration is needed
-        self.main_view(ctx);
+        // R46 consent gate (GDPR/CCPA): the ConsentView MUST render first on
+        // every startup until the user has accepted the current version of
+        // the disclosure. Any other view (main, recording controls, tray
+        // menu interactions that drive recording) is gated behind it.
+        //
+        // We key on `Credentials::consent_given_at_version` against the
+        // running `CARGO_PKG_VERSION`. This invalidates stored consent any
+        // time the package version bumps, so updated disclosure text is
+        // always re-acknowledged. The stale `has_consented` boolean is kept
+        // in sync but is no longer authoritative on its own — the version
+        // match is.
+        //
+        // API-key / login routing remains disabled while we focus on local
+        // recording; re-enable by reinstating the commented match below once
+        // backend integration is required.
+        let needs_consent = {
+            let current = crate::config::current_pkg_version();
+            self.local_credentials.consent_status(&current)
+                != input_capture::ConsentStatus::Granted
+        };
+        if needs_consent {
+            self.consent_view(ctx);
+        } else {
+            self.main_view(ctx);
+        }
 
-        // Original logic (commented out):
+        // Original login/consent routing (kept for when backend integration
+        // is re-enabled):
         // let (has_api_key, has_consented) = (
         //     !self.local_credentials.api_key.is_empty(),
         //     self.local_credentials.has_consented,
@@ -361,10 +383,16 @@ impl App {
     fn go_to_consent(&mut self) {
         self.local_credentials.api_key = self.login_api_key.clone();
         self.local_credentials.has_consented = false;
+        self.local_credentials.consent_given_at_version = None;
         self.has_scrolled_to_bottom_of_consent = false;
     }
 
     fn go_to_main(&mut self) {
-        self.local_credentials.has_consented = true;
+        // R46: record acceptance at the current binary version. A future
+        // version bump will invalidate this and re-prompt. Both the boolean
+        // and the version are written so legacy read paths keep working,
+        // while the gate keys on the version match.
+        self.local_credentials
+            .record_consent(crate::config::current_pkg_version());
     }
 }

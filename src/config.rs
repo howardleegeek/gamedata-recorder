@@ -1,5 +1,7 @@
 use color_eyre::eyre::{Result, eyre};
 use constants::encoding::VideoEncoderType;
+use input_capture::{ConsentGuard, ConsentStatus};
+use semver::Version;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     collections::HashMap,
@@ -391,6 +393,18 @@ where
 pub struct Credentials {
     pub api_key: String,
     pub has_consented: bool,
+    /// R46 (GDPR/CCPA): the application version the user was shown when they
+    /// accepted the consent disclosure. `None` means the user has never
+    /// accepted any version. If this does not match the currently-running
+    /// `CARGO_PKG_VERSION`, the ConsentView is shown again so the user must
+    /// re-consent to any updated disclosure text.
+    ///
+    /// This field gates every code path that installs a global input hook or
+    /// opens a video/audio capture pipeline — see `Credentials::consent_status`
+    /// and `input_capture::ConsentGuard`. Serialized as a semver string (e.g.
+    /// `"2.5.5"`); `None` round-trips as `null` / missing.
+    #[serde(default)]
+    pub consent_given_at_version: Option<Version>,
 }
 
 /// Raw wire/disk shape for `Credentials`. Both fields are optional so we can
@@ -500,6 +514,7 @@ impl Credentials {
     pub fn logout(&mut self) {
         self.api_key = String::new();
         self.has_consented = false;
+        self.consent_given_at_version = None;
     }
 
     /// Validate the API key format.
@@ -521,6 +536,46 @@ impl Credentials {
         }
         Ok(())
     }
+
+    /// Compute the consent status for the currently-running binary.
+    ///
+    /// Returns `Granted` iff the stored `consent_given_at_version` parses as
+    /// semver and equals `current_version`. Returns `NotGranted` if no
+    /// version has ever been accepted, and `VersionMismatch` if a prior
+    /// version was accepted but this binary is newer/older.
+    pub fn consent_status(&self, current_version: &Version) -> ConsentStatus {
+        match &self.consent_given_at_version {
+            None => ConsentStatus::NotGranted,
+            Some(v) if v == current_version => ConsentStatus::Granted,
+            Some(_) => ConsentStatus::VersionMismatch,
+        }
+    }
+
+    /// Record that the user has accepted the consent disclosure at the given
+    /// version. The UI calls this when the user clicks "Accept".
+    pub fn record_consent(&mut self, current_version: Version) {
+        self.has_consented = true;
+        self.consent_given_at_version = Some(current_version);
+    }
+}
+
+/// Parse the compile-time `CARGO_PKG_VERSION` as semver.
+///
+/// Panics only if the Cargo.toml version literal is malformed — which would
+/// be caught at build time. Callers can treat this as infallible at runtime.
+pub fn current_pkg_version() -> Version {
+    // `env!` is compile-time; the value comes straight from Cargo.toml.
+    Version::parse(env!("CARGO_PKG_VERSION"))
+        .expect("CARGO_PKG_VERSION must be valid semver; this is a build-time contract")
+}
+
+/// Build a [`ConsentGuard`] from the current config and running binary version.
+///
+/// This is the single entry point for every recording path that needs to
+/// verify consent — input capture, OBS recorder, etc.
+pub fn consent_guard_from_config(config: &Config) -> ConsentGuard {
+    let current = current_pkg_version();
+    ConsentGuard::new(config.credentials.consent_status(&current))
 }
 
 // ---------------------------------------------------------------------------
@@ -1316,5 +1371,135 @@ mod tests {
             let dec = base64_decode(&enc).expect("decode");
             assert_eq!(dec.as_slice(), input, "round-trip for {input:?}");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R46 consent-gate tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod consent_tests {
+    //! R46 consent-gate tests.
+    //!
+    //! These cover the **config-layer** of the gate: a fresh config must
+    //! report `NotGranted` and any derived `ConsentGuard` must refuse to
+    //! let a recording entry point proceed. After the user accepts at the
+    //! current version, the same check must pass. A bumped version must
+    //! invalidate the old consent and re-prompt.
+    use super::*;
+
+    #[test]
+    fn fresh_config_has_no_consent() {
+        let cfg = Config::default();
+        assert!(
+            cfg.credentials.consent_given_at_version.is_none(),
+            "a fresh config must have no stored consent version"
+        );
+        assert!(
+            !cfg.credentials.has_consented,
+            "a fresh config must have has_consented == false"
+        );
+    }
+
+    #[test]
+    fn fresh_config_recording_entry_point_errs() {
+        let cfg = Config::default();
+        let current = Version::parse("2.5.5").unwrap();
+        let status = cfg.credentials.consent_status(&current);
+        assert_eq!(status, ConsentStatus::NotGranted);
+
+        let guard = ConsentGuard::new(status);
+        // The recording entry point (input capture / OBS start) calls
+        // `require_granted` — it MUST return Err here.
+        let res = guard.require_granted();
+        assert!(
+            res.is_err(),
+            "recording entry point must error before consent is recorded"
+        );
+    }
+
+    #[test]
+    fn recorded_consent_at_current_version_passes() {
+        let mut cfg = Config::default();
+        let current = Version::parse("2.5.5").unwrap();
+        cfg.credentials.record_consent(current.clone());
+
+        assert_eq!(
+            cfg.credentials.consent_status(&current),
+            ConsentStatus::Granted
+        );
+        let guard = ConsentGuard::new(cfg.credentials.consent_status(&current));
+        assert!(
+            guard.require_granted().is_ok(),
+            "recording entry point must succeed once consent is recorded"
+        );
+        assert!(guard.is_granted());
+    }
+
+    #[test]
+    fn bumped_version_invalidates_prior_consent() {
+        let mut cfg = Config::default();
+        cfg.credentials
+            .record_consent(Version::parse("2.5.4").unwrap());
+
+        // Now the binary bumps to 2.5.5 — the stored consent is stale.
+        let current = Version::parse("2.5.5").unwrap();
+        assert_eq!(
+            cfg.credentials.consent_status(&current),
+            ConsentStatus::VersionMismatch
+        );
+        let guard = ConsentGuard::new(cfg.credentials.consent_status(&current));
+        assert!(
+            guard.require_granted().is_err(),
+            "bumped binary version must force re-consent"
+        );
+    }
+
+    #[test]
+    fn logout_clears_consent_version() {
+        let mut cfg = Config::default();
+        cfg.credentials
+            .record_consent(Version::parse("2.5.5").unwrap());
+        assert!(cfg.credentials.consent_given_at_version.is_some());
+
+        cfg.credentials.logout();
+        assert!(
+            cfg.credentials.consent_given_at_version.is_none(),
+            "logout must clear consent so the next user re-consents"
+        );
+        assert!(!cfg.credentials.has_consented);
+    }
+
+    #[test]
+    fn serde_round_trip_preserves_consent_version() {
+        let mut cfg = Config::default();
+        cfg.credentials
+            .record_consent(Version::parse("2.5.5").unwrap());
+
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let parsed: Config = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            parsed.credentials.consent_given_at_version,
+            Some(Version::parse("2.5.5").unwrap())
+        );
+    }
+
+    #[test]
+    fn current_pkg_version_parses() {
+        // Asserts the build-time contract: Cargo.toml version parses as semver.
+        // If this ever panics, the workspace version literal is broken.
+        let _ = current_pkg_version();
+    }
+
+    #[test]
+    fn consent_guard_from_config_respects_stored_version() {
+        let mut cfg = Config::default();
+        // Without consent: guard refuses.
+        assert!(!consent_guard_from_config(&cfg).is_granted());
+
+        // With consent at the current binary version: guard permits.
+        cfg.credentials.record_consent(current_pkg_version());
+        assert!(consent_guard_from_config(&cfg).is_granted());
     }
 }

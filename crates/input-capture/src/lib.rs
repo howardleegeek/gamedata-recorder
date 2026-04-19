@@ -7,6 +7,7 @@ use color_eyre::Result;
 use tokio::sync::mpsc;
 
 mod kbm_capture;
+pub use kbm_capture::{ConsentGuard, ConsentStatus};
 use kbm_capture::KbmCapture;
 
 mod gamepad_capture;
@@ -78,8 +79,20 @@ pub struct InputCapture {
     gamepads: Arc<RwLock<HashMap<GamepadId, GamepadMetadata>>>,
 }
 impl InputCapture {
-    pub fn new() -> Result<(Self, mpsc::Receiver<Event>)> {
+    /// Initialize input capture.
+    ///
+    /// R46 consent contract: `consent` MUST report `ConsentStatus::Granted` before
+    /// any Raw Input device is registered. If consent is not yet granted, this
+    /// function returns an error and no hooks are installed. Callers must not
+    /// construct `InputCapture` until the ConsentView has successfully recorded
+    /// user acceptance for the current version.
+    pub fn new(consent: &ConsentGuard) -> Result<(Self, mpsc::Receiver<Event>)> {
         tracing::debug!("InputCapture::new() called");
+        // R46: gate the keyboard/mouse capture pipeline on consent. We fail
+        // fast here before any Win32 Raw Input device registration or gamepad
+        // polling thread is spawned. See `kbm_capture::ConsentGuard` for the
+        // full consent contract.
+        consent.require_granted()?;
         // v2.5.5: raised from 10 → 10_000. Mouse input can spike to ~1kHz, and
         // any downstream stall (the tokio loop blocked on OBS stop_recording,
         // a slow API call, a lock-contention blip) caused `blocking_send` on
@@ -97,8 +110,9 @@ impl InputCapture {
         let _raw_input_thread = std::thread::spawn({
             let input_tx = input_tx.clone();
             let active_keys = active_keys.clone();
+            let consent = consent.clone();
             move || {
-                KbmCapture::initialize(active_keys)
+                KbmCapture::initialize(active_keys, &consent)
                     .expect("failed to initialize raw input")
                     .run_queue(move |event| {
                         if input_tx.blocking_send(event).is_err() {

@@ -114,8 +114,27 @@ async fn main(
     // the relevant methods, but this caused the Windows event loop to hang.
     //
     // Absolutely no idea why, but I'm willing to accept this as-is for now.
+    //
+    // R46 consent gate: block here until the UI has recorded user acceptance
+    // of the current-version disclosure. `InputCapture::new` registers global
+    // Windows Raw Input hooks — we cannot install those hooks before consent.
+    // The UI runs on a separate thread so the ConsentView can render and the
+    // user can click Accept while this loop polls. `ctrlc_rx`/`stopped_rx` are
+    // checked so shutting down pre-consent still exits cleanly.
+    tracing::debug!("Waiting for user consent before installing input hooks");
+    let consent_guard = wait_for_consent(&app_state, &mut stopped_rx).await;
+    let consent_guard = match consent_guard {
+        Some(g) => g,
+        None => {
+            tracing::info!(
+                "App shut down before consent was granted; skipping input capture init"
+            );
+            return Ok(());
+        }
+    };
+
     tracing::debug!("Initializing input capture");
-    let (input_capture, mut input_rx) = InputCapture::new()?;
+    let (input_capture, mut input_rx) = InputCapture::new(&consent_guard)?;
     tracing::debug!("Input capture initialized");
 
     let mut ctrlc_rx = wait_for_ctrl_c();
@@ -1912,4 +1931,37 @@ fn generate_session_dir_name() -> String {
         now.minute(),
         now.second()
     )
+}
+
+/// R46 consent gate: poll `app_state.config` until consent is granted for the
+/// currently-running binary version, or the app is shutting down. Returns
+/// `Some(ConsentGuard)` when the user has accepted, or `None` if we observed
+/// a shutdown signal before consent was recorded.
+///
+/// Poll-based because the ConsentView writes `has_consented` +
+/// `consent_given_at_version` through the normal `copy_out_local_config`
+/// pathway — there is no direct channel for "consent was granted". A 100ms
+/// poll is fine: it's a one-shot startup wait, not a hot path.
+async fn wait_for_consent(
+    app_state: &Arc<AppState>,
+    stopped_rx: &mut tokio::sync::broadcast::Receiver<()>,
+) -> Option<input_capture::ConsentGuard> {
+    loop {
+        let guard = {
+            let config = app_state.config.read().unwrap();
+            crate::config::consent_guard_from_config(&config)
+        };
+        if guard.is_granted() {
+            return Some(guard);
+        }
+
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                // re-check
+            }
+            _ = stopped_rx.recv() => {
+                return None;
+            }
+        }
+    }
 }

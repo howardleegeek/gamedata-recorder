@@ -1,3 +1,30 @@
+//! Keyboard/mouse Raw Input capture.
+//!
+//! # Consent contract (R46, GDPR/CCPA)
+//!
+//! This module registers **global, system-wide** Windows Raw Input devices for
+//! keyboard and mouse. Once registered with `RIDEV_INPUTSINK`, Windows delivers
+//! every keystroke and mouse event on the user's machine to this process — it
+//! does **not** restrict capture to a specific window, game, or foreground
+//! application. Treating this as "during gameplay" would be legally false.
+//!
+//! Because of that reach, no `RegisterRawInputDevices` call may happen until
+//! the user has explicitly accepted the current consent version via the
+//! `ConsentView` UI. The gate is enforced by [`ConsentGuard`]:
+//!
+//! * [`KbmCapture::initialize`] takes a `&ConsentGuard` and calls
+//!   [`ConsentGuard::require_granted`] **before** any Win32 registration.
+//! * If consent is not granted ([`ConsentStatus::NotGranted`] or
+//!   [`ConsentStatus::VersionMismatch`]), `initialize` returns `Err` and the
+//!   function short-circuits before window/class creation.
+//! * A bumped `CARGO_PKG_VERSION` invalidates any previously-granted consent,
+//!   re-prompting the user — see `Config::consent_given_at_version` in the
+//!   host crate.
+//!
+//! Callers (e.g. [`super::InputCapture::new`]) MUST NOT construct a
+//! `KbmCapture` without a granted guard. The test suite in `src/config.rs`
+//! asserts the recording entry point errors until consent is set.
+
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex, MutexGuard},
@@ -5,7 +32,7 @@ use std::{
 
 use color_eyre::{
     Result,
-    eyre::{Context, bail},
+    eyre::{Context, bail, eyre},
 };
 
 use windows::{
@@ -36,6 +63,83 @@ use windows::{
 };
 
 use crate::{Event, PressState};
+
+/// Result of checking whether the user has consented to the current version.
+///
+/// Returned by the host crate when it computes whether stored consent still
+/// matches the running binary's `CARGO_PKG_VERSION`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsentStatus {
+    /// User has accepted the disclosure for the currently-running version.
+    Granted,
+    /// User has never accepted any version of the disclosure.
+    NotGranted,
+    /// User accepted a prior version; the disclosure has since changed and
+    /// re-consent is required.
+    VersionMismatch,
+}
+
+/// Thread-safe consent gate passed into any recording entry point.
+///
+/// Clone-able and cheap to copy. Holds a single `ConsentStatus`; the host
+/// crate constructs one after reading `Config::consent_given_at_version` and
+/// passes it down into [`super::InputCapture::new`] and the OBS recorder's
+/// `start_recording` path.
+#[derive(Debug, Clone)]
+pub struct ConsentGuard {
+    status: ConsentStatus,
+}
+
+impl ConsentGuard {
+    /// Construct a guard from a computed status. The host crate is responsible
+    /// for computing the status from its config (see `Config::consent_status`
+    /// in the host crate).
+    pub fn new(status: ConsentStatus) -> Self {
+        Self { status }
+    }
+
+    /// Convenience constructor for callers that only need to say "consent is
+    /// granted" (e.g. tests after setting the consent field).
+    pub fn granted() -> Self {
+        Self::new(ConsentStatus::Granted)
+    }
+
+    /// Convenience constructor for the default "no consent" case.
+    pub fn not_granted() -> Self {
+        Self::new(ConsentStatus::NotGranted)
+    }
+
+    /// The underlying status.
+    pub fn status(&self) -> ConsentStatus {
+        self.status
+    }
+
+    /// Returns `true` if the user has consented to the current version.
+    pub fn is_granted(&self) -> bool {
+        matches!(self.status, ConsentStatus::Granted)
+    }
+
+    /// Enforce the gate: returns `Err` if consent is not granted.
+    ///
+    /// Callers entering any code path that registers a global input hook,
+    /// opens a video/audio capture pipeline, or reads the primary monitor
+    /// MUST call this first and propagate the error.
+    pub fn require_granted(&self) -> Result<()> {
+        match self.status {
+            ConsentStatus::Granted => Ok(()),
+            ConsentStatus::NotGranted => Err(eyre!(
+                "input capture blocked: user has not accepted the consent \
+                 disclosure. The recording entry point must not be reached \
+                 before ConsentView records acceptance."
+            )),
+            ConsentStatus::VersionMismatch => Err(eyre!(
+                "input capture blocked: consent was granted for a prior \
+                 version. The user must re-accept the updated disclosure \
+                 before recording can resume."
+            )),
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct ActiveKeys {
@@ -71,7 +175,21 @@ impl Drop for KbmCapture {
     }
 }
 impl KbmCapture {
-    pub fn initialize(active_keys: Arc<Mutex<ActiveKeys>>) -> Result<Self> {
+    /// Initialize global keyboard/mouse capture.
+    ///
+    /// R46 consent gate: the `consent` argument is checked **before** any
+    /// Win32 window class is registered, before any window is created, and
+    /// before `RegisterRawInputDevices` is called. If consent is not granted
+    /// this function returns `Err` immediately without installing any hook.
+    /// See the module-level doc comment for the full contract.
+    pub fn initialize(
+        active_keys: Arc<Mutex<ActiveKeys>>,
+        consent: &ConsentGuard,
+    ) -> Result<Self> {
+        // R46: no hook installation without consent. This MUST run before any
+        // Win32 call that registers a system-wide input sink.
+        consent.require_granted()?;
+
         unsafe {
             let class_name = PCSTR(c"RawInputWindowClass".to_bytes_with_nul().as_ptr());
             let h_instance: HINSTANCE = GetModuleHandleA(None)?.into();

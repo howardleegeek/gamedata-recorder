@@ -13,6 +13,7 @@ use color_eyre::{
     eyre::{self, Context, OptionExt as _, bail, eyre},
 };
 use constants::{FPS, RECORDING_HEIGHT, RECORDING_WIDTH, encoding::VideoEncoderType};
+use input_capture::ConsentGuard;
 use windows::Win32::{
     Foundation::HWND,
     Graphics::Gdi::{HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorFromWindow},
@@ -135,7 +136,13 @@ impl VideoRecorder for ObsEmbeddedRecorder {
         game_config: GameConfig,
         (base_width, base_height): (u32, u32),
         event_stream: InputEventStream,
+        consent: ConsentGuard,
     ) -> Result<()> {
+        // R46: final consent gate before we hand control to the OBS thread
+        // and start writing video/audio bytes to disk. This mirrors the
+        // gate in `KbmCapture::initialize` for the keyboard/mouse side.
+        consent.require_granted()?;
+
         let recording_path = dummy_video_path
             .to_str()
             .ok_or_eyre("Recording path must be valid UTF-8")?

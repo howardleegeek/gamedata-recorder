@@ -6,7 +6,7 @@ use std::{
 use color_eyre::{Result, eyre::ContextCompat};
 use egui_wgpu::wgpu;
 use game_process::{Pid, windows::Win32::Foundation::HWND};
-use input_capture::InputCapture;
+use input_capture::{ConsentGuard, InputCapture};
 
 use crate::{
     config::{EncoderSettings, GameConfig},
@@ -53,7 +53,13 @@ impl Recording {
         video_recorder: &mut dyn VideoRecorder,
         params: RecordingParams,
         input_capture: &InputCapture,
+        consent: ConsentGuard,
     ) -> Result<Self> {
+        // R46: final gate before any OBS source is initialized or any byte
+        // is written to disk. The caller already checked, but we re-check
+        // here so this entry point is self-contained.
+        consent.require_granted()?;
+
         let RecordingParams {
             recording_location,
             game_exe,
@@ -84,6 +90,7 @@ impl Recording {
                 game_config,
                 game_resolution,
                 input_stream.clone(),
+                consent,
             )
             .await?;
 

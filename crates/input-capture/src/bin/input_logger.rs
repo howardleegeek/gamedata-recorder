@@ -11,7 +11,9 @@
 
 use std::io::Write;
 
-use input_capture::{Event, PressState, timestamp::HighPrecisionTimer, vkey_names::vkey_to_name};
+use input_capture::{
+    ConsentGuard, Event, PressState, timestamp::HighPrecisionTimer, vkey_names::vkey_to_name,
+};
 
 #[derive(Debug)]
 struct Args {
@@ -179,7 +181,10 @@ fn main() {
 
     let timer = HighPrecisionTimer::new();
 
-    let (_capture, mut rx) = match input_capture::InputCapture::new() {
+    // Standalone CLI: developer is running this directly for debugging.
+    // Real product paths MUST compute consent from user-accepted config;
+    // see `src/config.rs` in the host crate.
+    let (_capture, mut rx) = match input_capture::InputCapture::new(&ConsentGuard::granted()) {
         Ok(capture_rx) => capture_rx,
         Err(e) => {
             tracing::error!("Failed to initialize input capture: {}", e);

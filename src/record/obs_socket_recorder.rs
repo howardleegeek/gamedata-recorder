@@ -5,6 +5,7 @@ use color_eyre::{
     eyre::{Context, OptionExt as _},
 };
 use constants::{FPS, RECORDING_HEIGHT, RECORDING_WIDTH, encoding::VideoEncoderType};
+use input_capture::ConsentGuard;
 use obws::{
     Client,
     requests::{
@@ -65,7 +66,12 @@ impl VideoRecorder for ObsSocketRecorder {
         (base_width, base_height): (u32, u32),
         // TODO: hook / start events
         _event_stream: InputEventStream,
+        consent: ConsentGuard,
     ) -> Result<()> {
+        // R46: consent gate before opening the OBS websocket and starting
+        // remote capture. Same contract as the embedded recorder.
+        consent.require_granted()?;
+
         // Connect to OBS
         let client = Client::connect("localhost", 4455, None::<&str>)
             .await

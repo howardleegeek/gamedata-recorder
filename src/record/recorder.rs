@@ -9,12 +9,12 @@ use color_eyre::{
     eyre::{Context as _, OptionExt as _, bail},
 };
 use egui_wgpu::wgpu::DeviceType;
-use input_capture::InputCapture;
+use input_capture::{ConsentGuard, InputCapture};
 use windows::Win32::Foundation::HWND;
 
 use crate::{
     app_state::{AppState, RecordingStatus},
-    config::{EncoderSettings, GameConfig, RecordingBackend},
+    config::{EncoderSettings, GameConfig, RecordingBackend, consent_guard_from_config},
     output_types::InputEventType,
     record::{
         LocalRecording,
@@ -33,6 +33,12 @@ pub trait VideoRecorder {
     fn id(&self) -> &'static str;
     fn available_encoders(&self) -> &[VideoEncoderType];
 
+    /// Start recording.
+    ///
+    /// R46: `consent` MUST be `ConsentStatus::Granted`. Implementations MUST
+    /// call `consent.require_granted()?` before initializing any OBS source,
+    /// opening any capture pipeline, or writing any bytes to disk. This is
+    /// the final gate before video/audio capture begins.
     #[allow(clippy::too_many_arguments)]
     async fn start_recording(
         &mut self,
@@ -44,6 +50,7 @@ pub trait VideoRecorder {
         game_config: GameConfig,
         game_resolution: (u32, u32),
         event_stream: InputEventStream,
+        consent: ConsentGuard,
     ) -> Result<()>;
     /// Result contains any additional metadata the recorder wants to return about the recording
     /// If this returns an error, the recording will be invalidated with the error message
@@ -133,6 +140,15 @@ impl Recorder {
             return Ok(());
         }
 
+        // R46 (GDPR/CCPA): refuse to start a recording session if the user
+        // has not accepted the current consent disclosure. Check this BEFORE
+        // we create any directory, query free space, probe the foreground
+        // window, or instantiate any capture object — consent is the gate.
+        {
+            let config = self.app_state.config.read().unwrap();
+            consent_guard_from_config(&config).require_granted()?;
+        }
+
         let recording_location = (self.recording_dir)();
 
         let local_recording = LocalRecording::create_at(&recording_location)
@@ -195,9 +211,9 @@ impl Recorder {
             "Starting recording"
         );
 
-        let params = {
+        let (params, consent) = {
             let config = self.app_state.config.read().unwrap();
-            RecordingParams {
+            let params = RecordingParams {
                 recording_location: recording_location.clone(),
                 game_exe: game_exe.clone(),
                 pid,
@@ -209,10 +225,20 @@ impl Recorder {
                     .get(&game_exe_without_extension)
                     .cloned()
                     .unwrap_or_default(),
-            }
+            };
+            // Compute the guard again under the same lock snapshot so we
+            // don't race with the user revoking consent between the top-of-
+            // function gate and the recorder start.
+            (params, consent_guard_from_config(&config))
         };
 
-        let recording = Recording::start(self.video_recorder.as_mut(), params, input_capture).await;
+        let recording = Recording::start(
+            self.video_recorder.as_mut(),
+            params,
+            input_capture,
+            consent,
+        )
+        .await;
 
         let recording = match recording {
             Ok(recording) => recording,
