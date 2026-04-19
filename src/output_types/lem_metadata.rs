@@ -45,7 +45,17 @@ impl SessionMetadata {
     }
 }
 
-/// Hardware metadata
+/// Hardware metadata.
+///
+/// Wire-format preservation: `cpu`, `gpu`, `ram_gb`, `os`, `recording_drive`,
+/// `average_fps`, `dropped_frames` are load-bearing field names that the
+/// backend and analysts key on. Do NOT rename. Added fields are all optional
+/// so missing values in historical recordings deserialize cleanly.
+///
+/// `recording_drive` retains its `String` type (not an enum) so legacy
+/// recordings with freeform values like `"NVMe SSD"` / `"SATA SSD"` /
+/// `"Unknown"` parse unchanged. New recordings write the exact same legacy
+/// strings via `DiskType::as_str()`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HardwareMetadata {
     pub cpu: String,
@@ -55,14 +65,51 @@ pub struct HardwareMetadata {
     pub recording_drive: String,
     pub average_fps: f64,
     pub dropped_frames: u32,
+
+    // --- Added 2026-04: real detection fields to replace upstream stubs. ---
+    // All optional + skip-when-None so historical recordings without these
+    // fields (and the non-Windows CI build) deserialize and serialize
+    // cleanly with no wire-format change for legacy consumers.
+    /// Physical CPU cores (not threads). From `sysinfo::System::physical_core_count`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cpu_physical_cores: Option<u32>,
+    /// Logical CPU cores (threads). From `sysinfo::System::cpus().len()`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cpu_logical_cores: Option<u32>,
+    /// Base CPU frequency in MHz, as reported by the OS at recording start.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cpu_frequency_mhz: Option<u64>,
+    /// Available (not just total) RAM at recording start, in GB.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ram_available_gb: Option<f64>,
+    /// GPU vendor ("NVIDIA" / "AMD" / "Intel" / "Unknown"), from DXGI.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub gpu_vendor: Option<String>,
+    /// GPU VRAM in MB, from DXGI adapter info.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub gpu_vram_mb: Option<u64>,
+    /// Total frames emitted by OBS (matches `number of skipped frames … X/TOTAL`).
+    /// Present when OBS's skipped-frames log line was successfully parsed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub total_frames: Option<u64>,
 }
 
-/// Graphics settings
+/// Graphics settings.
+///
+/// Schema note (2026-04): `fov` changed from hardcoded `u32` (always `90`)
+/// to `Option<f32>`. Per-game FOV detection requires process-memory
+/// inspection we don't have; the previous `"Unknown"` / `90` defaults were
+/// being ignored by downstream analysts anyway. Emitting `None` (skipped
+/// during serialization) is more honest than a fabricated number.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GraphicsSettings {
     pub resolution: [u32; 2],
     pub quality: String,
-    pub fov: u32,
+    /// Field-of-view in degrees, if we can detect it. `None` when the
+    /// recorder has no way to read the game's FOV setting — serialization
+    /// skips the field entirely so legacy consumers don't see a phony value.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fov: Option<f32>,
     pub motion_blur: bool,
     pub ray_tracing: bool,
 }
@@ -208,5 +255,114 @@ mod tests {
         assert_eq!(meta.frame_duration_ns, 16_666_667);
         meta.finalize(216_000, 5_400_000_000, 1_564_294_558_000_000_000);
         assert_eq!(meta.total_frames, 216_000);
+    }
+
+    /// Regression: the legacy hardware.json shape (no cpu_physical_cores,
+    /// no cpu_logical_cores, no gpu_vendor, etc.) must still deserialize
+    /// cleanly. We have lots of recordings in the wild shipped by v2.5.x
+    /// that only emit the seven original fields; losing them would break
+    /// the backend ingestion pipeline.
+    #[test]
+    fn hardware_metadata_deserializes_legacy_wire_shape() {
+        let legacy = r#"{
+            "cpu": "Intel Core i7-13700K",
+            "gpu": "NVIDIA GeForce RTX 4090",
+            "ram_gb": 32,
+            "os": "Windows 11 Pro",
+            "recording_drive": "NVMe SSD",
+            "average_fps": 59.8,
+            "dropped_frames": 12
+        }"#;
+        let hw: HardwareMetadata = serde_json::from_str(legacy).unwrap();
+        assert_eq!(hw.cpu, "Intel Core i7-13700K");
+        assert_eq!(hw.recording_drive, "NVMe SSD");
+        assert_eq!(hw.cpu_physical_cores, None);
+        assert_eq!(hw.ram_available_gb, None);
+        assert_eq!(hw.total_frames, None);
+    }
+
+    /// Regression: serializing with all optional fields set to None must
+    /// skip them, producing the legacy shape byte-for-byte. Catches accidental
+    /// removal of `#[serde(skip_serializing_if = "Option::is_none")]`.
+    #[test]
+    fn hardware_metadata_serializes_without_optional_fields_when_none() {
+        let hw = HardwareMetadata {
+            cpu: "AMD Ryzen 9 7950X".to_string(),
+            gpu: "NVIDIA GeForce RTX 4090".to_string(),
+            ram_gb: 64,
+            os: "Windows 11".to_string(),
+            recording_drive: "NVMe SSD".to_string(),
+            average_fps: 60.0,
+            dropped_frames: 0,
+            cpu_physical_cores: None,
+            cpu_logical_cores: None,
+            cpu_frequency_mhz: None,
+            ram_available_gb: None,
+            gpu_vendor: None,
+            gpu_vram_mb: None,
+            total_frames: None,
+        };
+        let json = serde_json::to_string(&hw).unwrap();
+        assert!(!json.contains("cpu_physical_cores"));
+        assert!(!json.contains("cpu_logical_cores"));
+        assert!(!json.contains("gpu_vendor"));
+        assert!(!json.contains("total_frames"));
+    }
+
+    /// Regression: when optional fields are populated, they serialize with
+    /// their snake_case field names as declared.
+    #[test]
+    fn hardware_metadata_serializes_new_fields_when_populated() {
+        let hw = HardwareMetadata {
+            cpu: "AMD Ryzen 9 7950X".to_string(),
+            gpu: "NVIDIA GeForce RTX 4090".to_string(),
+            ram_gb: 64,
+            os: "Windows 11".to_string(),
+            recording_drive: "NVMe SSD".to_string(),
+            average_fps: 59.67,
+            dropped_frames: 20,
+            cpu_physical_cores: Some(16),
+            cpu_logical_cores: Some(32),
+            cpu_frequency_mhz: Some(4500),
+            ram_available_gb: Some(42.3),
+            gpu_vendor: Some("NVIDIA".to_string()),
+            gpu_vram_mb: Some(24_576),
+            total_frames: Some(3600),
+        };
+        let json = serde_json::to_string(&hw).unwrap();
+        assert!(json.contains("\"cpu_physical_cores\":16"));
+        assert!(json.contains("\"cpu_logical_cores\":32"));
+        assert!(json.contains("\"total_frames\":3600"));
+    }
+
+    /// Regression: fov=None serializes with no `fov` field, per the schema
+    /// note above. Analysts were ignoring the old `"Unknown"`/`90` stubs —
+    /// skipping is the only way to signal "we don't know" in JSON.
+    #[test]
+    fn graphics_settings_fov_none_is_skipped() {
+        let gs = GraphicsSettings {
+            resolution: [1920, 1080],
+            quality: "high".to_string(),
+            fov: None,
+            motion_blur: false,
+            ray_tracing: false,
+        };
+        let json = serde_json::to_string(&gs).unwrap();
+        assert!(!json.contains("fov"), "fov should be absent when None, got: {json}");
+    }
+
+    /// When fov IS detected (future enhancement), it must serialize with
+    /// its f32 value.
+    #[test]
+    fn graphics_settings_fov_some_is_emitted() {
+        let gs = GraphicsSettings {
+            resolution: [1920, 1080],
+            quality: "high".to_string(),
+            fov: Some(103.5),
+            motion_blur: false,
+            ray_tracing: false,
+        };
+        let json = serde_json::to_string(&gs).unwrap();
+        assert!(json.contains("\"fov\":103.5"), "expected fov:103.5, got: {json}");
     }
 }
