@@ -13,7 +13,10 @@ use color_eyre::{
     eyre::{self, Context, OptionExt as _, bail, eyre},
 };
 use constants::{FPS, RECORDING_HEIGHT, RECORDING_WIDTH, encoding::VideoEncoderType};
-use windows::Win32::Foundation::HWND;
+use windows::Win32::{
+    Foundation::HWND,
+    Graphics::Gdi::{HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorFromWindow},
+};
 
 use libobs_simple::sources::{
     ObsObjectUpdater, ObsSourceBuilder,
@@ -761,6 +764,40 @@ fn video_info(adapter_index: usize, (base_width, base_height): (u32, u32)) -> Ob
         .build()
 }
 
+/// Choose the monitor index in `monitors` that the given game window is on.
+///
+/// Uses the Win32 `MonitorFromWindow` API to get the HMONITOR for `hwnd`,
+/// then matches it against the `raw_handle` of each DisplayInfo. Returns 0
+/// (primary monitor) when the HMONITOR can't be matched — callers must
+/// ensure `monitors` is non-empty.
+fn select_monitor_for_hwnd<M>(hwnd: HWND, monitors: &[M]) -> usize
+where
+    M: std::ops::Deref<Target = display_info::DisplayInfo>,
+{
+    // SAFETY: MonitorFromWindow is a pure Win32 query — it takes a HWND and
+    // returns an HMONITOR (or NULL). No mutation, no ownership. MONITOR_DEFAULTTONEAREST
+    // guarantees a non-null result even if the window is off-screen.
+    let target: HMONITOR = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if target.is_invalid() {
+        tracing::warn!("MonitorFromWindow returned invalid handle, falling back to primary monitor");
+        return 0;
+    }
+
+    for (idx, m) in monitors.iter().enumerate() {
+        // DisplayInfo::raw_handle on Windows is HMONITOR (a raw pointer).
+        // Compare as pointer values — same monitor means same HMONITOR.
+        if m.raw_handle.0 as isize == target.0 as isize {
+            return idx;
+        }
+    }
+
+    tracing::warn!(
+        "No DisplayInfo matched HMONITOR {:?} for window, falling back to primary monitor",
+        target.0
+    );
+    0
+}
+
 fn find_game_capture_window(game_exe: Option<&str>, hwnd: HWND) -> Result<WindowInfo> {
     let game_exe = game_exe.unwrap_or("unknown");
     let window = libobs_window_helper::get_window_info(hwnd).map_err(|e| {
@@ -839,9 +876,17 @@ fn prepare_source(
                     .add_to_scene(scene)
             }
         } else {
-            // Use the primary monitor (index 0)
-            let monitor = &monitors[0];
-            tracing::info!("Capturing monitor: {:?}", monitor);
+            // Pick the monitor the game window currently lives on — falls back
+            // to primary when MonitorFromWindow can't resolve or when there's
+            // no matching DisplayInfo entry for the HMONITOR.
+            let monitor_idx = select_monitor_for_hwnd(hwnd, &monitors);
+            let monitor = &monitors[monitor_idx];
+            tracing::info!(
+                "Capturing monitor {} of {}: {:?}",
+                monitor_idx,
+                monitors.len(),
+                monitor
+            );
 
             if let Some(mut source) = last_source.take() {
                 tracing::info!("Reusing existing monitor capture source");

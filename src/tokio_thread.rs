@@ -21,6 +21,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use chrono::{Datelike, Local, Timelike};
+
 use color_eyre::{Result, eyre::Context};
 
 use constants::{
@@ -72,15 +74,7 @@ async fn main(
                     .preferences
                     .recording_location
                     .clone();
-                base.join(
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_secs().to_string())
-                        .unwrap_or_else(|_| {
-                            tracing::warn!("System time before UNIX epoch, using 0");
-                            "0".to_string()
-                        }),
-                )
+                base.join(generate_session_dir_name())
             }
         }),
         app_state.clone(),
@@ -1846,4 +1840,17 @@ async fn check_for_updates(app_state: Arc<AppState>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn generate_session_dir_name() -> String {
+    let now = Local::now();
+    format!(
+        "session_{:04}{:02}{:02}_{:02}{:02}{:02}",
+        now.year(),
+        now.month(),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    )
 }
