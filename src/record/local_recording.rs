@@ -653,14 +653,25 @@ impl LocalRecording {
     }
 }
 
-/// Calculate the total size of all files in a folder
+/// Calculate the total size of all files in a folder (recursively).
+/// Excludes .tar files as they are temporary upload artifacts.
 fn folder_size(path: &Path) -> Result<u64, std::io::Error> {
     let mut size = 0;
-    for entry in path.read_dir()? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() && path.extension().unwrap_or_default() != "tar" {
-            size += path.metadata()?.len();
+    let mut dirs_to_visit = vec![path.to_path_buf()];
+    while let Some(dir) = dirs_to_visit.pop() {
+        let entries = match dir.read_dir() {
+            Ok(e) => e,
+            Err(_) => continue, // Skip unreadable directories
+        };
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                dirs_to_visit.push(entry_path);
+            } else if entry_path.is_file()
+                && entry_path.extension().unwrap_or_default() != "tar"
+            {
+                size += entry_path.metadata().map(|m| m.len()).unwrap_or(0);
+            }
         }
     }
     Ok(size)
