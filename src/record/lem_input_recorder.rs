@@ -291,11 +291,11 @@ fn vkey_to_string(vkey: u16) -> String {
         0x27 => "Right".to_string(),
         0x28 => "Down".to_string(),
         0x30..=0x39 => char::from_digit((vkey - 0x30) as u32, 10)
-            .unwrap()
-            .to_string(),
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| format!("VK_{:02X}", vkey)),
         0x41..=0x5A => char::from_u32(vkey as u32 - 0x41 + b'A' as u32)
-            .unwrap()
-            .to_string(),
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| format!("VK_{:02X}", vkey)),
         _ => format!("VK_{:02X}", vkey),
     }
 }
