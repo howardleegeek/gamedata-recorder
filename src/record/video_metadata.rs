@@ -51,7 +51,7 @@ impl VideoMetadataExtractor {
                 "v:0",
                 "-show_entries",
                 "frame=pkt_pts_time,pkt_pos,key_frame",
-                video_path.to_str().unwrap(),
+                &video_path.to_string_lossy(),
             ])
             .output()
             .await
