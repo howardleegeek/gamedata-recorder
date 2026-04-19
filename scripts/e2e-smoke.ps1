@@ -255,7 +255,9 @@ try {
         if ($gameProc) { break }
         # Detect a handful of known interactive launchers and abort rather
         # than hang. (Rockstar/PlayGTAV/Epic/EA.)
-        $launchers = @('PlayGTAV','Launcher','RockstarService','EpicGamesLauncher','EADesktop')
+        # Specific launcher EXE names only — DO NOT use generic 'Launcher' substring
+        # as Steam has its own launcher-named helpers that fire false positives.
+        $launchers = @('PlayGTAV','RockstarService','RockstarGamesLauncher','EpicGamesLauncher','EADesktop','UplayLauncher','GalaxyClient')
         foreach ($l in $launchers) {
             if (Get-Process -Name $l -ErrorAction SilentlyContinue) {
                 $launcherDetected = $true
