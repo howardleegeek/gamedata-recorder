@@ -134,9 +134,7 @@ async fn main(
         recording_state: RecordingState::Idle,
         recorder,
         input_capture,
-        sink: stream_handle
-            .as_ref()
-            .map(|h| Sink::connect_new(h.mixer())),
+        sink: stream_handle.as_ref().map(|h| Sink::connect_new(h.mixer())),
         app_state: app_state.clone(),
         cue_cache: HashMap::new(),
         last_active: Instant::now(),
