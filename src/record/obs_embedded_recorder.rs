@@ -18,8 +18,9 @@ use windows::Win32::Foundation::HWND;
 use libobs_simple::sources::{
     ObsObjectUpdater, ObsSourceBuilder,
     windows::{
-        GameCaptureSourceBuilder, GameCaptureSourceUpdater, ObsGameCaptureMode,
-        WindowCaptureSourceBuilder, WindowCaptureSourceUpdater, WindowInfo,
+        GameCaptureSourceBuilder, GameCaptureSourceUpdater, MonitorCaptureSourceBuilder,
+        MonitorCaptureSourceUpdater, ObsGameCaptureMode, WindowCaptureSourceBuilder,
+        WindowCaptureSourceUpdater, WindowInfo,
     },
 };
 use libobs_wrapper::{
@@ -52,6 +53,7 @@ use crate::{
 const OWL_SCENE_NAME: &str = "owl_data_collection_scene";
 const OWL_WINDOW_CAPTURE_NAME: &str = "owl_window_capture";
 const OWL_GAME_CAPTURE_NAME: &str = "owl_game_capture";
+const OWL_MONITOR_CAPTURE_NAME: &str = "owl_monitor_capture";
 
 pub struct ObsEmbeddedRecorder {
     _obs_thread: std::thread::JoinHandle<()>,
@@ -789,30 +791,58 @@ fn prepare_source(
     }
 
     let result = if state.use_window_capture {
-        tracing::info!("Using window capture mode (per-game setting)");
-        let window =
-            libobs_wrapper::unsafe_send::Sendable(find_game_capture_window(Some(game_exe), hwnd)?);
+        // Use monitor capture (full screen) — works with all games including
+        // fullscreen exclusive, anti-cheat, DRM. Same approach as competing products.
+        // This captures the entire display, guaranteeing visible game content.
+        tracing::info!("Using monitor capture mode (full screen capture)");
 
-        // capture full screen. if this is set to true there's black borders around the window capture.
-        let client_area = false;
+        let monitors = MonitorCaptureSourceBuilder::get_monitors()
+            .unwrap_or_default();
 
-        if let Some(mut source) = last_source.take() {
-            tracing::info!("Reusing existing window capture source");
-            source
-                .create_updater::<WindowCaptureSourceUpdater>()?
-                .set_window(&window)
-                .set_capture_audio(capture_audio)?
-                .set_client_area(client_area)
-                .update()?;
-            Ok(source)
+        if monitors.is_empty() {
+            // Fallback to window capture if monitor list unavailable
+            tracing::warn!("No monitors found for monitor capture, falling back to window capture");
+            let window = libobs_wrapper::unsafe_send::Sendable(
+                find_game_capture_window(Some(game_exe), hwnd)?,
+            );
+            let client_area = false;
+            if let Some(mut source) = last_source.take() {
+                source
+                    .create_updater::<WindowCaptureSourceUpdater>()?
+                    .set_window(&window)
+                    .set_capture_audio(capture_audio)?
+                    .set_client_area(client_area)
+                    .update()?;
+                Ok(source)
+            } else {
+                obs_context
+                    .source_builder::<WindowCaptureSourceBuilder, _>(OWL_WINDOW_CAPTURE_NAME)?
+                    .set_window(&window)
+                    .set_capture_audio(capture_audio)?
+                    .set_client_area(client_area)
+                    .add_to_scene(scene)
+            }
         } else {
-            tracing::info!("Creating new window capture source");
-            obs_context
-                .source_builder::<WindowCaptureSourceBuilder, _>(OWL_WINDOW_CAPTURE_NAME)?
-                .set_window(&window)
-                .set_capture_audio(capture_audio)?
-                .set_client_area(client_area)
-                .add_to_scene(scene)
+            // Use the primary monitor (index 0)
+            let monitor = &monitors[0];
+            tracing::info!("Capturing monitor: {:?}", monitor);
+
+            if let Some(mut source) = last_source.take() {
+                tracing::info!("Reusing existing monitor capture source");
+                source
+                    .create_updater::<MonitorCaptureSourceUpdater>()?
+                    .set_monitor(monitor)
+                    .update()?;
+                Ok(source)
+            } else {
+                tracing::info!("Creating new monitor capture source");
+                obs_context
+                    .source_builder::<MonitorCaptureSourceBuilder, _>(
+                        OWL_MONITOR_CAPTURE_NAME,
+                    )?
+                    .set_monitor(monitor)
+                    .add_to_scene(scene)
+            }
         }
     } else {
         let window = find_game_capture_window(Some(game_exe), hwnd)?;
