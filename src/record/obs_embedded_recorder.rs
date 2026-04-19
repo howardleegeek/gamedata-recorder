@@ -733,6 +733,22 @@ impl RecorderState {
 }
 
 fn video_info(adapter_index: usize, (base_width, base_height): (u32, u32)) -> ObsVideoInfo {
+    // Ensure valid dimensions — OBS returns "invalid parameter" if width or height is 0.
+    // This can happen when the game window hasn't fully initialized or when using
+    // process scan to detect games that don't have a visible window yet.
+    let base_width = if base_width == 0 {
+        tracing::warn!("Game base_width is 0, using recording width as fallback");
+        RECORDING_WIDTH
+    } else {
+        base_width
+    };
+    let base_height = if base_height == 0 {
+        tracing::warn!("Game base_height is 0, using recording height as fallback");
+        RECORDING_HEIGHT
+    } else {
+        base_height
+    };
+
     ObsVideoInfoBuilder::new()
         .adapter(adapter_index as u32)
         .fps_num(FPS)
