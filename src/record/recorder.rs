@@ -494,14 +494,121 @@ fn window_title(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..n as usize])
 }
 
+/// Shared state for the EnumWindows callback. We can't capture Rust closures
+/// from `unsafe extern "system" fn`, so we thread everything through a
+/// stack-allocated context pointer.
+struct EnumContext {
+    target_pid: u32,
+    found: HWND,
+    candidate_area: i64,
+}
+
+unsafe extern "system" fn enum_windows_proc(
+    hwnd: HWND,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::BOOL {
+    use windows::Win32::Foundation::{BOOL, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClientRect, GetWindowThreadProcessId, IsWindowVisible,
+    };
+    let ctx = unsafe { &mut *(lparam.0 as *mut EnumContext) };
+    let mut pid: u32 = 0;
+    let _ = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid != ctx.target_pid {
+        return BOOL(1); // continue enumeration
+    }
+    if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        return BOOL(1);
+    }
+    let mut rect = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut rect) }.is_err() {
+        return BOOL(1);
+    }
+    let area = (rect.right - rect.left) as i64 * (rect.bottom - rect.top) as i64;
+    // Keep the largest visible window belonging to this PID — that's almost
+    // always the game's render surface (menus/HUD windows are smaller).
+    if area > ctx.candidate_area {
+        ctx.candidate_area = area;
+        ctx.found = hwnd;
+    }
+    BOOL(1)
+}
+
+/// Our own process id — cached on first use. We must never capture windows
+/// belonging to the recorder itself or we end up recording our UI instead
+/// of the game (this happened on a client's machine running v2.5.3: the
+/// metadata reported `window_name: "GameData Recorder v2.5.3 | Recording"`
+/// and 4 minutes of our own UI frames instead of GTA V).
+fn self_pid() -> u32 {
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    unsafe { GetCurrentProcessId() }
+}
+
 /// Find the main window handle for a given process ID.
-/// Uses the foreground window but rejects it if the title looks like a
-/// launcher surface (Rockstar Games Launcher, Epic Games Launcher, etc.)
-/// so that the capture pipeline records the actual game, not its launcher.
-fn find_window_for_pid(_pid: game_process::Pid) -> HWND {
-    let Ok((hwnd, _)) = game_process::foreground_window() else {
+///
+/// v2.5.4 rewrite: actually enumerate windows belonging to the target PID
+/// instead of returning `foreground_window()` and ignoring the argument.
+/// Previously the function took a `pid` parameter but discarded it — if the
+/// recorder's own egui window happened to be foreground when recording
+/// started, we'd hook ourselves and record 4 minutes of UI pixels. Also
+/// hard-block our own process ID as a defense in depth.
+fn find_window_for_pid(pid: game_process::Pid) -> HWND {
+    use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
+
+    let target_pid = pid.0 as u32;
+    let own_pid = self_pid();
+
+    // 1. Enumerate all top-level visible windows belonging to the game's PID.
+    //    Pick the one with the largest client area — almost always the game's
+    //    main render surface. Skip the search entirely if the target somehow
+    //    equals our own PID (would cause self-capture).
+    if target_pid != own_pid {
+        let mut ctx = EnumContext {
+            target_pid,
+            found: HWND::default(),
+            candidate_area: 0,
+        };
+        let lparam = LPARAM(&mut ctx as *mut EnumContext as isize);
+        let _ = unsafe { EnumWindows(Some(enum_windows_proc), lparam) };
+        if ctx.found.0 != std::ptr::null_mut() && ctx.candidate_area > 0 {
+            tracing::info!(
+                pid = target_pid,
+                hwnd = ?ctx.found,
+                title = %window_title(ctx.found),
+                area = ctx.candidate_area,
+                "Found real game window by PID enumeration"
+            );
+            return ctx.found;
+        }
+        tracing::warn!(
+            pid = target_pid,
+            "PID enumeration found no visible windows — game may still be \
+             starting up or running in a way that hides its HWND from \
+             EnumWindows. Falling back to foreground-window check."
+        );
+    } else {
+        tracing::error!(
+            pid = target_pid,
+            own_pid,
+            "Target PID equals our own PID — refusing to capture self. \
+             This is a bug in the caller; returning NULL HWND."
+        );
+        return HWND::default();
+    }
+
+    // 2. Fallback: foreground window, but rejected if it's the recorder or a
+    //    launcher surface. Never return a window owned by our own process.
+    let Ok((hwnd, fg_pid)) = game_process::foreground_window() else {
         return HWND::default();
     };
+    if fg_pid.0 as u32 == own_pid {
+        tracing::warn!(
+            "Foreground window belongs to the recorder itself — returning \
+             NULL HWND so monitor capture is used instead of hooking our UI"
+        );
+        return HWND::default();
+    }
     let title_lower = window_title(hwnd).to_lowercase();
     if LAUNCHER_TITLE_SUBSTRINGS
         .iter()
@@ -511,6 +618,16 @@ fn find_window_for_pid(_pid: game_process::Pid) -> HWND {
             title = %title_lower,
             "Foreground window looks like a launcher — returning NULL HWND \
              so monitor capture is used instead of hooking the wrong window"
+        );
+        return HWND::default();
+    }
+    // Also reject any window whose title contains "gamedata recorder" — even
+    // if the PID check above missed something, this catches the class of
+    // self-capture bug we hit on the client.
+    if title_lower.contains("gamedata recorder") || title_lower.contains("owl control") {
+        tracing::warn!(
+            title = %title_lower,
+            "Foreground window title looks like our own UI — returning NULL"
         );
         return HWND::default();
     }
