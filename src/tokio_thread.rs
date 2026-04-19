@@ -59,15 +59,15 @@ async fn main(
 ) -> Result<()> {
     tracing::debug!("Tokio async main started");
     tracing::debug!("Initializing audio stream");
+    // Audio is optional — recording works without audio device.
+    // Headless servers, VMs, and remote desktops often lack audio output.
     let stream_handle = match rodio::OutputStreamBuilder::open_default_stream() {
-        Ok(handle) => handle,
+        Ok(handle) => Some(handle),
         Err(e) => {
-            tracing::error!(
-                "Failed to open default audio stream: {e}. Audio cues will be unavailable."
+            tracing::warn!(
+                "No audio device available: {e}. Recording will work but audio cues are disabled."
             );
-            return Err(color_eyre::eyre::eyre!(
-                "Failed to open audio stream: {e}. Check that an audio output device is connected."
-            ));
+            None
         }
     };
 
@@ -134,7 +134,9 @@ async fn main(
         recording_state: RecordingState::Idle,
         recorder,
         input_capture,
-        sink: Sink::connect_new(stream_handle.mixer()),
+        sink: stream_handle
+            .as_ref()
+            .map(|h| Sink::connect_new(h.mixer())),
         app_state: app_state.clone(),
         cue_cache: HashMap::new(),
         last_active: Instant::now(),
@@ -589,7 +591,9 @@ async fn main(
                         tokio::spawn(pick_recording_folder(app_state.clone(), current_location));
                     }
                     AsyncRequest::PlayCue { cue } => {
-                        play_cue(&state.sink, &app_state, &cue, &mut state.cue_cache, |s| s);
+                        if let Some(ref sink) = state.sink {
+                            play_cue(sink, &app_state, &cue, &mut state.cue_cache, |s| s);
+                        }
                     }
                     AsyncRequest::UploadCompleted { uploaded_count } => {
                         let prev_count = app_state
@@ -939,7 +943,7 @@ struct State {
     recording_state: RecordingState,
     recorder: Recorder,
     input_capture: InputCapture,
-    sink: Sink,
+    sink: Option<Sink>,
     app_state: Arc<AppState>,
     cue_cache: HashMap<String, Vec<u8>>,
     last_active: Instant,
@@ -1282,7 +1286,7 @@ impl State {
                     &mut self.recorder,
                     &self.input_capture,
                     &unsupported_games,
-                    Some((&self.sink, honk, &self.app_state)),
+                    self.sink.as_ref().map(|s| (s, honk, &self.app_state)),
                     &mut self.cue_cache,
                 )
                 .await?;
@@ -1310,7 +1314,7 @@ impl State {
                 stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
-                    Some((&self.sink, honk, &self.app_state)),
+                    self.sink.as_ref().map(|s| (s, honk, &self.app_state)),
                     &mut self.cue_cache,
                 )
                 .await?;
@@ -1335,7 +1339,7 @@ impl State {
                 stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
-                    Some((&self.sink, honk, &self.app_state)),
+                    self.sink.as_ref().map(|s| (s, honk, &self.app_state)),
                     &mut self.cue_cache,
                 )
                 .await?;
@@ -1368,15 +1372,17 @@ impl State {
                     .stop_recording
                     .clone();
                 if honk {
-                    play_cue(
-                        &self.sink,
-                        &self.app_state,
-                        &stop_recording_cue,
-                        &mut self.cue_cache,
-                        // TODO: find a better effect / sound for this. I wanted to use a reversed-start cue,
-                        // but that doesn't seem to be something that can be easily done with rodio
-                        |s| Box::new(s.low_pass(500).amplify(1.5)),
-                    );
+                    if let Some(ref sink) = self.sink {
+                        play_cue(
+                            sink,
+                            &self.app_state,
+                            &stop_recording_cue,
+                            &mut self.cue_cache,
+                            // TODO: find a better effect / sound for this. I wanted to use a reversed-start cue,
+                            // but that doesn't seem to be something that can be easily done with rodio
+                            |s| Box::new(s.low_pass(500).amplify(1.5)),
+                        );
+                    }
                 }
                 // Notify play time tracker (already paused, just confirming stop)
                 self.app_state
@@ -1397,7 +1403,7 @@ impl State {
                 stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
-                    Some((&self.sink, false, &self.app_state)),
+                    self.sink.as_ref().map(|s| (s, false, &self.app_state)),
                     &mut self.cue_cache,
                 )
                 .await?;
@@ -1405,7 +1411,7 @@ impl State {
                     &mut self.recorder,
                     &self.input_capture,
                     &unsupported_games,
-                    Some((&self.sink, false, &self.app_state)),
+                    self.sink.as_ref().map(|s| (s, false, &self.app_state)),
                     &mut self.cue_cache,
                 )
                 .await?;
