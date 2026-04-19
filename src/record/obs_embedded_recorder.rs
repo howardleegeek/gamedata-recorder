@@ -796,8 +796,7 @@ fn prepare_source(
         // This captures the entire display, guaranteeing visible game content.
         tracing::info!("Using monitor capture mode (full screen capture)");
 
-        let monitors = MonitorCaptureSourceBuilder::get_monitors()
-            .unwrap_or_default();
+        let monitors = MonitorCaptureSourceBuilder::get_monitors().unwrap_or_default();
 
         if monitors.is_empty() {
             // Fallback to window capture if monitor list unavailable
