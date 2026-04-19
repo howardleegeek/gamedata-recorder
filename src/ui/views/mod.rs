@@ -16,7 +16,7 @@ use crate::{
         AppState, AsyncRequest, GitHubRelease, HotkeyRebindTarget, ListeningForNewHotkey, UiUpdate,
         UiUpdateUnreliable,
     },
-    config::{Credentials, Preferences},
+    config::{Credentials, Preferences, validate_recording_location},
     system::keycode::virtual_keycode_to_name,
     ui::{tray_icon::TrayIconState, views},
 };
@@ -184,8 +184,21 @@ impl App {
                     .update_local_recordings(recordings);
             }
             UiUpdate::FolderPickerResult { old_path, new_path } => {
-                // Check if there are any recordings in the old location
-                if old_path.exists()
+                // Security: validate the picked folder before accepting it.
+                // Rejecting here means the path is never persisted to config
+                // and is never used as a cleanup target, so a malicious
+                // symlink into System32 cannot escalate into data loss.
+                if let Err(e) = validate_recording_location(&new_path) {
+                    tracing::warn!(
+                        error = ?e,
+                        rejected = %new_path.display(),
+                        "Rejected picked recording folder — unsafe path"
+                    );
+                    // Surface the failure to the user via the existing
+                    // login-error channel on the main view if available;
+                    // otherwise the log message is the user's only signal.
+                    self.main_view_state.recording_location_error = Some(format!("{e}"));
+                } else if old_path.exists()
                     && std::fs::read_dir(&old_path).is_ok_and(|dir| {
                         dir.filter_map(Result::ok)
                             .any(|e| e.file_type().is_ok_and(|t| t.is_dir()))

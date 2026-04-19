@@ -28,6 +28,24 @@ use std::sync::Arc;
 use crate::system::ensure_single_instance::ensure_single_instance;
 
 fn main() -> Result<()> {
+    // Security hardening: restrict DLL search to System32 BEFORE any other Win32 call.
+    // This prevents DLL-hijack / side-loading attacks where a malicious DLL dropped in
+    // the app's own directory (or CWD) would otherwise be preferred over the genuine
+    // system DLL. Must run first — once any Win32 API has been called, the loader's
+    // per-process search list may already be fixed.
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::LibraryLoader::{
+            LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+        };
+        // Best-effort: if this fails (extremely unlikely on supported Windows),
+        // there is nothing useful we can do before logging is up. Swallow the
+        // result so the app still launches; the fallback DLL search order is
+        // still safer than a crash-at-startup. The windows-rs 0.62 binding
+        // wants the typed `LOAD_LIBRARY_FLAGS` constant directly, not `.0`.
+        let _ = SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+
     // Set up logging, including to file with rotation (20MB max, 3 files)
     let log_dir = config::get_persistent_dir()?;
     let log_path = log_dir.join("gamedata-recorder-debug.log");

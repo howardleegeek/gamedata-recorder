@@ -1,7 +1,11 @@
 use color_eyre::eyre::{Result, eyre};
 use constants::encoding::VideoEncoderType;
 use serde::{Deserialize, Deserializer, Serialize};
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 /// PCI vendor ID for NVIDIA Corporation — used to identify NVIDIA GPUs in
 /// DXGI adapter enumeration. Stable across every NVIDIA GPU ever shipped.
@@ -202,6 +206,140 @@ fn default_recording_location() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("./data_dump/games"))
 }
 
+/// Return the directory that `recording_location` is allowed to live under.
+///
+/// Any recording folder outside this tree is rejected. We intentionally
+/// restrict to the current user's LocalAppData tree so that a malicious or
+/// confused user cannot point the app at `C:\Windows\System32`, a SYSTEM-owned
+/// directory, or another user's profile. The app's "safe cleanup" (remove
+/// uploaded recordings) trusts that nothing in this tree is load-bearing
+/// outside of our own recordings.
+fn allowed_recording_root() -> Result<PathBuf> {
+    dirs::data_local_dir().ok_or_else(|| eyre!("Could not resolve LocalAppData directory"))
+}
+
+/// Validate that the given path is a safe target for recordings.
+///
+/// Rejects:
+/// * paths that are a symlink / reparse point at the leaf (anti-symlink-attack
+///   — the attacker may have created the directory entry as a link into
+///   System32 between `mkdir` and our cleanup pass)
+/// * paths whose canonical form escapes `allowed_recording_root()`
+/// * paths containing `..` after canonicalization (defence-in-depth)
+///
+/// The check is deliberately applied every time we load or set the value,
+/// not just on write — a malicious installer could replace a legitimate
+/// recording directory with a symlink between two launches.
+pub fn validate_recording_location(path: &Path) -> Result<()> {
+    // Reject reparse points / symlinks at the leaf. `symlink_metadata` does
+    // NOT follow the link, so `file_type().is_symlink()` catches the case
+    // where the entry itself is a link — which is the only case that can
+    // redirect our writes somewhere unexpected.
+    //
+    // If the path does not yet exist that's fine (we create it on first use);
+    // symlink_metadata returns NotFound, which is unambiguously safe.
+    match path.symlink_metadata() {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(eyre!(
+                    "Recording location {} is a symlink / reparse point, which is not allowed \
+                     for safety reasons. Please choose a regular directory.",
+                    path.display()
+                ));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Not yet created — acceptable. The parent will be validated by
+            // canonicalization below via the closest existing ancestor.
+        }
+        Err(e) => {
+            return Err(eyre!(
+                "Could not inspect recording location {}: {}",
+                path.display(),
+                e
+            ));
+        }
+    }
+
+    // Reject `..` in the raw components — defence-in-depth against path
+    // traversal in sloppy callers.
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(eyre!(
+            "Recording location {} contains '..' which is not allowed",
+            path.display()
+        ));
+    }
+
+    // Canonicalize via the closest existing ancestor (the leaf may not exist
+    // yet). `dunce::canonicalize` strips the Windows verbatim prefix so the
+    // comparison with `allowed_recording_root()` works.
+    let canonical_under_check = canonicalize_existing_prefix(path)?;
+    let canonical_root = canonicalize_existing_prefix(&allowed_recording_root()?)?;
+
+    if !canonical_under_check.starts_with(&canonical_root) {
+        return Err(eyre!(
+            "Recording location {} must be inside {} for safety reasons. \
+             Please choose a folder under your LocalAppData directory.",
+            canonical_under_check.display(),
+            canonical_root.display()
+        ));
+    }
+
+    // Final belt-and-braces check: canonical form must not contain ParentDir
+    // either (it shouldn't after canonicalization, but paranoid callers win
+    // audits).
+    if canonical_under_check
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(eyre!(
+            "Canonical form of {} still contains '..'",
+            canonical_under_check.display()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Canonicalize `path` if it exists, otherwise canonicalize the closest
+/// existing ancestor and re-append the non-existent tail. This lets us
+/// validate a directory we're about to create without first creating it.
+fn canonicalize_existing_prefix(path: &Path) -> Result<PathBuf> {
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut cur: &Path = path;
+    loop {
+        match dunce::canonicalize(cur) {
+            Ok(mut resolved) => {
+                for segment in tail.iter().rev() {
+                    resolved.push(segment);
+                }
+                return Ok(resolved);
+            }
+            Err(_) => {
+                let Some(parent) = cur.parent() else {
+                    return Err(eyre!(
+                        "Could not canonicalize any ancestor of {}",
+                        path.display()
+                    ));
+                };
+                if let Some(name) = cur.file_name() {
+                    tail.push(name);
+                }
+                cur = parent;
+                if cur.as_os_str().is_empty() {
+                    return Err(eyre!(
+                        "Could not canonicalize any ancestor of {}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    }
+}
+
 // For some reason, previous electron configs saved hasConsented as a string instead of a boolean? So now we need a custom deserializer
 // to take that into account for backwards compatibility
 fn deserialize_string_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -220,14 +358,144 @@ where
     }
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+/// Same as `deserialize_string_bool` but wraps in `Option` so a missing field
+/// in a legacy config round-trips to `None` rather than a default-false that
+/// would overwrite the existing value on save.
+fn deserialize_optional_string_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match v {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Bool(b)) => Ok(Some(b)),
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            _ => Err(Error::custom(format!("Invalid boolean string: {s}"))),
+        },
+        _ => Err(Error::custom("Expected boolean or string")),
+    }
+}
+
+/// Credentials.
+///
+/// In-memory and on-wire format: `api_key` is plaintext (the backend requires
+/// plaintext over HTTPS). On-disk format: the plaintext is never written —
+/// instead we serialize a DPAPI-encrypted blob (`api_key_encrypted`) using the
+/// current-user entropy scope, so exfiltrating `config.json` from disk doesn't
+/// leak the key. Legacy configs that contain `api_key` as plaintext are
+/// transparently migrated on first read and re-written encrypted on next save.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Credentials {
-    #[serde(default)]
     pub api_key: String,
-    #[serde(default, deserialize_with = "deserialize_string_bool")]
     pub has_consented: bool,
 }
+
+/// Raw wire/disk shape for `Credentials`. Both fields are optional so we can
+/// round-trip old plaintext configs, new encrypted configs, and configs
+/// written by a different-user DPAPI scope (decrypt will fail, we fall back
+/// to empty and require re-login).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CredentialsOnDisk {
+    /// Legacy plaintext field. Present on configs written by pre-hardening
+    /// builds. On read we decrypt-roundtrip and drop it from the next save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    api_key: Option<String>,
+    /// DPAPI-protected API key bytes. Base64-encoded in JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    api_key_encrypted: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string_bool")]
+    has_consented: Option<bool>,
+}
+
+impl serde::Serialize for Credentials {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Only ever write the encrypted field to disk. If encryption fails
+        // we refuse to persist the key rather than silently leak plaintext.
+        let api_key_encrypted = if self.api_key.is_empty() {
+            None
+        } else {
+            match dpapi_protect(self.api_key.as_bytes()) {
+                Ok(bytes) => Some(base64_encode(&bytes)),
+                Err(e) => {
+                    tracing::error!(
+                        error = ?e,
+                        "DPAPI encrypt failed; dropping api_key from serialized config \
+                         to avoid leaking plaintext. User will need to re-login."
+                    );
+                    None
+                }
+            }
+        };
+
+        CredentialsOnDisk {
+            api_key: None,
+            api_key_encrypted,
+            has_consented: Some(self.has_consented),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Credentials {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = CredentialsOnDisk::deserialize(deserializer)?;
+
+        // Prefer encrypted; fall back to plaintext for legacy configs.
+        let api_key = match (raw.api_key_encrypted, raw.api_key) {
+            (Some(encoded), _) => match base64_decode(&encoded) {
+                Ok(bytes) => match dpapi_unprotect(&bytes) {
+                    Ok(plain) => String::from_utf8(plain).unwrap_or_else(|e| {
+                        tracing::warn!(
+                            error = ?e,
+                            "Decrypted api_key was not valid UTF-8, treating as missing"
+                        );
+                        String::new()
+                    }),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = ?e,
+                            "DPAPI unprotect failed (different user or corrupted blob); \
+                             user will need to re-login"
+                        );
+                        String::new()
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        error = ?e,
+                        "api_key_encrypted field is not valid base64, treating as missing"
+                    );
+                    String::new()
+                }
+            },
+            (None, Some(plain)) => {
+                // Legacy migration path: we decrypt-roundtrip once here (no-op
+                // because the value is already plaintext) and on the next
+                // Config::save() the on-disk `api_key` field will be dropped
+                // and only `api_key_encrypted` written. This matches the
+                // Gate C requirement: "decrypt-roundtrip once then remove
+                // the plaintext field."
+                if !plain.is_empty() {
+                    tracing::info!(
+                        "Migrating legacy plaintext api_key to DPAPI-encrypted storage on next save"
+                    );
+                }
+                plain
+            }
+            (None, None) => String::new(),
+        };
+
+        Ok(Credentials {
+            api_key,
+            has_consented: raw.has_consented.unwrap_or(false),
+        })
+    }
+}
+
 impl Credentials {
     pub fn logout(&mut self) {
         self.api_key = String::new();
@@ -253,6 +521,185 @@ impl Credentials {
         }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// DPAPI helpers
+//
+// On Windows we wrap the key with `CryptProtectData` using the current-user
+// entropy scope — bound to the user's logon credentials, so the blob is
+// useless to another user (including SYSTEM) or on another machine.
+//
+// On non-Windows (dev/test builds on mac/linux) we fall back to storing the
+// bytes as-is. Production builds are `target_os = "windows"` only, so this
+// is purely for `cargo check` / cross-platform test development.
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+fn dpapi_protect(plaintext: &[u8]) -> Result<Vec<u8>> {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptProtectData};
+    use windows::core::PCWSTR;
+
+    // SAFETY: CryptProtectData is thread-safe; we allocate a fresh input blob
+    // and let Windows write the output blob into its own allocation which we
+    // free via LocalFree. Lifetimes of input pointers are bounded by the
+    // duration of the FFI call.
+    unsafe {
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: plaintext.len() as u32,
+            pbData: plaintext.as_ptr() as *mut u8,
+        };
+        let mut output = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+
+        CryptProtectData(
+            &input as *const _,
+            PCWSTR::null(), // description
+            None,           // optional entropy — current-user scope is sufficient
+            None,           // reserved
+            None,           // prompt struct
+            0,              // flags (no UI, current user)
+            &mut output as *mut _,
+        )
+        .map_err(|e| eyre!("CryptProtectData failed: {e}"))?;
+
+        if output.pbData.is_null() || output.cbData == 0 {
+            return Err(eyre!("CryptProtectData returned empty blob"));
+        }
+
+        // Copy out of the Windows-owned allocation before freeing it.
+        let slice = std::slice::from_raw_parts(output.pbData, output.cbData as usize);
+        let owned = slice.to_vec();
+
+        // LocalFree returns an HLOCAL on failure; we ignore it — a leak on
+        // the error path is preferable to a panic.
+        let _ = LocalFree(Some(HLOCAL(output.pbData as *mut _)));
+        Ok(owned)
+    }
+}
+
+#[cfg(windows)]
+fn dpapi_unprotect(ciphertext: &[u8]) -> Result<Vec<u8>> {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptUnprotectData};
+
+    // SAFETY: symmetric to dpapi_protect above.
+    unsafe {
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: ciphertext.len() as u32,
+            pbData: ciphertext.as_ptr() as *mut u8,
+        };
+        let mut output = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+
+        CryptUnprotectData(
+            &input as *const _,
+            None, // ppszDataDescr
+            None, // pOptionalEntropy
+            None, // pvReserved
+            None, // pPromptStruct
+            0,    // flags
+            &mut output as *mut _,
+        )
+        .map_err(|e| eyre!("CryptUnprotectData failed: {e}"))?;
+
+        if output.pbData.is_null() {
+            return Err(eyre!("CryptUnprotectData returned null blob"));
+        }
+
+        let slice = std::slice::from_raw_parts(output.pbData, output.cbData as usize);
+        let owned = slice.to_vec();
+        let _ = LocalFree(Some(HLOCAL(output.pbData as *mut _)));
+        Ok(owned)
+    }
+}
+
+// Non-Windows fallback for cross-platform builds (tests, `cargo check` on dev
+// machines). This is NEVER compiled into the shipped Windows binary because
+// main.rs gates `windows_subsystem = "windows"` on target_os = "windows".
+// If someone actually runs a non-Windows build, the key is stored unwrapped;
+// that's no worse than the pre-hardening baseline and is clearly marked.
+#[cfg(not(windows))]
+fn dpapi_protect(plaintext: &[u8]) -> Result<Vec<u8>> {
+    Ok(plaintext.to_vec())
+}
+
+#[cfg(not(windows))]
+fn dpapi_unprotect(ciphertext: &[u8]) -> Result<Vec<u8>> {
+    Ok(ciphertext.to_vec())
+}
+
+// ---------------------------------------------------------------------------
+// Base64 (tiny, dependency-free). We avoid pulling in the `base64` crate for
+// one small call site — this is standard RFC-4648 alphabet, no URL variant.
+// ---------------------------------------------------------------------------
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHA: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | (bytes[i + 2] as u32);
+        out.push(ALPHA[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHA[((n >> 12) & 0x3F) as usize] as char);
+        out.push(ALPHA[((n >> 6) & 0x3F) as usize] as char);
+        out.push(ALPHA[(n & 0x3F) as usize] as char);
+        i += 3;
+    }
+    let rem = bytes.len() - i;
+    if rem == 1 {
+        let n = (bytes[i] as u32) << 16;
+        out.push(ALPHA[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHA[((n >> 12) & 0x3F) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem == 2 {
+        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
+        out.push(ALPHA[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHA[((n >> 12) & 0x3F) as usize] as char);
+        out.push(ALPHA[((n >> 6) & 0x3F) as usize] as char);
+        out.push('=');
+    }
+    out
+}
+
+fn base64_decode(s: &str) -> Result<Vec<u8>> {
+    let bytes = s.as_bytes();
+    if bytes.len() % 4 != 0 {
+        return Err(eyre!("base64 length not a multiple of 4"));
+    }
+    let val = |c: u8| -> Result<u32> {
+        Ok(match c {
+            b'A'..=b'Z' => (c - b'A') as u32,
+            b'a'..=b'z' => (c - b'a' + 26) as u32,
+            b'0'..=b'9' => (c - b'0' + 52) as u32,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => 0,
+            _ => return Err(eyre!("invalid base64 char")),
+        })
+    };
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        let n = (val(chunk[0])? << 18)
+            | (val(chunk[1])? << 12)
+            | (val(chunk[2])? << 6)
+            | val(chunk[3])?;
+        out.push(((n >> 16) & 0xFF) as u8);
+        if chunk[2] != b'=' {
+            out.push(((n >> 8) & 0xFF) as u8);
+        }
+        if chunk[3] != b'=' {
+            out.push((n & 0xFF) as u8);
+        }
+    }
+    Ok(out)
 }
 
 /// The directory in which all persistent config data should be stored.
@@ -409,6 +856,26 @@ impl Config {
                     "Failed to persist config after v2.5.4 migration — \
                      will retry on next save"
                 );
+            }
+        }
+
+        // Security: validate the recording_location loaded from disk against
+        // the symlink / path-escape guard. If the stored value is unsafe
+        // (e.g. an attacker replaced it with a reparse point, or the user
+        // hand-edited config.json to point at System32), we reset to the
+        // default and warn. We do NOT refuse to start — the recorder is
+        // usable with the default path.
+        if let Err(e) = validate_recording_location(&config.preferences.recording_location) {
+            tracing::warn!(
+                error = ?e,
+                rejected = %config.preferences.recording_location.display(),
+                "Stored recording_location failed safety validation; \
+                 falling back to default. This protects against symlink-based \
+                 cleanup attacks and config tampering."
+            );
+            config.preferences.recording_location = default_recording_location();
+            if let Err(e) = config.save() {
+                tracing::warn!(e = ?e, "Failed to persist recording_location reset");
             }
         }
 
@@ -645,5 +1112,209 @@ impl ObsAmfSettings {
         updater: libobs_wrapper::data::ObsDataUpdater,
     ) -> libobs_wrapper::data::ObsDataUpdater {
         updater.set_string("preset", self.preset.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Security hardening tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// A path containing `..` must be rejected regardless of platform.
+    #[test]
+    fn validate_recording_location_rejects_parent_dir_components() {
+        // Build a path with an explicit `..` component. We don't care whether
+        // the path canonicalizes — the raw-component check must fire first.
+        let p = PathBuf::from("some").join("..").join("elsewhere");
+        let err = validate_recording_location(&p)
+            .expect_err("path with `..` must be rejected");
+        assert!(
+            format!("{err}").contains(".."),
+            "error should mention `..`, got: {err}"
+        );
+    }
+
+    /// A path outside LocalAppData must be rejected (e.g. System32).
+    #[test]
+    fn validate_recording_location_rejects_escape_from_local_appdata() {
+        // Use the tempdir's canonical form, which on most CI is not under
+        // LocalAppData, to stand in for an escape. We create the directory
+        // so canonicalization succeeds; the guard should reject it based on
+        // the allowed-root check.
+        let tmp = TempDir::new().expect("tempdir");
+        // If the tempdir happens to live under LocalAppData (rare, but
+        // possible on CI), skip — the test's premise doesn't hold.
+        if let Ok(root) = allowed_recording_root() {
+            if let (Ok(t), Ok(r)) = (
+                dunce::canonicalize(tmp.path()),
+                dunce::canonicalize(&root),
+            ) {
+                if t.starts_with(&r) {
+                    eprintln!(
+                        "test skipped: tempdir {} is under allowed root {}",
+                        t.display(),
+                        r.display()
+                    );
+                    return;
+                }
+            }
+        } else {
+            // Platform has no LocalAppData (unusual). Skip.
+            return;
+        }
+
+        let err = validate_recording_location(tmp.path())
+            .expect_err("path outside LocalAppData must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("LocalAppData") || msg.contains("inside"),
+            "error should mention allowed root, got: {msg}"
+        );
+    }
+
+    /// A path under LocalAppData must be accepted.
+    #[test]
+    fn validate_recording_location_accepts_path_under_local_appdata() {
+        let Ok(root) = allowed_recording_root() else {
+            eprintln!("test skipped: no LocalAppData on this platform");
+            return;
+        };
+        // Use a unique subfolder that may not exist yet — the guard must
+        // handle non-existent leaves by canonicalizing the existing prefix.
+        let candidate = root
+            .join("GameData Recorder")
+            .join("test-validate-recording-location-accept");
+        // Clean up if left over from a prior run.
+        let _ = std::fs::remove_dir_all(&candidate);
+
+        validate_recording_location(&candidate)
+            .expect("path under LocalAppData should be accepted");
+    }
+
+    /// A leaf symlink must be rejected (core anti-symlink-attack test).
+    #[cfg(unix)]
+    #[test]
+    fn validate_recording_location_rejects_symlink_leaf() {
+        use std::os::unix::fs::symlink;
+
+        // Set up under the allowed root so the ONLY failing check is the
+        // symlink leaf check. Fall back to tempdir if LocalAppData doesn't
+        // exist; the error will still be non-Ok (outside-root) which is
+        // also acceptable.
+        let root = allowed_recording_root().unwrap_or_else(|_| std::env::temp_dir());
+        let base = root.join("GameData Recorder").join("test-symlink-guard");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("create base");
+
+        let target = base.join("real-target");
+        std::fs::create_dir_all(&target).expect("create target");
+
+        let link = base.join("link-to-target");
+        let _ = std::fs::remove_file(&link);
+        symlink(&target, &link).expect("create symlink");
+
+        let err =
+            validate_recording_location(&link).expect_err("symlink leaf must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("symlink") || msg.contains("reparse"),
+            "error should mention symlink, got: {msg}"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// DPAPI round-trip: encrypt then decrypt yields the original bytes.
+    /// Runs only on Windows; on other platforms the helpers are identity
+    /// and wouldn't exercise anything meaningful.
+    #[cfg(windows)]
+    #[test]
+    fn dpapi_round_trip() {
+        let original = b"sk_test_very_secret_api_key_12345";
+        let encrypted = dpapi_protect(original).expect("protect");
+        assert_ne!(
+            encrypted.as_slice(),
+            original,
+            "encrypted output must differ from plaintext"
+        );
+        let decrypted = dpapi_unprotect(&encrypted).expect("unprotect");
+        assert_eq!(
+            decrypted.as_slice(),
+            original,
+            "round-trip must recover plaintext"
+        );
+    }
+
+    /// DPAPI round-trip through the serde boundary: serializing writes only
+    /// `apiKeyEncrypted`, deserializing recovers the plaintext. Windows only.
+    #[cfg(windows)]
+    #[test]
+    fn credentials_serde_round_trip_encrypted() {
+        let creds = Credentials {
+            api_key: "sk_test_abcdef123456".to_string(),
+            has_consented: true,
+        };
+        let json = serde_json::to_string(&creds).expect("serialize");
+        assert!(
+            !json.contains("sk_test_abcdef123456"),
+            "serialized form must NOT contain plaintext api_key: {json}"
+        );
+        assert!(
+            json.contains("apiKeyEncrypted"),
+            "serialized form must contain apiKeyEncrypted: {json}"
+        );
+
+        let restored: Credentials = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.api_key, "sk_test_abcdef123456");
+        assert!(restored.has_consented);
+    }
+
+    /// Legacy migration: a config that only has the plaintext `apiKey` field
+    /// must be accepted on first read, and subsequent serialize must drop
+    /// the plaintext field and emit only the encrypted one.
+    #[cfg(windows)]
+    #[test]
+    fn credentials_legacy_plaintext_migrates_on_roundtrip() {
+        let legacy = r#"{"apiKey":"sk_legacy_12345678","hasConsented":true}"#;
+        let creds: Credentials = serde_json::from_str(legacy).expect("read legacy");
+        assert_eq!(creds.api_key, "sk_legacy_12345678");
+        assert!(creds.has_consented);
+
+        let rewritten = serde_json::to_string(&creds).expect("re-serialize");
+        assert!(
+            !rewritten.contains("sk_legacy_12345678"),
+            "rewritten form must not leak legacy plaintext: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("\"apiKey\""),
+            "rewritten form must drop the legacy `apiKey` field: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("apiKeyEncrypted"),
+            "rewritten form must write apiKeyEncrypted: {rewritten}"
+        );
+    }
+
+    /// Base64 round-trip for the dependency-free encoder.
+    #[test]
+    fn base64_round_trip() {
+        for input in [
+            &b""[..],
+            &b"f"[..],
+            &b"fo"[..],
+            &b"foo"[..],
+            &b"foobar"[..],
+            &[0u8, 1, 2, 3, 4, 255, 254, 253][..],
+        ] {
+            let enc = base64_encode(input);
+            let dec = base64_decode(&enc).expect("decode");
+            assert_eq!(dec.as_slice(), input, "round-trip for {input:?}");
+        }
     }
 }

@@ -34,6 +34,11 @@ pub(crate) struct MainViewState {
     pub(crate) pending_delete_recording: Option<(PathBuf, String)>,
     /// Pending recording location move (stores old path and new path)
     pub(crate) pending_move_location: Option<(PathBuf, PathBuf)>,
+    /// Last validation error for a picked recording folder. Rendered as a
+    /// toast/inline message; cleared when the user dismisses or picks
+    /// another folder. Populated by the security guard in
+    /// `validate_recording_location`.
+    pub(crate) recording_location_error: Option<String>,
 
     /// Upload manager state
     pub(crate) upload_manager: upload_manager::UploadManager,
@@ -190,6 +195,12 @@ impl App {
             &mut self.main_view_state.pending_move_location,
             &mut self.local_preferences.recording_location,
             &self.app_state,
+        );
+
+        // Recording Location Error Window (security guard rejection)
+        recording_location_error_window(
+            ctx,
+            &mut self.main_view_state.recording_location_error,
         );
 
         // Games Window
@@ -1054,7 +1065,17 @@ fn move_location_confirmation_window(
                         )
                         .clicked()
                     {
-                        *recording_location = new_path.clone();
+                        // Re-validate in case the path was swapped for a
+                        // symlink between pick and confirm (TOCTOU).
+                        if let Err(e) = crate::config::validate_recording_location(&new_path) {
+                            tracing::warn!(
+                                error = ?e,
+                                rejected = %new_path.display(),
+                                "Rejected recording-location change at confirm time"
+                            );
+                        } else {
+                            *recording_location = new_path.clone();
+                        }
                         *pending_move_location = None;
                     }
 
@@ -1070,14 +1091,25 @@ fn move_location_confirmation_window(
                         .on_hover_text("Move all existing recordings to the new location")
                         .clicked()
                     {
-                        *recording_location = new_path.clone();
-                        app_state
-                            .async_request_tx
-                            .blocking_send(AsyncRequest::MoveRecordingsFolder {
-                                from: old_path.clone(),
-                                to: new_path.clone(),
-                            })
-                            .ok();
+                        // Re-validate the destination before we touch files —
+                        // anti-TOCTOU. If this fails we close the dialog
+                        // without moving anything.
+                        if let Err(e) = crate::config::validate_recording_location(&new_path) {
+                            tracing::warn!(
+                                error = ?e,
+                                rejected = %new_path.display(),
+                                "Rejected recording-location move at confirm time"
+                            );
+                        } else {
+                            *recording_location = new_path.clone();
+                            app_state
+                                .async_request_tx
+                                .blocking_send(AsyncRequest::MoveRecordingsFolder {
+                                    from: old_path.clone(),
+                                    to: new_path.clone(),
+                                })
+                                .ok();
+                        }
                         *pending_move_location = None;
                     }
                 });
@@ -1099,5 +1131,46 @@ fn move_location_confirmation_window(
 
     if !keep_open {
         *pending_move_location = None;
+    }
+}
+
+/// Modal shown when the user tries to pick a recording folder that fails
+/// the security guard (symlink, outside LocalAppData, contains `..`). The
+/// original pick is NOT applied; the user must choose another folder.
+fn recording_location_error_window(ctx: &Context, error: &mut Option<String>) {
+    let Some(message) = error.clone() else {
+        return;
+    };
+    let mut keep_open = true;
+    Window::new("Recording Location Not Allowed")
+        .open(&mut keep_open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.vertical(|ui| {
+                ui.label(
+                    RichText::new(
+                        "The folder you picked can't be used for recordings for safety reasons.",
+                    )
+                    .size(14.0),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(&message)
+                        .size(12.0)
+                        .color(Color32::from_rgb(255, 180, 180)),
+                );
+                ui.add_space(10.0);
+                if ui
+                    .add_sized(vec2(ui.available_width(), 30.0), Button::new("OK"))
+                    .clicked()
+                {
+                    *error = None;
+                }
+            });
+        });
+    if !keep_open {
+        *error = None;
     }
 }
