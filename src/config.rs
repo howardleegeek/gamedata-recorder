@@ -357,7 +357,24 @@ impl Config {
     pub fn save(&self) -> Result<()> {
         let config_path = Self::get_path()?;
         tracing::info!("Saving configs to {}", config_path.to_string_lossy());
-        fs::write(&config_path, serde_json::to_string_pretty(&self)?)?;
+        let json = serde_json::to_string_pretty(&self)?;
+        // Atomic write: write to temp file then rename to prevent corruption
+        // if the process crashes or disk becomes full mid-write.
+        let temp_path = config_path.with_extension("json.tmp");
+        if let Err(e) = fs::write(&temp_path, &json) {
+            tracing::error!(
+                "Failed to write config to temp file {}: {e}. Disk may be full or read-only.",
+                temp_path.display()
+            );
+            return Err(e.into());
+        }
+        if let Err(e) = fs::rename(&temp_path, &config_path) {
+            tracing::error!(
+                "Failed to rename temp config file: {e}. Falling back to direct write."
+            );
+            // Fallback: direct write (less safe but better than nothing)
+            fs::write(&config_path, &json)?;
+        }
         Ok(())
     }
 
