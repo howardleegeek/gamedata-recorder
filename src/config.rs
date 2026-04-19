@@ -306,7 +306,10 @@ impl Config {
         let contents = match fs::read_to_string(&config_path) {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!("Failed to read config file at {}: {e}", config_path.display());
+                tracing::error!(
+                    "Failed to read config file at {}: {e}",
+                    config_path.display()
+                );
                 tracing::warn!("Using default configuration");
                 return Ok(Self::default());
             }

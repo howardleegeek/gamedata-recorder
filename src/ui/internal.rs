@@ -31,7 +31,9 @@ impl WgpuState {
                 compatible_surface: Some(&surface),
             })
             .await
-            .expect("Failed to find an appropriate GPU adapter. Ensure your GPU drivers are installed.");
+            .expect(
+                "Failed to find an appropriate GPU adapter. Ensure your GPU drivers are installed.",
+            );
         tracing::debug!("WGPU adapter acquired");
 
         tracing::debug!("Requesting WGPU device and queue");
@@ -58,10 +60,9 @@ impl WgpuState {
                     "Preferred format {:?} not available, using first available format",
                     selected_format
                 );
-                swapchain_capabilities
-                    .formats
-                    .first()
-                    .expect("GPU adapter reports zero surface texture formats — driver may be broken")
+                swapchain_capabilities.formats.first().expect(
+                    "GPU adapter reports zero surface texture formats — driver may be broken",
+                )
             });
 
         let surface_config = wgpu::SurfaceConfiguration {

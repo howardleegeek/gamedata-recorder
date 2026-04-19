@@ -42,11 +42,7 @@ pub fn validate_folder(path: &Path) -> eyre::Result<ValidationResult> {
                 path.display(),
                 reasons
             );
-            std::fs::write(
-                path.join(constants::filename::recording::INVALID),
-                &reasons,
-            )
-            .ok();
+            std::fs::write(path.join(constants::filename::recording::INVALID), &reasons).ok();
             eyre::bail!("Validation failures: {reasons}");
         }
     }
