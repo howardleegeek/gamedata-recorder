@@ -810,7 +810,9 @@ async fn main(
             },
             _ = perform_checks.tick() => {
                 // Update play-time tracking
-                app_state.play_time_state.write().unwrap().tick(&app_state.state.read().unwrap());
+                if let (Ok(mut play_time), Ok(state)) = (app_state.play_time_state.write(), app_state.state.read()) {
+                    play_time.tick(&state);
+                }
 
                 // Flush pending input events to disk
                 if let Err(e) = state.recorder.flush_input_events().await {
