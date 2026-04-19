@@ -60,6 +60,20 @@ const OWL_WINDOW_CAPTURE_NAME: &str = "owl_window_capture";
 const OWL_GAME_CAPTURE_NAME: &str = "owl_game_capture";
 const OWL_MONITOR_CAPTURE_NAME: &str = "owl_monitor_capture";
 
+// Audio source names and OBS source-type IDs for monitor-capture audio.
+// v2.5.6: monitor-capture has no hooked audio path (game-capture and
+// window-capture do, via `set_capture_audio`), so prior to this fix all
+// monitor-capture recordings were silent MP4s. We attach two WASAPI sources
+// directly to the scene: desktop-out (what the user hears) and optionally
+// mic-in (off by default for privacy).
+const OWL_DESKTOP_AUDIO_NAME: &str = "owl_desktop_audio";
+const OWL_MICROPHONE_AUDIO_NAME: &str = "owl_microphone_audio";
+/// WASAPI desktop (output) capture — captures the default render device.
+/// Source ID matches OBS's `obs-plugins/win-capture/wasapi.c`.
+const WASAPI_OUTPUT_CAPTURE_ID: &str = "wasapi_output_capture";
+/// WASAPI microphone (input) capture — captures the default capture device.
+const WASAPI_INPUT_CAPTURE_ID: &str = "wasapi_input_capture";
+
 pub struct ObsEmbeddedRecorder {
     // Held in an Option so Drop can `take()` the handle, wait with a deadline,
     // and fall back to abandoning the thread on timeout rather than blocking
@@ -134,6 +148,7 @@ impl VideoRecorder for ObsEmbeddedRecorder {
         game_exe: &str,
         video_settings: EncoderSettings,
         game_config: GameConfig,
+        record_microphone: bool,
         (base_width, base_height): (u32, u32),
         event_stream: InputEventStream,
         consent: ConsentGuard,
@@ -157,6 +172,7 @@ impl VideoRecorder for ObsEmbeddedRecorder {
                     game_resolution: (base_width, base_height),
                     video_settings,
                     game_config,
+                    record_microphone,
                     recording_path,
                     game_exe: game_exe.to_string(),
                     hwnd: SendableComp(hwnd),
@@ -395,6 +411,11 @@ struct RecordingRequest {
     game_resolution: (u32, u32),
     video_settings: EncoderSettings,
     game_config: GameConfig,
+    /// If `true`, attach a WASAPI input (microphone) source to the scene when
+    /// running in monitor-capture mode. Ignored for game-capture (the hook
+    /// taps game audio) and for the window-capture fallback (which already
+    /// uses `set_capture_audio`).
+    record_microphone: bool,
     recording_path: String,
     game_exe: String,
     // SAFETY: HWND is wrapped in SendableComp to allow passing across threads.
@@ -526,6 +547,15 @@ struct RecorderState {
     skipped_frames: Arc<Mutex<Option<SkippedFrames>>>,
     output: ObsOutputRef,
     source: Option<ObsSourceRef>,
+    /// WASAPI desktop (output) audio source, attached only when running in
+    /// monitor-capture mode. Kept alive on the state so OBS doesn't release
+    /// the source via the wrapper's drop glue while it's routed to an
+    /// output channel. See `attach_monitor_capture_audio`.
+    desktop_audio_source: Option<ObsSourceRef>,
+    /// WASAPI microphone (input) audio source. Only populated when both
+    /// monitor-capture mode is active AND the user opted in via the
+    /// `record_microphone` preference (default false).
+    microphone_source: Option<ObsSourceRef>,
     last_encoder_settings: Option<serde_json::Value>,
     was_hooked: Arc<AtomicBool>,
     last_video_encoder_type: Option<VideoEncoderType>,
@@ -623,6 +653,8 @@ impl RecorderState {
                 skipped_frames,
                 output,
                 source: None,
+                desktop_audio_source: None,
+                microphone_source: None,
                 last_encoder_settings: None,
                 was_hooked: Arc::new(AtomicBool::new(false)),
                 last_video_encoder_type: None,
@@ -663,6 +695,19 @@ impl RecorderState {
         let source_creation_state = SourceCreationState {
             use_window_capture: request.game_config.use_window_capture,
         };
+
+        // Determine whether this recording will genuinely use monitor capture
+        // (vs. the window-capture fallback or game-capture). Monitor capture
+        // has no audio tap of its own, so only that path needs WASAPI
+        // sources attached. We check _before_ `prepare_source` so we can log
+        // the decision clearly and so the scene teardown in the else branch
+        // runs unconditionally when switching away from monitor capture.
+        let monitors_available = !MonitorCaptureSourceBuilder::get_monitors()
+            .unwrap_or_default()
+            .is_empty();
+        let use_monitor_capture_audio =
+            should_attach_monitor_audio(request.game_config.use_window_capture, monitors_available);
+
         let source = prepare_source(
             &mut self.obs_context,
             &request.game_exe,
@@ -678,6 +723,20 @@ impl RecorderState {
 
         // Ensure the source takes up the entire scene
         scene.fit_source_to_screen(&source)?;
+
+        // v2.5.6: attach (or detach) WASAPI audio sources to the scene based
+        // on the capture mode. Game-capture and the window-capture fallback
+        // already tap audio via `set_capture_audio(true)` on their respective
+        // builders, so we only attach WASAPI sources when monitor capture is
+        // the active path. When switching between modes we must also detach
+        // stale audio sources so channels 1/2 aren't left pointing at freed
+        // memory.
+        if use_monitor_capture_audio {
+            self.attach_monitor_capture_audio(request.record_microphone)
+                .wrap_err("Failed to attach WASAPI audio sources for monitor capture")?;
+        } else {
+            self.detach_monitor_capture_audio();
+        }
 
         // Register the video encoder with encoder-specific settings
         let video_encoder_data = self.obs_context.data()?;
@@ -881,6 +940,14 @@ impl RecorderState {
             tracing::warn!("No active recording to stop");
         }
 
+        // v2.5.6: tear down WASAPI audio routing before releasing the source
+        // refs. Clearing the channels first is important — `obs_set_output_source`
+        // increments the source refcount, so dropping `ObsSourceRef` without
+        // clearing the channel would leak the audio source (channel 1/2 would
+        // keep holding the last reference). `detach_monitor_capture_audio` does
+        // clear-then-drop in the correct order.
+        self.detach_monitor_capture_audio();
+
         let settings = self.last_encoder_settings.take().unwrap_or_default();
 
         // Send shutdown signal BEFORE checking hook status, to ensure the signal thread
@@ -989,6 +1056,163 @@ impl RecorderState {
             false
         }
     }
+
+    /// Create (or reuse) the WASAPI desktop-output source, and optionally the
+    /// WASAPI input (microphone) source, and assign them to the global OBS
+    /// audio channels. Monitor capture has no hooked audio path, so without
+    /// this the resulting MP4 is silent.
+    ///
+    /// Channel assignment mirrors the canonical layout used by OBS's own
+    /// `Desktop Audio` / `Mic/Aux` buses and libobs's `raw_calls.rs` example:
+    ///   - channel 0: scene (video)            — set by `set_to_channel(0)`
+    ///   - channel 1: WASAPI desktop capture   — set here
+    ///   - channel 2: WASAPI microphone        — set here when opted in
+    ///
+    /// The source refs are retained on `RecorderState` so that OBS doesn't
+    /// release them via the wrapper's drop glue while the channels are still
+    /// pointing at them.
+    fn attach_monitor_capture_audio(&mut self, record_microphone: bool) -> eyre::Result<()> {
+        // Clone the runtime handle once so we can freely touch `self.*_source`
+        // fields without the borrow checker tangling with an outstanding borrow
+        // into `self.obs_context`.
+        let runtime = self.obs_context.runtime().clone();
+
+        // Always (re)attach desktop audio when running in monitor capture.
+        // We recreate the source each recording to pick up device changes
+        // (user unplugs a headset, switches default render device, etc.) —
+        // libobs's WASAPI source does NOT auto-fall-back to the new default.
+        if self.desktop_audio_source.is_some() {
+            // Detach any stale reference before installing a fresh one.
+            set_output_source_on_channel(&runtime, DESKTOP_AUDIO_CHANNEL, None)?;
+            self.desktop_audio_source = None;
+        }
+        tracing::info!(
+            "Attaching WASAPI desktop audio source ({}) on channel {}",
+            WASAPI_OUTPUT_CAPTURE_ID,
+            DESKTOP_AUDIO_CHANNEL
+        );
+        let mut desktop_settings = self.obs_context.data()?;
+        // "default" asks the WASAPI source to track the default render endpoint.
+        // Being explicit beats relying on the plugin default string.
+        desktop_settings.set_string("device_id", "default")?;
+        let desktop = ObsSourceRef::new(
+            WASAPI_OUTPUT_CAPTURE_ID,
+            OWL_DESKTOP_AUDIO_NAME,
+            Some(desktop_settings),
+            None,
+            runtime.clone(),
+        )
+        .wrap_err("Failed to create WASAPI desktop audio source")?;
+        set_output_source_on_channel(&runtime, DESKTOP_AUDIO_CHANNEL, Some(&desktop))?;
+        self.desktop_audio_source = Some(desktop);
+
+        // Microphone is opt-in. If we previously had a mic source and the
+        // user has now disabled it, detach and drop the source.
+        if self.microphone_source.is_some() {
+            set_output_source_on_channel(&runtime, MICROPHONE_AUDIO_CHANNEL, None)?;
+            self.microphone_source = None;
+        }
+        if record_microphone {
+            tracing::info!(
+                "Attaching WASAPI microphone source ({}) on channel {} (record_microphone=true)",
+                WASAPI_INPUT_CAPTURE_ID,
+                MICROPHONE_AUDIO_CHANNEL
+            );
+            let mut mic_settings = self.obs_context.data()?;
+            mic_settings.set_string("device_id", "default")?;
+            let mic = ObsSourceRef::new(
+                WASAPI_INPUT_CAPTURE_ID,
+                OWL_MICROPHONE_AUDIO_NAME,
+                Some(mic_settings),
+                None,
+                runtime.clone(),
+            )
+            .wrap_err("Failed to create WASAPI microphone source")?;
+            set_output_source_on_channel(&runtime, MICROPHONE_AUDIO_CHANNEL, Some(&mic))?;
+            self.microphone_source = Some(mic);
+        } else {
+            tracing::debug!(
+                "Skipping microphone capture (record_microphone=false) — privacy default"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Clear the monitor-capture audio channels and release any WASAPI source
+    /// refs we're holding. Safe to call when nothing is attached (no-op). Must
+    /// clear channels _before_ dropping the source refs so OBS's refcount
+    /// drops to zero on our drop rather than leaking in the output bus.
+    fn detach_monitor_capture_audio(&mut self) {
+        // Clone the runtime handle up front so we can mutably touch
+        // `self.desktop_audio_source` / `self.microphone_source` without
+        // fighting the borrow checker over a borrow into `self.obs_context`.
+        let runtime = self.obs_context.runtime().clone();
+        if self.desktop_audio_source.is_some() {
+            if let Err(e) = set_output_source_on_channel(&runtime, DESKTOP_AUDIO_CHANNEL, None) {
+                tracing::warn!(
+                    e=?e,
+                    "Failed to clear desktop audio output channel {}; continuing teardown",
+                    DESKTOP_AUDIO_CHANNEL
+                );
+            }
+            self.desktop_audio_source = None;
+        }
+        if self.microphone_source.is_some() {
+            if let Err(e) = set_output_source_on_channel(&runtime, MICROPHONE_AUDIO_CHANNEL, None) {
+                tracing::warn!(
+                    e=?e,
+                    "Failed to clear microphone output channel {}; continuing teardown",
+                    MICROPHONE_AUDIO_CHANNEL
+                );
+            }
+            self.microphone_source = None;
+        }
+    }
+}
+
+/// OBS global audio buses. Channel 0 is reserved for the scene (video);
+/// channels 1..=5 are where audio sources are mounted via
+/// `obs_set_output_source`. We use 1 for desktop and 2 for microphone,
+/// matching OBS Studio's canonical `Desktop Audio` / `Mic/Aux` layout.
+const DESKTOP_AUDIO_CHANNEL: u32 = 1;
+const MICROPHONE_AUDIO_CHANNEL: u32 = 2;
+
+/// Pure decision function: given the requested capture mode
+/// (`use_window_capture == true` means "prefer monitor capture" in v2.5.2+)
+/// and whether any monitors are currently enumerated, decide whether the
+/// monitor-capture sub-path will actually run.
+///
+/// Only that sub-path is silent by default — the window-capture fallback
+/// (used when no monitors are enumerated) and game-capture both tap audio
+/// via `set_capture_audio`. Extracted as a free function so tests can
+/// exercise the branching logic without a live OBS context.
+fn should_attach_monitor_audio(use_window_capture: bool, monitors_available: bool) -> bool {
+    use_window_capture && monitors_available
+}
+
+/// Assign `source` to OBS global audio channel `channel`. Passing `None`
+/// clears the channel (equivalent to `obs_set_output_source(channel, NULL)`).
+///
+/// # Safety
+///
+/// All libobs calls must run on the OBS thread; we marshal via the runtime.
+/// The raw pointer capture is safe because `Sendable<*mut obs_source_t>` is
+/// owned by an `ObsSourceRef` that lives at least as long as the caller's
+/// reference, and we only dereference it on the OBS thread via the FFI.
+fn set_output_source_on_channel(
+    runtime: &libobs_wrapper::runtime::ObsRuntime,
+    channel: u32,
+    source: Option<&ObsSourceRef>,
+) -> eyre::Result<()> {
+    let source_ptr = source.map(|s| s.as_ptr() as usize).unwrap_or(0);
+    runtime
+        .run_with_obs(move || unsafe {
+            let ptr = source_ptr as *mut libobs_wrapper::sys::obs_source_t;
+            libobs_wrapper::sys::obs_set_output_source(channel, ptr);
+        })
+        .wrap_err("Failed to dispatch obs_set_output_source to OBS thread")?;
+    Ok(())
 }
 
 fn video_info(adapter_index: usize, (base_width, base_height): (u32, u32)) -> ObsVideoInfo {
@@ -1356,5 +1580,83 @@ mod tests {
         assert_eq!(result.skipped, 10758);
         assert_eq!(result.total, 22640);
         assert!((result.percentage() - 47.48).abs() < 0.1);
+    }
+
+    // --- v2.5.6 monitor-capture audio routing -------------------------
+    //
+    // We can't exercise the live OBS thread in a unit test (no OBS context,
+    // no WASAPI devices, no Windows), but we CAN lock in the decision
+    // logic that picks whether to attach WASAPI sources. These tests are
+    // the first-line defence against a regression that silently re-
+    // introduces the silent-MP4 bug.
+
+    #[test]
+    fn monitor_capture_with_monitors_attaches_audio() {
+        // The primary path: `use_window_capture=true` and at least one
+        // monitor enumerated -> prepare_source picks MonitorCapture, so
+        // we MUST attach WASAPI sources to avoid a silent recording.
+        assert!(should_attach_monitor_audio(true, true));
+    }
+
+    #[test]
+    fn monitor_capture_with_no_monitors_falls_back_to_window_capture() {
+        // When monitor enumeration comes back empty, `prepare_source`
+        // transparently falls back to WindowCapture, which carries its
+        // own `set_capture_audio(true)` tap. Attaching WASAPI on top
+        // would double the audio, so we must NOT attach.
+        assert!(!should_attach_monitor_audio(true, false));
+    }
+
+    #[test]
+    fn game_capture_never_attaches_wasapi_audio() {
+        // Game-capture uses the OBS hook's audio tap via
+        // `set_capture_audio(true)`. Attaching WASAPI on top would
+        // double desktop audio and is explicitly warned against by the
+        // OBS GameCaptureSource docstring.
+        assert!(!should_attach_monitor_audio(false, true));
+        assert!(!should_attach_monitor_audio(false, false));
+    }
+
+    #[test]
+    fn audio_channel_layout_matches_obs_convention() {
+        // Channel 0 is reserved for the scene (video). Channels 1 and 2
+        // host desktop-audio and mic, matching the OBS Studio `Desktop
+        // Audio`/`Mic/Aux` layout and the libobs `raw_calls.rs` example.
+        // Regression-guard the constants: swapping these two would push
+        // the mic into the "desktop" bus and vice versa, which would
+        // silently change every downstream recording's audio routing.
+        assert_eq!(DESKTOP_AUDIO_CHANNEL, 1);
+        assert_eq!(MICROPHONE_AUDIO_CHANNEL, 2);
+        assert_ne!(DESKTOP_AUDIO_CHANNEL, MICROPHONE_AUDIO_CHANNEL);
+        // OBS's global audio bus index tops out at 5; channel 0 is the
+        // scene/video channel.
+        assert!(DESKTOP_AUDIO_CHANNEL >= 1 && DESKTOP_AUDIO_CHANNEL <= 5);
+        assert!(MICROPHONE_AUDIO_CHANNEL >= 1 && MICROPHONE_AUDIO_CHANNEL <= 5);
+    }
+
+    #[test]
+    fn wasapi_source_ids_match_obs_plugin_names() {
+        // These are the canonical OBS input type IDs registered by
+        // `obs-plugins/win-capture/wasapi.c`. Typos here mean
+        // `ObsSourceRef::new` returns NullPointer at runtime on Windows
+        // and the scene ends up silent again — so lock the strings in.
+        assert_eq!(WASAPI_OUTPUT_CAPTURE_ID, "wasapi_output_capture");
+        assert_eq!(WASAPI_INPUT_CAPTURE_ID, "wasapi_input_capture");
+    }
+
+    #[test]
+    fn record_microphone_defaults_to_off() {
+        // Privacy default: users must opt in to mic recording. A
+        // regression that flips this to `true` is a consent bug, not
+        // just a feature toggle — guard it explicitly. The consent
+        // disclosure in `src/ui/consent.md` states "the software
+        // cannot record microphone audio", so the default shape on
+        // disk must keep matching that claim until the disclosure PR
+        // lands.
+        let prefs = crate::config::Preferences::default();
+        assert!(
+            !prefs.record_microphone,
+            "record_microphone must default to false (privacy / consent)"
+        );
     }
 }

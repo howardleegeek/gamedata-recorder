@@ -63,6 +63,11 @@ impl VideoRecorder for ObsSocketRecorder {
         game_exe: &str,
         _video_settings: EncoderSettings,
         _game_config: crate::config::GameConfig,
+        // Socket backend always uses OBS's window/game capture source with
+        // `capture_audio: true` (see input_settings below), which taps per-
+        // application audio via the hook. Microphone capture is a monitor-
+        // capture-only concept, so the flag is inert for this backend.
+        _record_microphone: bool,
         (base_width, base_height): (u32, u32),
         // TODO: hook / start events
         _event_stream: InputEventStream,

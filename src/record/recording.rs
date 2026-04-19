@@ -29,6 +29,11 @@ pub(crate) struct RecordingParams {
     pub hwnd: HWND,
     pub video_settings: EncoderSettings,
     pub game_config: GameConfig,
+    /// Capture microphone input alongside desktop audio in monitor-capture
+    /// mode. Propagated to the video recorder so it can attach a WASAPI
+    /// input source. Default is `false` at the config layer; see
+    /// `crate::config::Preferences::record_microphone`.
+    pub record_microphone: bool,
 }
 
 pub(crate) struct Recording {
@@ -67,6 +72,7 @@ impl Recording {
             hwnd,
             video_settings,
             game_config,
+            record_microphone,
         } = params;
 
         let start_time = SystemTime::now();
@@ -88,6 +94,7 @@ impl Recording {
                 &game_exe,
                 video_settings,
                 game_config,
+                record_microphone,
                 game_resolution,
                 input_stream.clone(),
                 consent,

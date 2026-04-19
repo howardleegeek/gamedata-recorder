@@ -33,12 +33,17 @@ pub trait VideoRecorder {
     fn id(&self) -> &'static str;
     fn available_encoders(&self) -> &[VideoEncoderType];
 
-    /// Start recording.
+    /// Start a recording.
     ///
     /// R46: `consent` MUST be `ConsentStatus::Granted`. Implementations MUST
     /// call `consent.require_granted()?` before initializing any OBS source,
     /// opening any capture pipeline, or writing any bytes to disk. This is
     /// the final gate before video/audio capture begins.
+    ///
+    /// `record_microphone` on `RecordingParams`: capture microphone input
+    /// alongside desktop audio in monitor-capture mode. Recorders that use
+    /// OBS's game-capture hook (or the socket backend's window-capture)
+    /// ignore this — the hook already taps game/desktop audio directly.
     #[allow(clippy::too_many_arguments)]
     async fn start_recording(
         &mut self,
@@ -48,6 +53,7 @@ pub trait VideoRecorder {
         game_exe: &str,
         video_settings: EncoderSettings,
         game_config: GameConfig,
+        record_microphone: bool,
         game_resolution: (u32, u32),
         event_stream: InputEventStream,
         consent: ConsentGuard,
@@ -225,6 +231,7 @@ impl Recorder {
                     .get(&game_exe_without_extension)
                     .cloned()
                     .unwrap_or_default(),
+                record_microphone: config.preferences.record_microphone,
             };
             // Compute the guard again under the same lock snapshot so we
             // don't race with the user revoking consent between the top-of-

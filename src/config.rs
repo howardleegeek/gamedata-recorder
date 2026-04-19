@@ -68,6 +68,16 @@ pub struct Preferences {
     pub honk_volume: u8,
     #[serde(default)]
     pub audio_cues: AudioCues,
+    /// Capture microphone audio alongside desktop audio when using monitor
+    /// capture. Default: false — microphone is OFF by default to avoid
+    /// privacy surprises. Desktop audio is always captured in monitor-capture
+    /// mode; this flag only controls whether the default input device is
+    /// additionally routed into the recording.
+    ///
+    /// Game-capture (hook) mode is unaffected: it taps game audio via the
+    /// OBS hook and does not consult this flag.
+    #[serde(default)]
+    pub record_microphone: bool,
     #[serde(default)]
     pub recording_backend: RecordingBackend,
     #[serde(default)]
@@ -92,6 +102,7 @@ impl Default for Preferences {
             honk: Default::default(),
             honk_volume: default_honk_volume(),
             audio_cues: Default::default(),
+            record_microphone: false,
             recording_backend: Default::default(),
             encoder: Default::default(),
             recording_location: default_recording_location(),
