@@ -36,12 +36,18 @@ pub fn validate_folder(path: &Path) -> eyre::Result<ValidationResult> {
     match validate_folder_impl(path) {
         Ok(result) => Ok(result),
         Err(e) => {
+            let reasons = e.join("\n");
+            tracing::warn!(
+                "Recording at {} failed validation: {}",
+                path.display(),
+                reasons
+            );
             std::fs::write(
                 path.join(constants::filename::recording::INVALID),
-                e.join("\n"),
+                &reasons,
             )
             .ok();
-            eyre::bail!("Validation failures: {}", e.join("\n"));
+            eyre::bail!("Validation failures: {reasons}");
         }
     }
 }
