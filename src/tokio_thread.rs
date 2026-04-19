@@ -1416,7 +1416,10 @@ impl State {
     /// Triggers auto-upload if the preference is enabled.
     /// Should be called after a recording is completed/saved.
     async fn maybe_trigger_auto_upload(&self) {
-        let config = self.app_state.config.read().unwrap();
+        let Ok(config) = self.app_state.config.read() else {
+            tracing::error!("Config RwLock poisoned in maybe_trigger_auto_upload, skipping");
+            return;
+        };
         let auto_upload_enabled = config.preferences.auto_upload_on_completion;
         let has_api_key = !config.credentials.api_key.is_empty();
         let skip_api_key = std::env::var("GAMEDATA_SKIP_API_KEY").is_ok();
