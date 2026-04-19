@@ -13,7 +13,7 @@ use windows::Win32::{
     Foundation::HWND,
     UI::WindowsAndMessaging::{
         FLASHW_STOP, FLASHWINFO, FlashWindowEx, GWL_EXSTYLE, GetWindowLongPtrW, SW_HIDE,
-        SW_SHOWDEFAULT, SetWindowLongPtrW, ShowWindow, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+        SW_SHOWNA, SetWindowLongPtrW, ShowWindow, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
         WS_EX_TOOLWINDOW,
     },
 };
@@ -117,7 +117,7 @@ impl OverlayApp {
                 ex_style &= !(WS_EX_APPWINDOW.0 as isize); // Remove from Alt+Tab
                 SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style);
 
-                let _ = ShowWindow(hwnd, SW_SHOWDEFAULT); // show the window for the new style to come into effect
+                let _ = ShowWindow(hwnd, SW_SHOWNA); // show the window for the new style to come into effect
             }
         }
 
@@ -138,7 +138,7 @@ impl OverlayApp {
             unsafe {
                 let _ = ShowWindow(
                     HWND(hwnd as *mut std::ffi::c_void),
-                    if visible { SW_SHOWDEFAULT } else { SW_HIDE },
+                    if visible { SW_SHOWNA } else { SW_HIDE },
                 );
             }
         }
