@@ -288,9 +288,9 @@ pub const MAX_IDLE_DURATION: Duration = Duration::from_secs(30);
 /// enough time to complete their initialization before we give up on game capture.
 pub const HOOK_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Minimum average FPS. We allow some leeway below 60 FPS, but we want to make sure
-/// we aren't getting 30-40 FPS data.
-pub const MIN_AVERAGE_FPS: f64 = FPS as f64 * 0.9;
+/// Minimum average FPS. Set low to support integrated GPUs and low-end machines.
+/// Even low-FPS recordings contain useful training data for AI world models.
+pub const MIN_AVERAGE_FPS: f64 = 5.0;
 
 // Play-time tracker
 /// Whether or not to use testing constants (should always be false in production)

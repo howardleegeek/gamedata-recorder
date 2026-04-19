@@ -139,13 +139,32 @@ fn validate_files(
     mp4_path: &Path,
     csv_path: &Path,
 ) -> eyre::Result<(InputStats, Vec<String>)> {
-    let events = std::fs::read_to_string(csv_path)
-        .with_context(|| format!("Error reading CSV file at {csv_path:?})"))?
+    let file_content = std::fs::read_to_string(csv_path)
+        .with_context(|| format!("Error reading input file at {csv_path:?}"))?;
+
+    // Detect format: JSONL (starts with '{') or CSV (has a header line)
+    let is_jsonl = file_content
         .lines()
-        .skip(1)
-        .map(InputEvent::from_str)
-        .collect::<Result<Vec<_>, _>>()
-        .with_context(|| format!("Error parsing CSV file at {csv_path:?}"))?;
+        .next()
+        .map_or(false, |line| line.trim_start().starts_with('{'));
+
+    let events: Vec<InputEvent> = if is_jsonl {
+        // JSONL format: each line is a JSON object
+        file_content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line))
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| format!("Error parsing JSONL input file at {csv_path:?}"))?
+    } else {
+        // Legacy CSV format: skip header, parse comma-separated
+        file_content
+            .lines()
+            .skip(1)
+            .map(InputEvent::from_str)
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| format!("Error parsing CSV input file at {csv_path:?}"))?
+    };
 
     let start_time = events
         .iter()
