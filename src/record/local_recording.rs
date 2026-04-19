@@ -539,12 +539,15 @@ impl LocalRecording {
         gamepads: HashMap<input_capture::GamepadId, input_capture::GamepadMetadata>,
         recorder_id: &str,
         recorder_extra: Option<serde_json::Value>,
+        frame_count: Option<u64>,
     ) -> Result<()> {
         // Resolve metadata path from recording location
         let metadata_path = recording_location.join(constants::filename::recording::METADATA);
 
         // Create metadata
+        let duration_nanos = start_instant.elapsed().as_nanos();
         let duration = start_instant.elapsed().as_secs_f64();
+        let end_system_time = SystemTime::now();
 
         let start_timestamp = start_time
             .duration_since(UNIX_EPOCH)
@@ -553,13 +556,31 @@ impl LocalRecording {
                 tracing::warn!("Start time before UNIX epoch, using 0");
                 0.0
             });
-        let end_timestamp = SystemTime::now()
+        let end_timestamp = end_system_time
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
             .unwrap_or_else(|_| {
                 tracing::warn!("Current time before UNIX epoch, using 0");
                 0.0
             });
+
+        // Effective FPS from frame count and duration — mirrors competitor semantics
+        // and will differ from `average_fps` when frames were dropped at the edges.
+        let fps_effective = frame_count.and_then(|n| {
+            if duration > 0.0 {
+                Some(n as f64 / duration)
+            } else {
+                None
+            }
+        });
+
+        // Wall-clock strings in RFC 3339 for human-friendly audit trails.
+        let wall_clock_start = chrono::DateTime::<chrono::Utc>::from(start_time).to_rfc3339();
+        let wall_clock_end = chrono::DateTime::<chrono::Utc>::from(end_system_time).to_rfc3339();
+
+        // Capture resolution is what we encoded — currently fixed by constants::RECORDING_*.
+        // Exposed as a field so downstream tools don't have to hard-code the constant.
+        let capture_resolution = (constants::RECORDING_WIDTH, constants::RECORDING_HEIGHT);
 
         let hardware_id = hardware_id::get()?;
 
@@ -602,6 +623,13 @@ impl LocalRecording {
             recorder_extra,
             window_name,
             average_fps,
+            platform: Some("Windows".to_string()),
+            fps_effective,
+            frame_count,
+            duration_ns: Some(duration_nanos as u64),
+            capture_resolution: Some(capture_resolution),
+            wall_clock_start: Some(wall_clock_start),
+            wall_clock_end: Some(wall_clock_end),
         };
 
         // Write metadata to disk using atomic write pattern (write .tmp then rename).

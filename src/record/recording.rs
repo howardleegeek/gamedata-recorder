@@ -195,10 +195,15 @@ impl Recording {
             }
         }
 
-        // Save per-second FPS log (buyer spec requirement)
-        if let Err(e) = self.fps_logger.save(&self.recording_location).await {
-            tracing::warn!("Failed to save FPS log: {e}");
-        }
+        // Save per-second FPS log + per-frame frames.jsonl (buyer spec requirement).
+        // Frame count is captured here and forwarded to metadata below.
+        let frame_count = match self.fps_logger.save(&self.recording_location).await {
+            Ok(n) => Some(n),
+            Err(e) => {
+                tracing::warn!("Failed to save FPS log / frames.jsonl: {e}");
+                None
+            }
+        };
 
         #[allow(clippy::collapsible_if)]
         if result.is_ok() {
@@ -241,6 +246,7 @@ impl Recording {
             gamepads,
             recorder.id(),
             result.as_ref().ok().cloned(),
+            frame_count,
         )
         .await?;
 

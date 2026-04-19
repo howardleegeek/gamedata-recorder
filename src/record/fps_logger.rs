@@ -16,6 +16,17 @@ pub struct FpsLogEntry {
     pub frame_time_max_ms: f64,
 }
 
+/// A single row of `frames.jsonl` — frame index + elapsed nanoseconds since
+/// recording start. Matches the competitor's schema so downstream tooling can
+/// consume either output unchanged.
+#[derive(Debug, Serialize)]
+pub struct FrameTimestamp {
+    /// Zero-based frame index.
+    pub idx: u64,
+    /// Nanoseconds since recording start.
+    pub t_ns: u64,
+}
+
 /// Maximum FPS log entries to keep in memory (10 minutes at 1 entry/second = 600).
 /// Older entries are dropped to prevent unbounded growth during long sessions.
 const MAX_FPS_ENTRIES: usize = 600;
@@ -32,6 +43,13 @@ pub struct FpsLogger {
     last_frame_time: Option<std::time::Instant>,
     /// When the recording started
     start_instant: std::time::Instant,
+    /// Rolling total of frames observed across the entire recording.
+    /// Unlike `entries`, this is never capped — we need the exact count for
+    /// the final metadata.json.
+    total_frames: u64,
+    /// Per-frame {idx, t_ns} rows destined for frames.jsonl.
+    /// Memory footprint: ~16B per entry uncompressed × 60fps × 600s ≈ 600KB for a 10-min recording.
+    frame_timestamps: Vec<FrameTimestamp>,
 }
 
 impl FpsLogger {
@@ -42,14 +60,27 @@ impl FpsLogger {
             current_second: 0,
             last_frame_time: None,
             start_instant: std::time::Instant::now(),
+            total_frames: 0,
+            frame_timestamps: Vec::new(),
         }
+    }
+
+    /// Total frames observed since recording started.
+    pub fn total_frames(&self) -> u64 {
+        self.total_frames
+    }
+
+    /// Elapsed wall-clock time since `FpsLogger::new()` was called.
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.start_instant.elapsed()
     }
 
     /// Called each time a video frame is captured.
     /// Records the inter-frame interval for FPS calculation.
     pub fn on_frame(&mut self) {
         let now = std::time::Instant::now();
-        let elapsed_seconds = now.duration_since(self.start_instant).as_secs();
+        let elapsed = now.duration_since(self.start_instant);
+        let elapsed_seconds = elapsed.as_secs();
 
         // If we've moved to a new second, finalize the previous one
         while self.current_second < elapsed_seconds {
@@ -63,6 +94,15 @@ impl FpsLogger {
             let frame_time_ms = now.duration_since(last).as_secs_f64() * 1000.0;
             self.current_second_frame_times.push(frame_time_ms);
         }
+
+        // Append this frame to frames.jsonl buffer and bump the cumulative counter.
+        // `total_frames` is used as the next frame's idx BEFORE increment so the
+        // first frame is idx=0.
+        self.frame_timestamps.push(FrameTimestamp {
+            idx: self.total_frames,
+            t_ns: elapsed.as_nanos() as u64,
+        });
+        self.total_frames += 1;
 
         self.last_frame_time = Some(now);
     }
@@ -111,21 +151,42 @@ impl FpsLogger {
         self.entries.last().map(|e| e.fps as f64)
     }
 
-    /// Finalize and write fps_log.json to the session directory.
-    pub async fn save(mut self, session_dir: &Path) -> Result<()> {
+    /// Finalize and persist both `fps_log.json` (per-second aggregate) and
+    /// `frames.jsonl` (per-frame timestamps) to the session directory.
+    ///
+    /// Returns the total number of frames observed, so callers can populate
+    /// `frame_count` in the session metadata without a second pass.
+    pub async fn save(mut self, session_dir: &Path) -> Result<u64> {
         // Finalize any remaining data in the current second
         if !self.current_second_frame_times.is_empty() {
             self.finalize_current_second();
         }
 
-        let path = session_dir.join(constants::filename::recording::FPS_LOG);
-        let json = serde_json::to_string_pretty(&self.entries)?;
-        tokio::fs::write(&path, json).await?;
+        let fps_log_path = session_dir.join(constants::filename::recording::FPS_LOG);
+        let fps_json = serde_json::to_string_pretty(&self.entries)?;
+        tokio::fs::write(&fps_log_path, fps_json).await?;
         tracing::info!(
             "FPS log saved: {} entries to {:?}",
             self.entries.len(),
-            path
+            fps_log_path
         );
-        Ok(())
+
+        // Write frames.jsonl — one JSON object per line, no pretty-printing.
+        // Pre-size the buffer by average line length (~32 bytes) to avoid reallocations.
+        let mut jsonl = String::with_capacity(self.frame_timestamps.len() * 32);
+        for ft in &self.frame_timestamps {
+            let line = serde_json::to_string(ft)?;
+            jsonl.push_str(&line);
+            jsonl.push('\n');
+        }
+        let frames_path = session_dir.join(constants::filename::recording::FRAMES_JSONL);
+        tokio::fs::write(&frames_path, jsonl).await?;
+        tracing::info!(
+            "Frames JSONL saved: {} frames to {:?}",
+            self.frame_timestamps.len(),
+            frames_path
+        );
+
+        Ok(self.total_frames)
     }
 }

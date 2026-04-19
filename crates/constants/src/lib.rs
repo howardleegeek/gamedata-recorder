@@ -354,6 +354,9 @@ pub mod filename {
         pub const METADATA: &str = "metadata.json";
         /// Per-second FPS log (buyer spec requirement)
         pub const FPS_LOG: &str = "fps_log.json";
+        /// Per-frame timestamp log — one `{idx, t_ns}` JSON object per line.
+        /// Enables precise frame-to-input alignment downstream.
+        pub const FRAMES_JSONL: &str = "frames.jsonl";
     }
 
     pub mod persistent {

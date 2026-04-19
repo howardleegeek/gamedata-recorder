@@ -45,6 +45,30 @@ pub struct Metadata {
     pub recorder_extra: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub average_fps: Option<f64>,
+    /// Target OS of the recording — mirrors the competitor's `platform` field.
+    /// Always "Windows" for this build; kept as a string to stay forward-compatible.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub platform: Option<String>,
+    /// Effective (measured) FPS derived from `frame_count / duration`. May differ
+    /// from `average_fps`, which is the live-sampled running average.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fps_effective: Option<f64>,
+    /// Total frames observed by the FPS logger during this recording.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub frame_count: Option<u64>,
+    /// Recording duration in nanoseconds — higher precision than `duration` seconds.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub duration_ns: Option<u64>,
+    /// Capture resolution in pixels — the dimensions encoded into the video.
+    /// Distinct from `game_resolution`, which is the game's backbuffer size.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub capture_resolution: Option<(u32, u32)>,
+    /// Wall-clock start in RFC 3339 — human-readable companion to `start_timestamp`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub wall_clock_start: Option<String>,
+    /// Wall-clock end in RFC 3339.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub wall_clock_end: Option<String>,
 }
 
 #[derive(Debug)]

@@ -764,38 +764,20 @@ fn video_info(adapter_index: usize, (base_width, base_height): (u32, u32)) -> Ob
         .build()
 }
 
-/// Choose the monitor index in `monitors` that the given game window is on.
+/// Pointer value of the HMONITOR that `hwnd` is currently on, or 0 if unavailable.
 ///
-/// Uses the Win32 `MonitorFromWindow` API to get the HMONITOR for `hwnd`,
-/// then matches it against the `raw_handle` of each DisplayInfo. Returns 0
-/// (primary monitor) when the HMONITOR can't be matched — callers must
-/// ensure `monitors` is non-empty.
-fn select_monitor_for_hwnd<M>(hwnd: HWND, monitors: &[M]) -> usize
-where
-    M: std::ops::Deref<Target = display_info::DisplayInfo>,
-{
-    // SAFETY: MonitorFromWindow is a pure Win32 query — it takes a HWND and
-    // returns an HMONITOR (or NULL). No mutation, no ownership. MONITOR_DEFAULTTONEAREST
-    // guarantees a non-null result even if the window is off-screen.
+/// The pointer is the universal key across `windows` crate versions — `display_info`
+/// is pinned to an older `windows` version than we use, so we compare HMONITORs
+/// as raw pointer values rather than by typed equality.
+fn hmonitor_ptr_for_hwnd(hwnd: HWND) -> usize {
+    // SAFETY: MonitorFromWindow is a pure read-only Win32 query; it returns an
+    // HMONITOR (or NULL). MONITOR_DEFAULTTONEAREST guarantees a non-null result
+    // even when the window sits outside any display rectangle.
     let target: HMONITOR = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
     if target.is_invalid() {
-        tracing::warn!("MonitorFromWindow returned invalid handle, falling back to primary monitor");
         return 0;
     }
-
-    for (idx, m) in monitors.iter().enumerate() {
-        // DisplayInfo::raw_handle on Windows is HMONITOR (a raw pointer).
-        // Compare as pointer values — same monitor means same HMONITOR.
-        if m.raw_handle.0 as isize == target.0 as isize {
-            return idx;
-        }
-    }
-
-    tracing::warn!(
-        "No DisplayInfo matched HMONITOR {:?} for window, falling back to primary monitor",
-        target.0
-    );
-    0
+    target.0 as usize
 }
 
 fn find_game_capture_window(game_exe: Option<&str>, hwnd: HWND) -> Result<WindowInfo> {
@@ -877,9 +859,27 @@ fn prepare_source(
             }
         } else {
             // Pick the monitor the game window currently lives on — falls back
-            // to primary when MonitorFromWindow can't resolve or when there's
-            // no matching DisplayInfo entry for the HMONITOR.
-            let monitor_idx = select_monitor_for_hwnd(hwnd, &monitors);
+            // to primary when MonitorFromWindow can't resolve or when the HMONITOR
+            // doesn't match any enumerated DisplayInfo.
+            let target_ptr = hmonitor_ptr_for_hwnd(hwnd);
+            let monitor_idx = if target_ptr == 0 {
+                tracing::warn!(
+                    "MonitorFromWindow failed, falling back to primary monitor (index 0)"
+                );
+                0
+            } else {
+                monitors
+                    .iter()
+                    .position(|m| m.0.raw_handle.0 as usize == target_ptr)
+                    .unwrap_or_else(|| {
+                        tracing::warn!(
+                            "HMONITOR {target_ptr:#x} not matched in {} enumerated monitors, \
+                             falling back to primary (index 0)",
+                            monitors.len()
+                        );
+                        0
+                    })
+            };
             let monitor = &monitors[monitor_idx];
             tracing::info!(
                 "Capturing monitor {} of {}: {:?}",
