@@ -245,3 +245,122 @@ This document tracks every bug discovered during client red-team + real-user tes
 ---
 
 *Last updated: v2.5.1 release (2026-04-19)*
+
+---
+
+# Addendum — v2.5.2 → v2.5.7 (2026-04-19)
+
+After v2.5.1 shipped we ran a 50-round parallel audit (see `MEGA_AUDIT.md`) that surfaced ~110 unique defects. 5 client-blocking ones landed in v2.5.5 (Gate A), and a further 9-agent batch landed in v2.5.7 (Gate B). This addendum tracks them.
+
+## Gate A — v2.5.5 (shipped 2026-04-19)
+
+### BUG-038: `find_window_for_pid(_pid)` ignored its parameter
+- **Symptom**: Recording captured the desktop / Rockstar launcher instead of the actual game window.
+- **Root cause**: `find_window_for_pid` returned `GetForegroundWindow()` regardless of the PID argument, so any focus change mid-startup (launcher → game) lost the target.
+- **Fix (v2.5.4)**: Real `EnumWindows` callback with PID filter + largest-visible-window heuristic; launcher-title blocklist + self-PID guard.
+- **File**: `src/record/recorder.rs`.
+
+### BUG-039: JSONL → CSV reconstruction zeroed `input_stats`
+- **Symptom**: Every recording's metadata reported `mouse_moves: 0, key_presses: 0, ...` regardless of actual input activity.
+- **Root cause**: Validation re-serialized JSONL into CSV then parsed back, splitting `"MOUSE_MOVE,[10,5]"` on the comma inside the JSON array → `event_args = "5]"` (invalid JSON) → silent drop.
+- **Fix (v2.5.5)**: Parse JSONL directly via `parse_jsonl_event`, skip the CSV round-trip.
+- **File**: `src/validation/mod.rs`.
+
+### BUG-040: 200ms `thread::sleep` in stop path + mpsc capacity 10 dropped input
+- **Symptom**: Stop-recording lost 100+ keyboard/mouse events at the tail of every session.
+- **Root cause**: Tokio runtime stalled on a 200ms sleep waiting for OBS skipped-frames log; meanwhile the Win32 raw-input thread `blocking_send`-ed into a 10-slot channel that backed up and overflowed.
+- **Fix (v2.5.5)**: mpsc capacity 10 → 10_000; sleep replaced with `tokio::sync::Notify` signaled by OBS log.
+- **Files**: `crates/input-capture/src/lib.rs`, `src/record/obs_embedded_recorder.rs`.
+
+### BUG-041: ANSI `PROCESSENTRY32` blind to Chinese locale
+- **Symptom**: Chinese Windows users (华硕 client) had the recorder silently skip game processes whose paths contained non-ASCII characters.
+- **Fix (v2.5.5)**: Migrated to W-suffix wide APIs (`QueryFullProcessImageNameW`, `PROCESSENTRY32W`).
+- **File**: `crates/game-process/src/lib.rs`.
+
+### BUG-042: `wmic` NVENC probe missing on Win11 22H2+ / N / LTSC
+- **Symptom**: NVIDIA users on newer/stripped SKUs silently fell back to x264 software encoding.
+- **Root cause**: `wmic.exe` deprecated on Win11 22H2+, absent on Windows N / LTSC / Group-Policy-hardened installs; shell-out swallowed the error.
+- **Fix (v2.5.5)**: Direct DXGI adapter enumeration via `wgpu::Instance::enumerate_adapters(DX12)` and `PCI_VENDOR == 0x10DE`.
+- **File**: `src/config.rs`.
+
+## Gate B — v2.5.7 (shipped 2026-04-19, 9-agent batch)
+
+### BUG-043 (R47): Kernel-anti-cheat titles in supported-games whitelist
+- **Symptom**: Testers recording Escape from Tarkov / Halo Infinite / Hell Let Loose / Arma 3 / CoD: Vanguard / Valorant / LoL would trip BattlEye / EAC kernel / Ricochet / Vanguard and risk HWID bans.
+- **Root cause**: Upstream OWL Control whitelisted all popular titles without considering anti-cheat architecture. Our `OpenProcess(PROCESS_QUERY_INFORMATION)` + `TH32CS_SNAPMODULE` is a documented ban vector against kernel AC.
+- **Fix (v2.5.7)**: Removed 7 kernel-AC titles from `GAME_WHITELIST`, added `supported_games.README.md` documenting policy (no kernel-AC titles ever).
+- **File**: `crates/constants/src/supported_games.json`, `crates/constants/src/lib.rs`.
+
+### BUG-044 (R46): Consent gate bypassed — GDPR/CCPA exposure
+- **Symptom**: Raw Input hooks + OBS capture installed before any consent UI was shown. Disclosure said "during gameplay" but we captured system-wide keyboard/mouse from startup.
+- **Root cause**: ConsentView routing was commented out in `src/ui/views/mod.rs:321` during an earlier refactor.
+- **Fix (v2.5.7)**: `ConsentGuard` type threaded through `InputCapture::new`, `VideoRecorder::start_recording`, `Recorder::start`. `ConsentStatus::Granted` required before any hook install. Semver-bumped consent invalidates stored acceptance. Disclosure rewritten to accurately state monitor-wide video + global keyboard/mouse.
+- **Files**: `src/ui/views/mod.rs`, `src/config.rs`, `crates/input-capture/src/{lib,kbm_capture}.rs`, `src/record/{recorder,recording,obs_embedded_recorder,obs_socket_recorder}.rs`, `src/tokio_thread.rs`, `src/ui/consent.md`.
+
+### BUG-045: Silent audio in monitor-capture recordings
+- **Symptom**: When monitor-capture (default since v2.5.4) was used, MP4s had no audio track.
+- **Root cause**: OBS scene for monitor-capture had no audio source attached. Game-capture (hook) mode worked because OBS's hook injects its own audio tap.
+- **Fix (v2.5.7)**: `wasapi_output_capture` on channel 1 (desktop audio); optional `wasapi_input_capture` on channel 2 (microphone, default OFF for privacy). Clear + detach on stop to avoid dangling refs.
+- **File**: `src/record/obs_embedded_recorder.rs`, `src/config.rs` (`record_microphone: bool` preference).
+
+### BUG-046: Metadata could reference an unflushed MP4 on crash
+- **Symptom**: Power-loss mid-stop left MP4 without moov atom finalized, while `metadata.json` referenced it as if valid.
+- **Fix (v2.5.7)**: New `src/util/durable_write.rs` helper (write-tmp → fsync → rename → dir-sync). 16 final-path writes converted. MP4 `File::sync_all()` in a `spawn_blocking` task between OBS stop and metadata write.
+- **Files**: `src/util/durable_write.rs` (new), `src/validation/mod.rs`, `src/record/local_recording.rs`, `src/record/recording.rs`, `src/record/fps_logger.rs`, `src/record/metadata_writer.rs`, `src/record/session_manager.rs`, `src/play_time.rs`, `src/config.rs`.
+
+### BUG-047: Three Windows-specific attack classes open at startup
+- **DLL hijack**: no `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)` at startup; a planted DLL in the app folder could preempt System32.
+- **Symlink attack**: `recording_location` was user-configurable with no validation; a malicious symlink to `C:\Windows\System32` could turn a "safe cleanup" into a system-file wipe.
+- **Plaintext API key**: `config.json` stored `api_key` as plaintext — anyone exfil-ing the file had login.
+- **Fix (v2.5.7)**: DLL search lockdown top of `main()`. `validate_recording_location` wired at load/pick/confirm. DPAPI-wrap `api_key` via custom Serialize/Deserialize; legacy plaintext auto-migrates on first save.
+- **Files**: `src/main.rs`, `src/config.rs`, `Cargo.toml`.
+- **Migration note**: Users with `recording_location` outside `%LocalAppData%` are silently reset to default on first launch.
+
+### BUG-048: OBS shutdown stalled on 200ms sleep + recorder Drop blocked forever
+- **Symptom**: Stop-recording tail path stalled tokio; recorder thread Drop could hang process shutdown indefinitely on OBS bug.
+- **Fix (v2.5.7)**: `tokio::sync::Notify` + 3s timeout for OBS log-line wait. `JoinHandle::is_finished()` poll loop with 3s deadline in Drop; abandon + warn after timeout. `LemInputStream::stop` retry loop with deadline.
+- **File**: `src/record/obs_embedded_recorder.rs`, `src/record/lem_input_recorder.rs`.
+
+### BUG-049: Five hardcoded metadata stubs polluting AI training data
+- **Symptom**: Every recording's metadata reported the same `"NVMe SSD"` / `"Unknown"` GPU / FOV `90` / wrong CPU-core count / heartbeat-approximated FPS — regardless of actual hardware.
+- **Fix (v2.5.7)**: `src/system/disk_type.rs` detects via `GetDriveTypeW` + `IOCTL_STORAGE_QUERY_PROPERTY` (NVMe / SATA SSD / SATA HDD / USB). GPU from DXGI adapter list already enumerated at startup. `FrameStats` parses OBS's `X/TOTAL` skipped-frames counter (real FPS). CPU/RAM from `sysinfo`. FOV changed `u32 → Option<f32>` (analysts were ignoring the stub anyway).
+- **Files**: `src/system/disk_type.rs` (new), `src/record/metadata_writer.rs`, `src/output_types/lem_metadata.rs`.
+
+### BUG-050: Session folder collision on second-boundary restarts
+- **Symptom**: Two recordings starting within the same wall-clock second overwrote each other's folders.
+- **Fix (v2.5.7)**: UUIDv4 8-hex suffix on session folder names: `session_YYYYMMDD_HHMMSS_<xxxxxxxx>`. Parser handles new + old + legacy formats.
+- **Files**: `src/tokio_thread.rs` (`generate_session_dir_name`), `src/record/session_manager.rs` (`generate_session_id`), `src/record/local_recording.rs` (`parse_session_timestamp`).
+
+### BUG-051: Upload queue race on stop-recording
+- **Symptom**: Rapid stop events could double-enqueue the same session to the upload worker. S3 idempotency saved us from corruption but we burned bandwidth and backend could flag us as a duplicate-upload actor.
+- **Fix (v2.5.7)**: Replaced `RwLock<Vec<T>>` with `tokio::sync::mpsc::UnboundedSender<UploadTrigger>`. Worker task owns receiver + `HashSet<PathBuf>` dedup. Enqueue is now branch-free.
+- **Files**: `src/upload/mod.rs`, `src/app_state.rs`, `src/main.rs`, `src/tokio_thread.rs`, `src/record/recorder.rs`.
+
+### BUG-052 (R33): Hotkey `RwLock<bool>` TOCTOU
+- **Symptom**: Two rapid "rebind hotkey" clicks could both succeed and one would overwrite the other's target.
+- **Fix (v2.5.7)**: `AtomicListeningForNewHotkey` wrapper over `AtomicU32` (2-bit tag + target + 16-bit captured key). `begin_listening()` uses `compare_exchange` → lost race returns false. 32-thread Barrier test proves single winner.
+- **File**: `src/app_state.rs`.
+
+### BUG-053: DPI-virtualized monitor capture
+- **Symptom**: On 125%/150% DPI displays Windows reported a scaled resolution to our unaware process; we captured at 1536×864 instead of 1920×1080 and input coordinates were off.
+- **Fix (v2.5.7)**: `embed-manifest` DPI awareness set to `PerMonitorV2` (Win10 1607+) + `true/pm` legacy fallback. Monitor DPI scale logged at recording start for debugging.
+- **Files**: `build.rs`, `src/record/obs_embedded_recorder.rs`.
+
+### BUG-054: CI `windows::Win32::Foundation::BOOL` regression (build-breaking)
+- **Symptom**: Every commit since v2.5.4 had red CI. `BOOL` was relocated to `windows::core::BOOL` in `windows` crate 0.60+. Local nucbox build resolved differently and hid the error.
+- **Fix (v2.5.6 intermediate)**: Changed import path; callback ABI unchanged.
+- **File**: `src/record/recorder.rs`.
+
+---
+
+## Deferred to v2.5.8
+
+- **BUG-055 (R-DXGI): workstation lock (Win+L / RDP) crashes monitor-capture recording** — `DXGI_ERROR_ACCESS_LOST` should pause OBS output + poll for session return, resume on success, give up at 5 min. Agent delivered the patch but it had 5-way conflicts with audio + shutdown + consent PRs in `obs_embedded_recorder.rs`; rebasing fresh against v2.5.7 main.
+
+## Still in Gate C (v3.0 / public rollout)
+
+See `TRIAGE.md` for the full list. Highlights: content attestation (perceptual hash + server-side frame fingerprint), HID-replay detection, authenticode signing of the recorder binary, per-title anti-cheat warning before recording, sensitive-window blocklist (password managers, banking), alt-tab pause mode, monitor-capture overlay masking.
+
+---
+
+*Last updated: v2.5.7 release (2026-04-19)*
