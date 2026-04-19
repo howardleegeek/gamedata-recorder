@@ -157,7 +157,10 @@ fn validate_files(
                 let v: serde_json::Value = serde_json::from_str(line).ok()?;
                 let timestamp = v.get("timestamp")?.as_f64()?;
                 let event_type = v.get("event_type")?.as_str()?;
-                let event_args = v.get("event_args").cloned().unwrap_or(serde_json::Value::Null);
+                let event_args = v
+                    .get("event_args")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 // Reconstruct as CSV-style string for InputEvent::from_str
                 let csv_line = format!(
                     "{},{},{}",
