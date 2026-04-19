@@ -11,9 +11,7 @@ pub const GAME_WHITELIST: &[&str] = &[
     "rgame",
     // Amenti
     "amenti",
-    // ARMA 3
-    "arma3",
-    "arma3_x64",
+    // ARMA 3 — REMOVED (R47): BattlEye anti-cheat, ban vector for OpenProcess/CreateToolhelp32Snapshot
     // Battlefield Hardline
     "bfh",
     // Blacktail
@@ -43,27 +41,21 @@ pub const GAME_WHITELIST: &[&str] = &[
     "deadzonesteam",
     // Earthfall
     "earthfall",
-    // Escape from Tarkov
-    "escapefromtarkov",
-    "escapefromtarkov_be",
+    // Escape from Tarkov — REMOVED (R47): BattlEye kernel driver, HWID ban vector
     // Everyone's Gone to the Rapture
     "rapture_release",
     // Fobia - St. Dinfna Hotel
     "fobia-win64-shipping",
     // Ghost Watchers
     "ghost watchers",
-    // Halo: Infinite
-    "haloinfinite",
+    // Halo: Infinite — REMOVED (R47): Easy Anti-Cheat kernel driver, HWID ban vector
     // Hard Reset Redux
     "hr.win32",
     "hr.x64",
     "hr",
     // Hardspace: Shipbreaker
     "shipbreaker",
-    // Hell Let Loose
-    "hll",
-    "hll-win64-shipping",
-    "hllepicgamesstore",
+    // Hell Let Loose — REMOVED (R47): Easy Anti-Cheat kernel driver, HWID ban vector
     // Home Sweet Home 2
     "homesweethome2",
     "homesweethome2-win64-shipping",
@@ -169,11 +161,8 @@ pub const GAME_WHITELIST: &[&str] = &[
     "cyberpunk2077",
     // Counter-Strike 2
     "cs2",
-    // Valorant
-    "valorant-win64-shipping",
-    "valorant",
-    // League of Legends
-    "league of legends",
+    // Valorant — REMOVED (R47): Riot Vanguard kernel driver (runs at boot), HWID ban vector
+    // League of Legends — REMOVED (R47): Riot Vanguard kernel driver active in-client, HWID ban vector
     // Fortnite
     "fortniteclient-win64-shipping",
     // Minecraft (WARNING: javaw.exe is used by many Java apps, not just Minecraft)

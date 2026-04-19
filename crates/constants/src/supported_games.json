@@ -10,11 +10,6 @@
     "binaries": ["amenti"]
   },
   {
-    "game": "ARMA 3",
-    "url": "https://store.steampowered.com/app/107410/Arma_3/",
-    "binaries": ["arma3", "arma3_x64"]
-  },
-  {
     "game": "Battlefield Hardline",
     "url": "https://store.steampowered.com/app/1238880/Battlefield_Hardline/",
     "binaries": ["bfh"]
@@ -75,11 +70,6 @@
     "binaries": ["earthfall"]
   },
   {
-    "game": "Escape from Tarkov",
-    "url": "https://store.steampowered.com/app/3932890/Escape_from_Tarkov/",
-    "binaries": ["escapefromtarkov", "escapefromtarkov_be"]
-  },
-  {
     "game": "Everyone's Gone to the Rapture",
     "url": "https://store.steampowered.com/app/417880/Everybodys_Gone_to_the_Rapture/",
     "binaries": ["rapture_release"]
@@ -95,11 +85,6 @@
     "binaries": ["ghost watchers"]
   },
   {
-    "game": "Halo: Infinite",
-    "url": "https://store.steampowered.com/app/1240440/Halo_Infinite/",
-    "binaries": ["haloinfinite"]
-  },
-  {
     "game": "Hard Reset Redux",
     "url": "https://store.steampowered.com/app/407810/Hard_Reset_Redux/",
     "binaries": ["hr.win32", "hr.x64", "hr"]
@@ -108,11 +93,6 @@
     "game": "Hardspace: Shipbreaker",
     "url": "https://store.steampowered.com/app/1161580/Hardspace_Shipbreaker",
     "binaries": ["shipbreaker"]
-  },
-  {
-    "game": "Hell Let Loose",
-    "url": "https://store.steampowered.com/app/686810/Hell_Let_Loose/",
-    "binaries": ["hll", "hll-win64-shipping", "hllepicgamesstore"]
   },
   {
     "game": "Home Sweet Home 2",
