@@ -680,12 +680,15 @@ fn is_obs_running() -> bool {
     let mut is_obs_running = false;
 
     game_process::for_each_process(|process| {
-        let exe_name = unsafe { std::ffi::CStr::from_ptr(process.szExeFile.as_ptr()) };
-        let Some(file_name) = exe_name
-            .to_str()
-            .ok()
-            .map(std::path::Path::new)
-            .and_then(|p| p.file_name())
+        // v2.5.5: UTF-16 decode via `exe_file_name`. The old ANSI `CStr`
+        // decode silently dropped any non-ASCII process name on Chinese/
+        // Japanese/Cyrillic Windows, which meant OBS Studio would not be
+        // detected if the user had renamed `obs64.exe` to something with
+        // non-ASCII characters. Migrating to the wide-char path is both
+        // correct and cheap.
+        let name = game_process::exe_file_name(&process);
+        let Some(file_name) = std::path::Path::new(&name)
+            .file_name()
             .and_then(|f| f.to_str())
             .map(|f| f.to_ascii_lowercase())
         else {

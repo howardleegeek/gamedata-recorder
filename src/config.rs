@@ -1,33 +1,40 @@
-use color_eyre::eyre::{Context, Result, eyre};
+use color_eyre::eyre::{Result, eyre};
 use constants::encoding::VideoEncoderType;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 
-/// Quick probe: does any GPU report NVIDIA as its vendor?
-/// Uses `sysinfo` (already a dep) to avoid pulling in extra crates.
+/// PCI vendor ID for NVIDIA Corporation — used to identify NVIDIA GPUs in
+/// DXGI adapter enumeration. Stable across every NVIDIA GPU ever shipped.
+const NVIDIA_PCI_VENDOR_ID: u32 = 0x10DE;
+
+/// Quick probe: does any DX12-capable GPU report NVIDIA as its vendor?
+///
+/// v2.5.5: rewritten to use direct DXGI adapter enumeration via `wgpu`.
+/// v2.5.4 shelled out to `wmic path win32_VideoController get Name`, but
+/// `wmic.exe` is deprecated on Windows 11 22H2+ and absent on Windows N /
+/// LTSC / Group-Policy-hardened installs. The shell-out returned an error
+/// that was swallowed, and NVIDIA users on those systems silently stayed
+/// on X264 (software) encoding. The recorder already enumerates DX12
+/// adapters at startup (see `src/main.rs` via `wgpu::Instance`), so doing
+/// it here too is essentially free, has no external process dependency,
+/// and works on every modern Windows SKU.
 fn detect_nvidia_gpu() -> Result<bool> {
-    // sysinfo doesn't expose GPU info directly on all platforms; on Windows
-    // we can shell out to `wmic path win32_VideoController get Name` and
-    // match "NVIDIA". This is a best-effort check — false/error just keeps
-    // the existing encoder choice.
     #[cfg(target_os = "windows")]
     {
-        let output = std::process::Command::new("wmic")
-            .args(["path", "win32_VideoController", "get", "Name"])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW — no cmd popup
-            .output()
-            .wrap_err("wmic probe failed")?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        Ok(text.to_lowercase().contains("nvidia"))
+        use egui_wgpu::wgpu;
+
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let has_nvidia = instance
+            .enumerate_adapters(wgpu::Backends::DX12)
+            .into_iter()
+            .any(|adapter| adapter.get_info().vendor == NVIDIA_PCI_VENDOR_ID);
+        Ok(has_nvidia)
     }
     #[cfg(not(target_os = "windows"))]
     {
         Ok(false)
     }
 }
-
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 // camel case renames are legacy from old existing configs, we want it to be backwards-compatible with previous owl releases that used electron

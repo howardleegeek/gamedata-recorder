@@ -8,6 +8,29 @@ use serde::{Deserialize, Serialize};
 
 use crate::output_types::{InputEvent, InputEventType, Metadata};
 
+/// Parse a single JSONL input-event line directly into an `InputEvent`, bypassing
+/// the lossy CSV reconstruction we used in v2.5.4. The v2.5.4 code format-strung
+/// the fields back into `"{timestamp},{event_type},{json_args}"` and handed the
+/// result to `InputEvent::from_str`, which splits on the first two commas. For
+/// multi-arg events like `MOUSE_MOVE` with `event_args = [10,5]`, the second
+/// comma is *inside* the JSON array — so the split took `event_args = "5]"`,
+/// which is invalid JSON, the event was dropped via `.ok()`, and every
+/// recording's `input_stats` came out as near-zero.
+///
+/// Here we skip the round-trip entirely: we already have the parsed JSON
+/// fields, so we hand them straight to `InputEventType::from_id_and_json_args`.
+fn parse_jsonl_event(line: &str) -> Option<InputEvent> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let timestamp = v.get("timestamp")?.as_f64()?;
+    let event_type = v.get("event_type")?.as_str()?;
+    let event_args = v
+        .get("event_args")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let event = InputEventType::from_id_and_json_args(event_type, event_args).ok()?;
+    Some(InputEvent::new(timestamp, event))
+}
+
 pub mod gamepad;
 pub mod keyboard;
 pub mod mouse;
@@ -152,25 +175,19 @@ fn validate_files(
 
     let events: Vec<InputEvent> = if is_jsonl {
         // JSONL format: each line is {"timestamp":..., "event_type":..., "event_args":...}
+        // v2.5.5: parse the JSON line directly via parse_jsonl_event — the old
+        // CSV reconstruction path split multi-arg events on commas inside JSON
+        // arrays (e.g. MOUSE_MOVE [10,5] → "5]") and silently dropped them,
+        // zeroing every recording's input_stats.
         file_content
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| {
-                let v: serde_json::Value = serde_json::from_str(line).ok()?;
-                let timestamp = v.get("timestamp")?.as_f64()?;
-                let event_type = v.get("event_type")?.as_str()?;
-                let event_args = v
-                    .get("event_args")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                // Reconstruct as CSV-style string for InputEvent::from_str
-                let csv_line = format!(
-                    "{},{},{}",
-                    timestamp,
-                    event_type,
-                    serde_json::to_string(&event_args).unwrap_or_default()
-                );
-                InputEvent::from_str(&csv_line).ok()
+            .filter_map(|line| match parse_jsonl_event(line) {
+                Some(event) => Some(event),
+                None => {
+                    tracing::warn!("Skipping malformed JSONL input line: {line}");
+                    None
+                }
             })
             .collect()
     } else {
