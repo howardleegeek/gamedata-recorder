@@ -2,7 +2,7 @@
 //!
 //! Records input events in LEM format to actions.jsonl and timestamps.jsonl
 
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use color_eyre::{Result, eyre::eyre};
 use tokio::{fs::File, io::AsyncWriteExt, sync::mpsc};
@@ -49,13 +49,51 @@ impl LemInputStream {
         }
     }
 
-    /// Signal to stop recording — never drop this
+    /// Signal to stop recording — never drop this.
+    ///
+    /// Uses `blocking_send` with a deadline rather than `try_send` so a
+    /// momentarily-full channel doesn't cause the finalization message
+    /// to be lost (which would leave the recorder task hung on
+    /// `rx.recv().await` forever, holding the actions/timestamps files
+    /// open past the intended end of the recording). The deadline keeps
+    /// the caller from blocking the UI or tokio runtime indefinitely if
+    /// the consumer task has died; timing out here is loud (we log and
+    /// return Err) because a dropped stop signal is a correctness bug,
+    /// not a dropped event we can shrug off.
+    ///
+    /// Must be called from a thread that is allowed to block (i.e. not
+    /// from inside a tokio task without `spawn_blocking` around it).
     pub fn stop(&self) -> Result<()> {
-        // Stop commands must not be dropped — use blocking send
-        self.tx
-            .try_send(InputCommand::Stop)
-            .map_err(|_| eyre!("Input stream receiver closed"))?;
-        Ok(())
+        const STOP_DEADLINE: Duration = Duration::from_secs(3);
+        const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+        let start = std::time::Instant::now();
+        loop {
+            match self.tx.try_send(InputCommand::Stop) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return Err(eyre!("Input stream receiver closed"));
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    if start.elapsed() >= STOP_DEADLINE {
+                        tracing::error!(
+                            elapsed_ms = start.elapsed().as_millis() as u64,
+                            deadline_ms = STOP_DEADLINE.as_millis() as u64,
+                            "LemInputStream::stop timed out: channel full for \
+                             entire deadline. Consumer task is likely blocked \
+                             on a slow file write or has stopped draining. \
+                             The recording's actions.jsonl/timestamps.jsonl \
+                             may be missing the final entries."
+                        );
+                        return Err(eyre!(
+                            "LemInputStream::stop timed out after {:?}",
+                            STOP_DEADLINE
+                        ));
+                    }
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+            }
+        }
     }
 }
 

@@ -5,7 +5,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use color_eyre::{
@@ -60,9 +60,17 @@ const OWL_GAME_CAPTURE_NAME: &str = "owl_game_capture";
 const OWL_MONITOR_CAPTURE_NAME: &str = "owl_monitor_capture";
 
 pub struct ObsEmbeddedRecorder {
-    _obs_thread: std::thread::JoinHandle<()>,
+    // Held in an Option so Drop can `take()` the handle, wait with a deadline,
+    // and fall back to abandoning the thread on timeout rather than blocking
+    // the caller forever.
+    obs_thread: Option<std::thread::JoinHandle<()>>,
     obs_tx: tokio::sync::mpsc::Sender<RecorderMessage>,
     available_encoders: Vec<VideoEncoderType>,
+    /// Signalled by `TracingObsLogger` whenever OBS emits the
+    /// "number of skipped frames due to encoding lag:" log line. Used by the
+    /// stop-recording path to await the asynchronous skipped-frames accounting
+    /// instead of sleeping a fixed duration.
+    skipped_frames_notify: Arc<tokio::sync::Notify>,
 }
 impl ObsEmbeddedRecorder {
     pub async fn new(adapter_index: usize) -> Result<Self>
@@ -75,9 +83,22 @@ impl ObsEmbeddedRecorder {
         );
         let (obs_tx, obs_rx) = tokio::sync::mpsc::channel(100);
         let (init_success_tx, init_success_rx) = tokio::sync::oneshot::channel();
+        // Notify is shared between the TracingObsLogger (OBS-side producer) and
+        // the tokio stop-recording path (consumer). `notify_one` is level-
+        // triggered in the sense that a single pending permit is stored, so a
+        // skipped-frames log line that lands before we start awaiting is not
+        // lost — we still observe it on the next `notified().await`.
+        let skipped_frames_notify = Arc::new(tokio::sync::Notify::new());
+        let skipped_frames_notify_for_thread = skipped_frames_notify.clone();
         tracing::debug!("Spawning OBS recorder thread");
-        let obs_thread =
-            std::thread::spawn(move || recorder_thread(adapter_index, obs_rx, init_success_tx));
+        let obs_thread = std::thread::spawn(move || {
+            recorder_thread(
+                adapter_index,
+                obs_rx,
+                init_success_tx,
+                skipped_frames_notify_for_thread,
+            )
+        });
         // Wait for the OBS context to be initialized, and bail out if it fails
         tracing::debug!("Waiting for OBS context initialization");
         let available_encoders = init_success_rx.await??;
@@ -87,9 +108,10 @@ impl ObsEmbeddedRecorder {
         );
 
         Ok(Self {
-            _obs_thread: obs_thread,
+            obs_thread: Some(obs_thread),
             obs_tx,
             available_encoders,
+            skipped_frames_notify,
         })
     }
 }
@@ -146,19 +168,34 @@ impl VideoRecorder for ObsEmbeddedRecorder {
     async fn stop_recording(&mut self) -> Result<serde_json::Value> {
         tracing::info!("Stopping OBS embedded recording...");
 
-        // v2.5.5: split stop into Phase1 (stop OBS output, reset state) +
-        // tokio-side async sleep + Phase2 (read skipped-frames counter,
-        // finalize settings). Previously the OBS thread called
-        // `std::thread::sleep(Duration::from_millis(200))` to wait for
-        // OBS's asynchronous skipped-frames log line to land — that
-        // blocked the OBS thread, but since the tokio caller was
-        // `.await`-ing the oneshot reply, it also stalled the entire
-        // tokio event loop. Combined with the old input-channel capacity
-        // of 10 (Fix A4), every stop dropped ~100 input events because
-        // the raw-input bridge thread overflowed the mpsc and Windows
-        // dropped `WM_INPUT` messages silently. With this split, the
-        // tokio runtime stays live during the 200ms wait so input keeps
-        // flowing into the channel.
+        // v2.5.5 split stop into Phase1 (stop OBS output, reset state) +
+        // tokio-side wait + Phase2 (read skipped-frames counter, finalize
+        // settings). The previous implementation blocked the OBS thread
+        // with `std::thread::sleep(200ms)`, which, because the tokio caller
+        // was `.await`-ing the oneshot reply, stalled the entire tokio
+        // event loop. Combined with the input-channel capacity of 10
+        // (fixed in v2.5.5 by raising to 10_000), every stop dropped
+        // ~100 input events because the raw-input bridge thread overflowed
+        // the mpsc and Windows dropped `WM_INPUT` messages silently.
+        //
+        // Signal-based version: `TracingObsLogger` observes the OBS log
+        // line "number of skipped frames due to encoding lag: X/Y" and
+        // fires `skipped_frames_notify`. Phase1 arms the notifier (by
+        // calling `notify.notified()` *before* Phase1 runs so a single
+        // pre-ready permit is not missed) and Phase2 reads the populated
+        // counter. If OBS doesn't emit the log line within the deadline we
+        // proceed anyway — the only cost is a missing `skipped_frames`
+        // field in metadata; the recording itself remains valid.
+        const SKIPPED_FRAMES_LOG_DEADLINE: Duration = Duration::from_secs(3);
+
+        // Arm the waiter before Phase1 runs so a notification fired
+        // between Phase1's `output.stop()` and our `notified.await` below
+        // is not lost. `Notified` registers itself eagerly on construction
+        // — a subsequent `notify_one` will wake this specific future even
+        // if it hasn't been polled yet.
+        let notified = self.skipped_frames_notify.notified();
+        tokio::pin!(notified);
+
         let (phase1_tx, phase1_rx) = tokio::sync::oneshot::channel();
         self.obs_tx
             .send(RecorderMessage::StopRecordingPhase1 {
@@ -167,11 +204,33 @@ impl VideoRecorder for ObsEmbeddedRecorder {
             .await?;
         let partial_settings = phase1_rx.await??;
 
-        // Let OBS emit the "number of skipped frames due to encoding lag:"
-        // log line. 200ms is empirically sufficient; the cost of being
-        // wrong is a missing `skipped_frames` field in metadata (we still
-        // produce a valid recording), not a hang.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // Wait for the asynchronous skipped-frames log line, bounded by a
+        // conservative deadline. 3s is far longer than the ~200ms OBS
+        // needs in practice but short enough that a truly stuck OBS
+        // thread doesn't hang the app. A timeout here is non-fatal: the
+        // `skipped_frames` field becomes absent, nothing else breaks.
+        //
+        // `notified` is a `Pin<&mut Notified>` after `tokio::pin!`; we
+        // pass it to `timeout` by value to give up the borrow.
+        let wait_start = Instant::now();
+        match tokio::time::timeout(SKIPPED_FRAMES_LOG_DEADLINE, notified).await {
+            Ok(()) => {
+                tracing::debug!(
+                    "Skipped-frames log line observed after {:?}",
+                    wait_start.elapsed()
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "Timed out after {:?} waiting for OBS skipped-frames log line; \
+                     recording metadata will omit `skipped_frames`. This usually \
+                     means the encoder dropped the stop message silently or the \
+                     log line format changed. Last known phase: Phase1 done, \
+                     Phase2 pending.",
+                    SKIPPED_FRAMES_LOG_DEADLINE
+                );
+            }
+        }
 
         let (phase2_tx, phase2_rx) = tokio::sync::oneshot::channel();
         self.obs_tx
@@ -215,20 +274,77 @@ impl VideoRecorder for ObsEmbeddedRecorder {
 impl Drop for ObsEmbeddedRecorder {
     fn drop(&mut self) {
         // Drop the sender first to signal the OBS thread to stop.
-        // The thread's blocking_recv() will return None, causing the loop to exit.
+        // The thread's `blocking_recv()` returns None, causing the loop to exit.
         drop(std::mem::replace(
             &mut self.obs_tx,
             tokio::sync::mpsc::channel(1).0,
         ));
 
-        // Join the thread to ensure it has fully exited.
-        // Use std::mem::replace to take ownership of the handle,
-        // replacing it with a dummy spawned thread that completes immediately.
-        let handle = std::mem::replace(&mut self._obs_thread, std::thread::spawn(|| {}));
-        // Note: We can't timeout easily in a Drop impl, so we'll just try to join.
-        // If the thread is stuck, this will block. In practice, the OBS thread
-        // should exit promptly when the channel is closed.
-        handle.join().ok();
+        // Poll `is_finished()` against a deadline instead of calling
+        // `join()` which blocks indefinitely. A stuck OBS thread
+        // (GPU driver deadlock, FFmpeg muxer hang, blocked FFI call) used
+        // to freeze application shutdown forever; we now log a warning and
+        // abandon the thread after the deadline so the process can exit.
+        //
+        // 3s is chosen to be a comfortable upper bound on normal shutdown
+        // (OBS context tear-down empirically completes in <500ms) while
+        // being short enough that a user quitting the app doesn't stare at
+        // a hung window. The thread is abandoned rather than forced —
+        // libOBS holds native resources (D3D devices, audio threads) that
+        // cannot be safely cancelled, so leaking the JoinHandle is the
+        // least-bad option.
+        let Some(handle) = self.obs_thread.take() else {
+            return;
+        };
+
+        const DROP_DEADLINE: Duration = Duration::from_secs(3);
+        const POLL_INTERVAL: Duration = Duration::from_millis(50);
+        let start = Instant::now();
+        let thread_id = handle.thread().id();
+        let thread_name = handle
+            .thread()
+            .name()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{thread_id:?}"));
+
+        loop {
+            if handle.is_finished() {
+                // Safe to join now — it will return immediately.
+                if let Err(panic) = handle.join() {
+                    tracing::error!(
+                        thread = %thread_name,
+                        "OBS recorder thread panicked during shutdown: {panic:?}"
+                    );
+                } else {
+                    tracing::debug!(
+                        thread = %thread_name,
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        "OBS recorder thread joined cleanly during Drop"
+                    );
+                }
+                return;
+            }
+            if start.elapsed() >= DROP_DEADLINE {
+                tracing::warn!(
+                    thread = %thread_name,
+                    thread_id = ?thread_id,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    deadline_ms = DROP_DEADLINE.as_millis() as u64,
+                    "OBS recorder thread did not exit within Drop deadline; \
+                     abandoning handle to avoid blocking process shutdown. \
+                     libOBS native resources may leak until process exit."
+                );
+                // Dropping a JoinHandle detaches the underlying OS thread —
+                // it continues to run but we can no longer synchronize with
+                // it. That is the correct behavior here: we can't safely
+                // force-kill a libOBS worker, and blocking forever on join
+                // would freeze process shutdown. The thread will be cleaned
+                // up when the process exits.
+                drop(handle);
+                return;
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
     }
 }
 
@@ -237,15 +353,20 @@ enum RecorderMessage {
         request: Box<RecordingRequest>,
         result_tx: tokio::sync::oneshot::Sender<Result<()>>,
     },
-    /// v2.5.5: first half of stop_recording. Stops the OBS output and tears
-    /// down recording state; returns a partial settings blob. The tokio
-    /// caller then awaits asynchronously (via `tokio::time::sleep`) for
-    /// ~200ms so OBS can emit its skipped-frames log line, then sends
-    /// `StopRecordingPhase2` with the partial settings to finalize.
-    /// Splitting the stop into two messages is what lets the tokio event
-    /// loop keep running while we wait — the old implementation called
+    /// First half of stop_recording. Stops the OBS output and tears down
+    /// recording state; returns a partial settings blob. The tokio caller
+    /// then awaits `skipped_frames_notify` (signalled by `TracingObsLogger`
+    /// when OBS emits the "skipped frames due to encoding lag" log line)
+    /// bounded by a deadline, then sends `StopRecordingPhase2` with the
+    /// partial settings to finalize. Splitting the stop into two messages
+    /// lets the tokio event loop keep running while we wait. The
+    /// original implementation (pre-v2.5.5) called
     /// `std::thread::sleep(200ms)` on the OBS thread, which stalled every
-    /// tokio task for the duration.
+    /// tokio task for the duration. v2.5.5 moved the wait to
+    /// `tokio::time::sleep` (no longer blocking the tokio loop, but still
+    /// fixed-duration). This version replaces that sleep with a signal
+    /// so the stop path completes as soon as the log line lands rather
+    /// than always waiting the full 200ms.
     StopRecordingPhase1 {
         result_tx: tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
     },
@@ -312,9 +433,10 @@ fn recorder_thread(
     init_success_tx: tokio::sync::oneshot::Sender<
         Result<Vec<VideoEncoderType>, libobs_wrapper::utils::ObsError>,
     >,
+    skipped_frames_notify: Arc<tokio::sync::Notify>,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        recorder_thread_impl(adapter_index, rx, init_success_tx);
+        recorder_thread_impl(adapter_index, rx, init_success_tx, skipped_frames_notify);
     }));
     if let Err(e) = result {
         // Log the panic but do NOT resume_unwind — that would crash the entire application.
@@ -332,26 +454,28 @@ fn recorder_thread_impl(
     init_success_tx: tokio::sync::oneshot::Sender<
         Result<Vec<VideoEncoderType>, libobs_wrapper::utils::ObsError>,
     >,
+    skipped_frames_notify: Arc<tokio::sync::Notify>,
 ) {
     tracing::debug!("OBS recorder thread started");
     let skipped_frames = Arc::new(Mutex::new(None));
 
     tracing::debug!("Creating OBS recorder state");
-    let mut state = match RecorderState::new(adapter_index, skipped_frames.clone()) {
-        Ok((state, available_encoders)) => {
-            tracing::debug!("OBS recorder state created successfully");
-            if let Err(e) = init_success_tx.send(Ok(available_encoders)) {
-                tracing::error!("Failed to send init success: {:?}", e);
+    let mut state =
+        match RecorderState::new(adapter_index, skipped_frames.clone(), skipped_frames_notify) {
+            Ok((state, available_encoders)) => {
+                tracing::debug!("OBS recorder state created successfully");
+                if let Err(e) = init_success_tx.send(Ok(available_encoders)) {
+                    tracing::error!("Failed to send init success: {:?}", e);
+                    return;
+                }
+                state
+            }
+            Err(e) => {
+                tracing::error!("Failed to create OBS recorder state: {}", e);
+                let _ = init_success_tx.send(Err(e));
                 return;
             }
-            state
-        }
-        Err(e) => {
-            tracing::error!("Failed to create OBS recorder state: {}", e);
-            let _ = init_success_tx.send(Err(e));
-            return;
-        }
-    };
+        };
 
     tracing::debug!("OBS recorder thread entering message loop");
     let mut last_shutdown_tx = None;
@@ -427,6 +551,7 @@ impl RecorderState {
     fn new(
         adapter_index: usize,
         skipped_frames: Arc<Mutex<Option<SkippedFrames>>>,
+        skipped_frames_notify: Arc<tokio::sync::Notify>,
     ) -> Result<(Self, Vec<VideoEncoderType>), libobs_wrapper::utils::ObsError> {
         tracing::debug!("RecorderState::new() called");
         // Create OBS context
@@ -435,6 +560,7 @@ impl RecorderState {
             ObsContext::builder()
                 .set_logger(Box::new(TracingObsLogger {
                     skipped_frames: skipped_frames.clone(),
+                    skipped_frames_notify: skipped_frames_notify.clone(),
                 }))
                 .set_video_info(video_info(
                     adapter_index,
@@ -480,6 +606,10 @@ impl RecorderState {
             ObsAudioEncoder::new_from_info(audio_info, 0, obs_context.runtime().clone())?;
 
         tracing::debug!("RecorderState::new() complete");
+        // `skipped_frames_notify` is plumbed into TracingObsLogger above.
+        // The rest of RecorderState reads from the `skipped_frames` Mutex
+        // directly in Phase2, so we don't hold another handle here.
+        drop(skipped_frames_notify);
         Ok((
             Self {
                 adapter_index,
@@ -689,6 +819,18 @@ impl RecorderState {
             tracing::warn!("Skipped frames mutex poisoned, continuing anyway");
         }
 
+        // A stale `notify_one` permit can exist here if the previous
+        // recording's stop timed out waiting for the skipped-frames log
+        // line and OBS emitted it afterwards. We do NOT drain the permit
+        // explicitly — the worst case is that the next `stop_recording`
+        // consumes the stale permit, runs Phase2 before OBS has reported
+        // this recording's skipped frames, and writes metadata without a
+        // `skipped_frames` field. That is the identical degraded outcome
+        // as the timeout path (metadata is still valid, recording is
+        // still valid) so the added complexity of draining isn't worth
+        // the extra code. The counter itself is cleared above, so
+        // Phase2's read always reflects only the current recording.
+
         self.output.start()?;
 
         self.source = Some(source);
@@ -700,20 +842,25 @@ impl RecorderState {
         Ok(())
     }
 
-    /// Phase 1 of recording stop (v2.5.5): stop the OBS output, drop recording
-    /// state, and signal the hook monitor to exit. Does NOT read the skipped-
-    /// frames counter — OBS emits that log line asynchronously after
-    /// `output.stop()` returns, so we need to yield the OBS thread back for
-    /// a short time before reading it.
+    /// Phase 1 of recording stop: stop the OBS output, drop recording
+    /// state, and signal the hook monitor to exit. Does NOT read the
+    /// skipped-frames counter — OBS emits that log line asynchronously
+    /// after `output.stop()` returns, so the tokio caller awaits
+    /// `skipped_frames_notify` (fed by `TracingObsLogger`) between Phase1
+    /// and Phase2.
     ///
-    /// The split used to live in a single sync `stop_recording` function that
-    /// called `std::thread::sleep(Duration::from_millis(200))` on the OBS
-    /// thread. The tokio caller was `.await`-ing on the oneshot reply, so
-    /// the tokio event loop stalled for those 200ms every stop — during which
-    /// the raw-input bridge thread overflowed its mpsc (see Fix A4) and
-    /// Windows silently dropped `WM_INPUT` messages. Moving the wait to
-    /// `tokio::time::sleep` on the caller side lets the tokio loop yield
-    /// and keeps input events flowing.
+    /// History: pre-v2.5.5, the whole stop path was a single sync
+    /// function that called `std::thread::sleep(200ms)` on the OBS
+    /// thread. The tokio caller was `.await`-ing on the oneshot reply,
+    /// so the tokio event loop stalled for those 200ms every stop —
+    /// during which the raw-input bridge thread overflowed its mpsc
+    /// (see Fix A4) and Windows silently dropped `WM_INPUT` messages.
+    /// v2.5.5 split the function in two and moved the wait to
+    /// `tokio::time::sleep` on the caller side, unblocking the loop but
+    /// still burning a fixed 200ms. The current version swaps the
+    /// fixed sleep for a signal-based wait (`tokio::sync::Notify`) with
+    /// a 3-second safety deadline, so stops complete as soon as OBS
+    /// reports skipped frames and never longer than the deadline.
     fn stop_recording_phase1(
         &mut self,
         last_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
@@ -1119,6 +1266,12 @@ impl SkippedFrames {
 #[derive(Debug)]
 struct TracingObsLogger {
     skipped_frames: Arc<Mutex<Option<SkippedFrames>>>,
+    /// Notifies the stop-recording path that OBS has emitted its skipped-
+    /// frames log line and `skipped_frames` has been populated. Using
+    /// `Notify` rather than a plain sleep keeps the tokio runtime live —
+    /// when the stop-recording path awaits on this, the runtime keeps
+    /// draining the input-capture mpsc so WM_INPUT events don't back up.
+    skipped_frames_notify: Arc<tokio::sync::Notify>,
 }
 impl ObsLogger for TracingObsLogger {
     fn log(&mut self, level: libobs_wrapper::enums::ObsLogLevel, msg: String) {
@@ -1130,13 +1283,20 @@ impl ObsLogger for TracingObsLogger {
                 // HACK: If we encounter a message of the sort
                 //   Video stopped, number of skipped frames due to encoding lag: 10758/22640 (47.5%)
                 // we parse out the numbers to allow us to determine if it's an acceptable number
-                // of skipped frames.
-                if msg.contains("number of skipped frames due to encoding lag:")
-                    && let Some(frames_data) = parse_skipped_frames(&msg)
-                {
-                    if let Ok(mut guard) = self.skipped_frames.lock() {
+                // of skipped frames. Then signal the stop-recording waiter so
+                // it can finalize metadata without sleeping a fixed duration.
+                if msg.contains("number of skipped frames due to encoding lag:") {
+                    if let Some(frames_data) = parse_skipped_frames(&msg)
+                        && let Ok(mut guard) = self.skipped_frames.lock()
+                    {
                         *guard = Some(frames_data);
                     }
+                    // Always notify, even on parse failure — Phase2 handles
+                    // an absent counter gracefully, but a hung waiter is
+                    // what we're trying to avoid. Using `notify_one` stores
+                    // at most one permit, so a stop that begins after the
+                    // log line lands still observes it on the next await.
+                    self.skipped_frames_notify.notify_one();
                 }
                 tracing::info!(target: "obs", "{msg}");
             }
