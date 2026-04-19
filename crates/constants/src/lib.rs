@@ -161,8 +161,8 @@ pub const GAME_WHITELIST: &[&str] = &[
     // GTA V / GTA V Enhanced
     "gta5",
     "gtav",
-    "playgtav",
     "gta5_enhanced",
+    // NOTE: "playgtav" removed — it's the Rockstar launcher, not the game itself
     // Red Dead Redemption 2
     "rdr2",
     // Cyberpunk 2077

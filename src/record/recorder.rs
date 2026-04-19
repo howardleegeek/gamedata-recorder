@@ -378,6 +378,9 @@ const SELF_AND_SYSTEM_BLACKLIST: &[&str] = &[
     "launcherdll.exe",
     "rockstarlauncher.exe",
     "gtavlauncher.exe",
+    "playgtav.exe",
+    "rockstarerrorhandler.exe",
+    "launcher.exe",
 ];
 
 pub fn get_foregrounded_game() -> Result<Option<(String, game_process::Pid, HWND)>> {
