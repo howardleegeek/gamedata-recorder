@@ -819,7 +819,13 @@ async fn main(
                     tracing::error!(e=?e, "Failed to flush input events");
                 }
                 // Check foregrounded game
-                let foregrounded = get_foregrounded_game(&app_state.unsupported_games.read().unwrap(), &state.recorder);
+                let foregrounded = match app_state.unsupported_games.read() {
+                    Ok(unsupported) => get_foregrounded_game(&unsupported, &state.recorder),
+                    Err(_) => {
+                        tracing::error!("unsupported_games RwLock poisoned, skipping foreground check");
+                        None
+                    }
+                };
 
                 // Clear user_stopped_game_exe if foreground game changed
                 if let Some(ref fg) = foregrounded {
