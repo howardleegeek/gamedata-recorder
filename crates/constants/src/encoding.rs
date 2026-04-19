@@ -59,9 +59,14 @@ impl VideoEncoderType {
     }
 }
 
-/// Preset options for different encoder types
+/// Preset options for different encoder types.
+/// v2.5.2: reordered so the DEFAULT (index 0) is "veryfast".
+/// Session logs on AMD Ryzen 7640HS + Radeon 760M iGPU with "fast" preset
+/// produced 1 FPS effective throughput at 1080p/10Mbps — the software
+/// encoder was CPU-bound. "veryfast" delivers ~3× throughput with a
+/// tiny quality hit that AI-world-model training can absorb.
 /// https://github.com/obsproject/obs-studio/blob/5ec3af3f6d6465122dc2b0abff9661cbe64b406b/plugins/obs-x264/obs-x264.c
-pub const X264_PRESETS: &[&str] = &["fast", "faster", "veryfast"];
+pub const X264_PRESETS: &[&str] = &["veryfast", "faster", "fast"];
 
 /// https://github.com/obsproject/obs-studio/blob/0b1229632063a13dfd26cf1cd9dd43431d8c68f6/plugins/obs-nvenc/nvenc-properties.c#L145
 pub const NVENC_PRESETS: &[&str] = &["p7", "p6", "p5", "p4", "p3", "p2", "p1"];

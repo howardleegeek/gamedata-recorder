@@ -464,16 +464,57 @@ fn find_running_game() -> Result<Option<(String, game_process::Pid, HWND)>> {
     Ok(Some((exe_name, pid, hwnd)))
 }
 
+/// Window titles that indicate a launcher / non-game surface.
+/// If the foreground window title contains one of these substrings we
+/// refuse to use it as the capture HWND — OBS would otherwise record
+/// the launcher UI instead of the actual game, which we saw in v2.5.1
+/// session data (`window_name: "Rockstar Games Launcher"` at 1266x598
+/// producing 1-FPS launcher frames while GTA V ran above it).
+const LAUNCHER_TITLE_SUBSTRINGS: &[&str] = &[
+    "launcher",
+    "rockstar games",
+    "epic games",
+    "steam",
+    "galaxy",
+    "origin",
+    "uplay",
+    "battle.net",
+    "social club",
+];
+
+fn window_title(hwnd: HWND) -> String {
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowTextW;
+    // Safety: GetWindowTextW is a plain Win32 call, we give it a valid
+    // buffer and copy out at most 512 UTF-16 code units.
+    let mut buf = [0u16; 512];
+    let n = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    if n <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..n as usize])
+}
+
 /// Find the main window handle for a given process ID.
-/// Uses the foreground window as a fallback — OBS will find the correct
-/// window by exe name regardless of which HWND we pass.
+/// Uses the foreground window but rejects it if the title looks like a
+/// launcher surface (Rockstar Games Launcher, Epic Games Launcher, etc.)
+/// so that the capture pipeline records the actual game, not its launcher.
 fn find_window_for_pid(_pid: game_process::Pid) -> HWND {
-    // Use the current foreground window as a best-effort HWND.
-    // The OBS game/window capture source identifies the target by exe name,
-    // not by HWND, so this is sufficient for recording to work.
-    game_process::foreground_window()
-        .map(|(hwnd, _)| hwnd)
-        .unwrap_or_default()
+    let Ok((hwnd, _)) = game_process::foreground_window() else {
+        return HWND::default();
+    };
+    let title_lower = window_title(hwnd).to_lowercase();
+    if LAUNCHER_TITLE_SUBSTRINGS
+        .iter()
+        .any(|needle| title_lower.contains(needle))
+    {
+        tracing::warn!(
+            title = %title_lower,
+            "Foreground window looks like a launcher — returning NULL HWND \
+             so monitor capture is used instead of hooking the wrong window"
+        );
+        return HWND::default();
+    }
+    hwnd
 }
 
 fn is_process_game_shaped(pid: game_process::Pid) -> Result<()> {

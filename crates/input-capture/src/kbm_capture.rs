@@ -119,8 +119,25 @@ impl KbmCapture {
             });
 
             let device_count = raw_input_devices.len() as u32;
-            RegisterRawInputDevices(&raw_input_devices, device_count)
-                .wrap_err("failed to register raw input devices")?;
+            // v2.5.2: don't panic if RegisterRawInputDevices fails — this is
+            // known to return 0x80070057 (ERROR_INVALID_PARAMETER) on certain
+            // Windows sessions (session 0 / headless / SSH-launched processes).
+            // Session logs from nucbox showed zero keyboard/mouse events for
+            // 302 seconds because the whole pipeline died on this call.
+            // Log a warning and proceed without Raw Input — the capture thread
+            // will still pump window messages and gamepad input will continue
+            // to work via XInput. A future fix can wire up SetWindowsHookEx
+            // as a proper fallback.
+            if let Err(e) = RegisterRawInputDevices(&raw_input_devices, device_count)
+                .wrap_err("failed to register raw input devices")
+            {
+                tracing::warn!(
+                    error = ?e,
+                    "RegisterRawInputDevices failed — continuing without \
+                     keyboard/mouse Raw Input. Video recording and gamepad \
+                     input are unaffected."
+                );
+            }
 
             Ok(Self {
                 hwnd,

@@ -899,24 +899,21 @@ fn enable_window_capture_for_game(app_state: &AppState, game_exe: &str) -> Resul
         .entry(exe_without_ext.clone())
         .or_default();
 
-    // Only update if not already set
-    if !game_config.use_window_capture {
-        tracing::info!(
-            game = exe_without_ext,
-            "Automatically enabling window capture mode due to hook timeout"
-        );
-        game_config.use_window_capture = true;
-
-        // Persist to disk
-        if let Err(e) = config.save() {
-            tracing::error!(e=?e, "Failed to save config after enabling window capture");
-            // Continue anyway - the setting will apply for this session
-        }
-    } else {
+    // v2.5.2: DO NOT auto-enable window capture on hook timeout.
+    // Session data from nucbox proved window capture attaches to wrong HWND
+    // (e.g. Rockstar Games Launcher instead of the GTA5.exe game window),
+    // producing 1-FPS recordings of the launcher UI. Monitor capture is
+    // safer: it records whatever is on the monitor regardless of which
+    // HWND is foreground. Keep the current capture mode as-is.
+    {
         tracing::warn!(
             game = exe_without_ext,
-            "Window capture already enabled, skipping config update"
+            "Game capture hook timed out — staying on current capture mode (no auto-switch to window capture)"
         );
+        // Silence the unused variables so we can keep the surrounding block
+        // compiling identically while we remove the mutation.
+        let _ = &game_config;
+        let _ = &config;
     }
 
     Ok(())
