@@ -1695,17 +1695,40 @@ async fn move_recordings_folder(app_state: Arc<AppState>, from: PathBuf, to: Pat
 
         let dest_path = to.join(file_name);
 
-        // Move the file or directory
-        if let Err(e) = tokio::fs::rename(&source_path, &dest_path).await {
-            tracing::error!(
-                "Failed to move {} to {}: {:?}",
-                source_path.display(),
-                dest_path.display(),
-                e
-            );
-            errors.push(file_name.to_string_lossy().to_string());
-        } else {
-            moved_count += 1;
+        // Move the file or directory. rename() fails across filesystem boundaries
+        // (e.g. C: -> D:), so fall back to copy+delete if it fails with CrossesDevices
+        // or any other error.
+        match tokio::fs::rename(&source_path, &dest_path).await {
+            Ok(()) => {
+                moved_count += 1;
+            }
+            Err(_) if source_path.is_file() => {
+                // Fallback: copy + delete for cross-device moves
+                match tokio::fs::copy(&source_path, &dest_path).await {
+                    Ok(_) => {
+                        tokio::fs::remove_file(&source_path).await.ok();
+                        moved_count += 1;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to copy {} to {}: {:?}",
+                            source_path.display(),
+                            dest_path.display(),
+                            e
+                        );
+                        errors.push(file_name.to_string_lossy().to_string());
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to move {} to {}: {:?}",
+                    source_path.display(),
+                    dest_path.display(),
+                    e
+                );
+                errors.push(file_name.to_string_lossy().to_string());
+            }
         }
     }
 
