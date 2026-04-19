@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use color_eyre::{
     Result,
@@ -35,6 +36,10 @@ impl From<&InputEvent> for JsonInputEvent {
 /// when recording VRAM-heavy games like GTA V Enhanced.
 const INPUT_CHANNEL_CAPACITY: usize = 16_384;
 
+/// Global counter for dropped input events due to channel full.
+/// Shared across all input event streams to track total drops.
+static DROPPED_EVENTS: AtomicU64 = AtomicU64::new(0);
+
 /// Stream for sending timestamped input events to the writer
 #[derive(Clone)]
 pub(crate) struct InputEventStream {
@@ -55,7 +60,14 @@ impl InputEventStream {
             Err(mpsc::error::TrySendError::Full(_)) => {
                 // Channel full — drop event to prevent OOM. This is acceptable:
                 // a few lost input events won't meaningfully degrade the recording.
-                tracing::trace!("Input event channel full, dropping event");
+                // Track dropped events and log periodically if significant.
+                let count = DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
+                if count > 0 && count % 100 == 0 {
+                    tracing::warn!(
+                        "Dropped {} input events due to channel full (system under heavy input load)",
+                        count + 1
+                    );
+                }
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {

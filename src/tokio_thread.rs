@@ -316,8 +316,10 @@ async fn main(
                         } else {
                             match valid_api_key_and_user_id.clone() {
                                 Some((api_key, user_id)) => {
-                                    let start_date = app_state.upload_filters.read().unwrap().start_date;
-                                    let end_date = app_state.upload_filters.read().unwrap().end_date;
+                                    let filters = app_state.upload_filters.read().unwrap();
+                                    let start_date = filters.start_date;
+                                    let end_date = filters.end_date;
+                                    drop(filters);
                                     tokio::spawn({
                                         let app_state = app_state.clone();
                                         let api_client = api_client.clone();
@@ -346,8 +348,10 @@ async fn main(
                         } else {
                             match valid_api_key_and_user_id.clone() {
                                 Some((api_key, user_id)) => {
-                                    let start_date = app_state.upload_filters.read().unwrap().start_date;
-                                    let end_date = app_state.upload_filters.read().unwrap().end_date;
+                                    let filters = app_state.upload_filters.read().unwrap();
+                                    let start_date = filters.start_date;
+                                    let end_date = filters.end_date;
+                                    drop(filters);
                                     tokio::spawn({
                                         let app_state = app_state.clone();
                                         let api_client = api_client.clone();
@@ -618,15 +622,10 @@ async fn main(
                         // Update queue count before triggering next batch
                         set_auto_upload_queue_count(&app_state, new_count);
 
-                        // Use atomic compare-and-swap to safely trigger next upload
-                        // if there are still queued recordings. This avoids race conditions
-                        // where another thread might modify the queue count between our check
-                        // and the upload request.
-                        if app_state.auto_upload_queue_count.fetch_update(
-                            Ordering::SeqCst,
-                            Ordering::SeqCst,
-                            |count| if count > 0 { Some(count) } else { None }
-                        ).is_ok() {
+                        // Check if there are still queued recordings and trigger next upload.
+                        // We've already updated the count atomically above, so a simple
+                        // load check is sufficient here.
+                        if app_state.auto_upload_queue_count.load(Ordering::SeqCst) > 0 {
                             tracing::info!(
                                 "Auto-upload queue has remaining recordings, starting next upload batch"
                             );
