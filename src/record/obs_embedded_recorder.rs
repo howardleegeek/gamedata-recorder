@@ -16,6 +16,7 @@ use constants::{FPS, RECORDING_HEIGHT, RECORDING_WIDTH, encoding::VideoEncoderTy
 use windows::Win32::{
     Foundation::HWND,
     Graphics::Gdi::{HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorFromWindow},
+    UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
 };
 
 use libobs_simple::sources::{
@@ -884,6 +885,47 @@ fn hmonitor_ptr_for_hwnd(hwnd: HWND) -> usize {
     target.0 as usize
 }
 
+/// Log the effective DPI of the monitor under `hwnd` as a diagnostic aid
+/// for future high-DPI issues (see MEGA_AUDIT R39, TRIAGE DPI manifest item).
+///
+/// We declare per-monitor DPI awareness V2 in `build.rs`, so Windows hands us
+/// the physical pixel resolution of the capture surface. If this scale is not
+/// 1.00x, any future report of "recording is blurry / wrong resolution / input
+/// coords off" should start by cross-referencing this log line with the
+/// recording's `video_metadata.json`.
+fn log_monitor_dpi_scale(hwnd: HWND, monitor_label: &str) {
+    // SAFETY: MonitorFromWindow is a pure read-only Win32 query; MONITOR_DEFAULTTONEAREST
+    // guarantees a non-null HMONITOR even when `hwnd` sits outside any display.
+    let hmon: HMONITOR = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if hmon.is_invalid() {
+        tracing::debug!(
+            "Could not log DPI scale for {monitor_label}: MonitorFromWindow returned NULL"
+        );
+        return;
+    }
+    let mut dpi_x: u32 = 0;
+    let mut dpi_y: u32 = 0;
+    // SAFETY: GetDpiForMonitor is read-only. We pass owned u32 out-pointers that
+    // outlive the call. MDT_EFFECTIVE_DPI returns the monitor's effective DPI,
+    // honoring per-app scaling overrides (this is the one that matters for
+    // capture-surface dimensions).
+    let res = unsafe { GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
+    match res {
+        Ok(()) => {
+            // 96 DPI == 100% scale factor (Windows default, "1.00x").
+            let scale_x = dpi_x as f32 / 96.0;
+            let scale_y = dpi_y as f32 / 96.0;
+            tracing::info!(
+                "{monitor_label}: effective DPI = {dpi_x}x{dpi_y} (scale {scale_x:.2}x/{scale_y:.2}x) — \
+                 process is per-monitor-v2 DPI aware, so capture surface is in PHYSICAL pixels"
+            );
+        }
+        Err(e) => {
+            tracing::debug!("Could not log DPI scale for {monitor_label}: {e}");
+        }
+    }
+}
+
 fn find_game_capture_window(game_exe: Option<&str>, hwnd: HWND) -> Result<WindowInfo> {
     let game_exe = game_exe.unwrap_or("unknown");
     let window = libobs_window_helper::get_window_info(hwnd).map_err(|e| {
@@ -990,6 +1032,15 @@ fn prepare_source(
                 monitor_idx,
                 monitors.len(),
                 monitor
+            );
+
+            // Log the effective DPI scale of the capture monitor so we can
+            // diagnose future "wrong resolution" / "blurry recording" reports.
+            // We are per-monitor-v2 DPI-aware (see build.rs), so Windows hands
+            // us physical pixels; this line confirms what those pixels look like.
+            log_monitor_dpi_scale(
+                hwnd,
+                &format!("Monitor {monitor_idx} of {}", monitors.len()),
             );
 
             if let Some(mut source) = last_source.take() {
