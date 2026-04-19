@@ -80,7 +80,17 @@ pub struct InputCapture {
 impl InputCapture {
     pub fn new() -> Result<(Self, mpsc::Receiver<Event>)> {
         tracing::debug!("InputCapture::new() called");
-        let (input_tx, input_rx) = mpsc::channel(10);
+        // v2.5.5: raised from 10 → 10_000. Mouse input can spike to ~1kHz, and
+        // any downstream stall (the tokio loop blocked on OBS stop_recording,
+        // a slow API call, a lock-contention blip) caused `blocking_send` on
+        // the Win32 raw-input thread to block. When that thread blocks, Windows
+        // drops `WM_INPUT` messages silently — every stop_recording was losing
+        // 100+ events. 10_000 is the upper envelope for burst absorption
+        // during transient stalls; at 1kHz it buys 10s of slack before the
+        // producer thread itself would block. All sends from the raw-input
+        // pump are `blocking_send` (must be — this thread can't await), so
+        // the bound is also the backpressure signal.
+        let (input_tx, input_rx) = mpsc::channel(10_000);
 
         tracing::debug!("Spawning raw input thread for keyboard/mouse capture");
         let active_keys = Arc::new(Mutex::new(kbm_capture::ActiveKeys::default()));

@@ -145,11 +145,41 @@ impl VideoRecorder for ObsEmbeddedRecorder {
     async fn stop_recording(&mut self) -> Result<serde_json::Value> {
         tracing::info!("Stopping OBS embedded recording...");
 
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        // v2.5.5: split stop into Phase1 (stop OBS output, reset state) +
+        // tokio-side async sleep + Phase2 (read skipped-frames counter,
+        // finalize settings). Previously the OBS thread called
+        // `std::thread::sleep(Duration::from_millis(200))` to wait for
+        // OBS's asynchronous skipped-frames log line to land — that
+        // blocked the OBS thread, but since the tokio caller was
+        // `.await`-ing the oneshot reply, it also stalled the entire
+        // tokio event loop. Combined with the old input-channel capacity
+        // of 10 (Fix A4), every stop dropped ~100 input events because
+        // the raw-input bridge thread overflowed the mpsc and Windows
+        // dropped `WM_INPUT` messages silently. With this split, the
+        // tokio runtime stays live during the 200ms wait so input keeps
+        // flowing into the channel.
+        let (phase1_tx, phase1_rx) = tokio::sync::oneshot::channel();
         self.obs_tx
-            .send(RecorderMessage::StopRecording { result_tx })
+            .send(RecorderMessage::StopRecordingPhase1 {
+                result_tx: phase1_tx,
+            })
             .await?;
-        let result = result_rx.await??;
+        let partial_settings = phase1_rx.await??;
+
+        // Let OBS emit the "number of skipped frames due to encoding lag:"
+        // log line. 200ms is empirically sufficient; the cost of being
+        // wrong is a missing `skipped_frames` field in metadata (we still
+        // produce a valid recording), not a hang.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let (phase2_tx, phase2_rx) = tokio::sync::oneshot::channel();
+        self.obs_tx
+            .send(RecorderMessage::StopRecordingPhase2 {
+                partial_settings,
+                result_tx: phase2_tx,
+            })
+            .await?;
+        let result = phase2_rx.await??;
 
         tracing::info!("OBS embedded recording stopped successfully");
 
@@ -206,7 +236,24 @@ enum RecorderMessage {
         request: Box<RecordingRequest>,
         result_tx: tokio::sync::oneshot::Sender<Result<()>>,
     },
-    StopRecording {
+    /// v2.5.5: first half of stop_recording. Stops the OBS output and tears
+    /// down recording state; returns a partial settings blob. The tokio
+    /// caller then awaits asynchronously (via `tokio::time::sleep`) for
+    /// ~200ms so OBS can emit its skipped-frames log line, then sends
+    /// `StopRecordingPhase2` with the partial settings to finalize.
+    /// Splitting the stop into two messages is what lets the tokio event
+    /// loop keep running while we wait — the old implementation called
+    /// `std::thread::sleep(200ms)` on the OBS thread, which stalled every
+    /// tokio task for the duration.
+    StopRecordingPhase1 {
+        result_tx: tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
+    },
+    /// v2.5.5: second half of stop_recording. Reads the skipped-frames
+    /// counter (populated by `TracingObsLogger` during the tokio-side
+    /// sleep), folds it into the settings blob, and clears the encoder
+    /// cache. See `StopRecordingPhase1` for the rationale.
+    StopRecordingPhase2 {
+        partial_settings: serde_json::Value,
         result_tx: tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
     },
     Poll,
@@ -317,9 +364,17 @@ fn recorder_thread_impl(
                     .ok();
                 last_shutdown_tx = Some(shutdown_tx);
             }
-            RecorderMessage::StopRecording { result_tx } => {
+            RecorderMessage::StopRecordingPhase1 { result_tx } => {
                 result_tx
-                    .send(state.stop_recording(last_shutdown_tx.take()))
+                    .send(state.stop_recording_phase1(last_shutdown_tx.take()))
+                    .ok();
+            }
+            RecorderMessage::StopRecordingPhase2 {
+                partial_settings,
+                result_tx,
+            } => {
+                result_tx
+                    .send(state.stop_recording_phase2(partial_settings))
                     .ok();
             }
             RecorderMessage::Poll => {
@@ -644,7 +699,21 @@ impl RecorderState {
         Ok(())
     }
 
-    fn stop_recording(
+    /// Phase 1 of recording stop (v2.5.5): stop the OBS output, drop recording
+    /// state, and signal the hook monitor to exit. Does NOT read the skipped-
+    /// frames counter — OBS emits that log line asynchronously after
+    /// `output.stop()` returns, so we need to yield the OBS thread back for
+    /// a short time before reading it.
+    ///
+    /// The split used to live in a single sync `stop_recording` function that
+    /// called `std::thread::sleep(Duration::from_millis(200))` on the OBS
+    /// thread. The tokio caller was `.await`-ing on the oneshot reply, so
+    /// the tokio event loop stalled for those 200ms every stop — during which
+    /// the raw-input bridge thread overflowed its mpsc (see Fix A4) and
+    /// Windows silently dropped `WM_INPUT` messages. Moving the wait to
+    /// `tokio::time::sleep` on the caller side lets the tokio loop yield
+    /// and keeps input events flowing.
+    fn stop_recording_phase1(
         &mut self,
         last_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> eyre::Result<serde_json::Value> {
@@ -657,7 +726,7 @@ impl RecorderState {
             tracing::warn!("No active recording to stop");
         }
 
-        let mut settings = self.last_encoder_settings.take().unwrap_or_default();
+        let settings = self.last_encoder_settings.take().unwrap_or_default();
 
         // Send shutdown signal BEFORE checking hook status, to ensure the signal thread
         // exits cleanly even when the recording was never hooked (avoids thread leak).
@@ -683,11 +752,19 @@ impl RecorderState {
             );
         }
 
-        // Extremely ugly hack: We want to get the skipped frames percentage from the logs,
-        // but that's not guaranteed to be present by the time this function would normally end.
-        //
-        // So, we wait 200ms to make sure we've cleared it.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        Ok(settings)
+    }
+
+    /// Phase 2 of recording stop (v2.5.5): read the skipped-frames counter
+    /// emitted by OBS into `self.skipped_frames` via `TracingObsLogger`, fold
+    /// it into the settings blob, and release the encoder cache. Must be
+    /// called only after the tokio caller has yielded long enough for OBS
+    /// to emit its `"number of skipped frames due to encoding lag:"` log
+    /// line (~200ms in practice).
+    fn stop_recording_phase2(
+        &mut self,
+        mut settings: serde_json::Value,
+    ) -> eyre::Result<serde_json::Value> {
         let skipped_frames_opt = self.skipped_frames.lock().ok().and_then(|mut g| g.take());
         if let Some(skipped_frames) = skipped_frames_opt {
             let percentage = skipped_frames.percentage();

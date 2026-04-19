@@ -422,15 +422,12 @@ fn find_running_game() -> Result<Option<(String, game_process::Pid, HWND)>> {
     let mut found: Option<(String, game_process::Pid)> = None;
 
     game_process::for_each_process(|entry| {
-        let name_bytes: Vec<u8> = entry
-            .szExeFile
-            .iter()
-            .take_while(|&&c| c != 0)
-            .map(|&c| c as u8)
-            .collect();
-        let Ok(name) = std::str::from_utf8(&name_bytes) else {
-            return true; // continue
-        };
+        // v2.5.5: UTF-16 decode via `exe_file_name`. The v2.5.4 implementation
+        // downcast each UTF-16 code unit to a byte and called `from_utf8`,
+        // which dropped every non-ASCII exe name on the floor — so a game
+        // under `C:\游戏\Steam\...` or with Chinese characters in the exe
+        // name was invisible to the whitelist on Chinese-locale Windows.
+        let name = game_process::exe_file_name(&entry);
         let name_lower = name.to_lowercase();
 
         // Skip blacklisted processes
@@ -441,7 +438,7 @@ fn find_running_game() -> Result<Option<(String, game_process::Pid, HWND)>> {
         // Check whitelist
         if let Some(stem) = name_lower.strip_suffix(".exe") {
             if constants::GAME_WHITELIST.iter().any(|g| stem == *g) {
-                found = Some((name.to_owned(), game_process::Pid(entry.th32ProcessID)));
+                found = Some((name.clone(), game_process::Pid(entry.th32ProcessID)));
                 return false; // stop scanning
             }
         }
