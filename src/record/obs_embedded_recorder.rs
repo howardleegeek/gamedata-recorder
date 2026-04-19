@@ -802,9 +802,10 @@ fn prepare_source(
         if monitors.is_empty() {
             // Fallback to window capture if monitor list unavailable
             tracing::warn!("No monitors found for monitor capture, falling back to window capture");
-            let window = libobs_wrapper::unsafe_send::Sendable(
-                find_game_capture_window(Some(game_exe), hwnd)?,
-            );
+            let window = libobs_wrapper::unsafe_send::Sendable(find_game_capture_window(
+                Some(game_exe),
+                hwnd,
+            )?);
             let client_area = false;
             if let Some(mut source) = last_source.take() {
                 source
@@ -837,9 +838,7 @@ fn prepare_source(
             } else {
                 tracing::info!("Creating new monitor capture source");
                 obs_context
-                    .source_builder::<MonitorCaptureSourceBuilder, _>(
-                        OWL_MONITOR_CAPTURE_NAME,
-                    )?
+                    .source_builder::<MonitorCaptureSourceBuilder, _>(OWL_MONITOR_CAPTURE_NAME)?
                     .set_monitor(monitor)
                     .add_to_scene(scene)
             }
