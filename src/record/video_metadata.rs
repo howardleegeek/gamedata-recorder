@@ -105,6 +105,9 @@ impl VideoMetadataExtractor {
     /// Estimate total frames from file size and bitrate
     pub fn estimate_frame_count(file_size_bytes: u64, bitrate_mbps: u32, fps: u32) -> u64 {
         let bitrate_bps = bitrate_mbps as u64 * 1_000_000;
+        if bitrate_bps == 0 || fps == 0 {
+            return 0;
+        }
         let duration_seconds = file_size_bytes * 8 / bitrate_bps;
         duration_seconds * fps as u64
     }
