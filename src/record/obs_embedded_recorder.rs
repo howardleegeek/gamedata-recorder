@@ -752,14 +752,17 @@ fn video_info(adapter_index: usize, (base_width, base_height): (u32, u32)) -> Ob
         base_height
     };
 
+    // Output at the same resolution as the source to preserve aspect ratio.
+    // Previously forced 1920x1080 output which stretched non-16:9 content.
+    // Monitor capture grabs the full screen, so base = screen resolution.
     ObsVideoInfoBuilder::new()
         .adapter(adapter_index as u32)
         .fps_num(FPS)
         .fps_den(1)
         .base_width(base_width)
         .base_height(base_height)
-        .output_width(RECORDING_WIDTH)
-        .output_height(RECORDING_HEIGHT)
+        .output_width(base_width)
+        .output_height(base_height)
         .scale_type(ObsScaleType::Bicubic)
         .build()
 }
