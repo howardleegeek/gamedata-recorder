@@ -35,11 +35,6 @@
     "binaries": ["iw7_ship"]
   },
   {
-    "game": "Call of Duty: Vanguard",
-    "url": "https://store.steampowered.com/app/1985820/Call_of_Duty_Vanguard/",
-    "binaries": ["vanguard"]
-  },
-  {
     "game": "Call of Duty: WWII",
     "url": "https://store.steampowered.com/app/476600/Call_of_Duty_WWII/",
     "binaries": ["s2_sp64_ship", "s2_mp64_ship"]

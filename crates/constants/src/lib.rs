@@ -24,8 +24,7 @@ pub const GAME_WHITELIST: &[&str] = &[
     "s1_mp64_ship",
     // Call of Duty: Infinite Warfare
     "iw7_ship",
-    // Call of Duty: Vanguard
-    "vanguard",
+    // Call of Duty: Vanguard — REMOVED (R47 follow-up): Activision Ricochet kernel AC (since 2022), HWID ban vector
     // Call of Duty: WWII
     "s2_sp64_ship",
     "s2_mp64_ship",
