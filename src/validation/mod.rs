@@ -149,13 +149,25 @@ fn validate_files(
         .map_or(false, |line| line.trim_start().starts_with('{'));
 
     let events: Vec<InputEvent> = if is_jsonl {
-        // JSONL format: each line is a JSON object
+        // JSONL format: each line is {"timestamp":..., "event_type":..., "event_args":...}
         file_content
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .map(|line| serde_json::from_str(line))
-            .collect::<Result<Vec<_>, _>>()
-            .with_context(|| format!("Error parsing JSONL input file at {csv_path:?}"))?
+            .filter_map(|line| {
+                let v: serde_json::Value = serde_json::from_str(line).ok()?;
+                let timestamp = v.get("timestamp")?.as_f64()?;
+                let event_type = v.get("event_type")?.as_str()?;
+                let event_args = v.get("event_args").cloned().unwrap_or(serde_json::Value::Null);
+                // Reconstruct as CSV-style string for InputEvent::from_str
+                let csv_line = format!(
+                    "{},{},{}",
+                    timestamp,
+                    event_type,
+                    serde_json::to_string(&event_args).unwrap_or_default()
+                );
+                InputEvent::from_str(&csv_line).ok()
+            })
+            .collect()
     } else {
         // Legacy CSV format: skip header, parse comma-separated
         file_content
