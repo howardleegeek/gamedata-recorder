@@ -253,22 +253,30 @@ impl App {
             // we handle visibility in the App level
         }
 
-        // Handle hotkey rebinds
-        let listening_for_new_hotkey = *self.app_state.listening_for_new_hotkey.read().unwrap();
-        if let ListeningForNewHotkey::Captured { target, key } = listening_for_new_hotkey {
+        // Handle hotkey rebinds. `load()` takes a consistent snapshot; the
+        // tokio side cannot change the state underneath us between `load()`
+        // and the follow-up `stop_listening()` in a way that loses data —
+        // the only states reachable from Captured are (a) ourselves
+        // transitioning to NotListening, or (b) another UI handler clicking
+        // a different hotkey button, which is a user-visible action.
+        if let ListeningForNewHotkey::Captured { target, key } =
+            self.app_state.listening_for_new_hotkey.load()
+        {
             if let Some(key_name) = virtual_keycode_to_name(key) {
                 let rebind_target = match target {
                     HotkeyRebindTarget::Start => &mut self.local_preferences.start_recording_key,
                     HotkeyRebindTarget::Stop => &mut self.local_preferences.stop_recording_key,
                 };
                 *rebind_target = key_name.to_string();
-
-                *self.app_state.listening_for_new_hotkey.write().unwrap() =
-                    ListeningForNewHotkey::NotListening;
+                self.app_state.listening_for_new_hotkey.stop_listening();
             } else {
-                // Invalid hotkey? Try again
-                *self.app_state.listening_for_new_hotkey.write().unwrap() =
-                    ListeningForNewHotkey::Listening { target };
+                // Invalid hotkey? Go back to listening for the same target.
+                // Reset first so begin_listening's CAS precondition holds.
+                self.app_state.listening_for_new_hotkey.stop_listening();
+                let _ = self
+                    .app_state
+                    .listening_for_new_hotkey
+                    .begin_listening(target);
             }
         }
     }

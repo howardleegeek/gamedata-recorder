@@ -228,21 +228,27 @@ async fn main(
                     continue;
                 }
 
-                let listening_for_new_hotkey = app_state.listening_for_new_hotkey.read()
-                    .map(|g| *g)
-                    .unwrap_or(ListeningForNewHotkey::NotListening);
-                match listening_for_new_hotkey {
-                    ListeningForNewHotkey::Listening { target } => {
+                // Snapshot (Acquire) is safe — we only branch on the tag.
+                // The actual write, when we have a key, goes through a CAS
+                // inside `capture_key()` so we can't clobber a concurrent
+                // UI cancel (stop_listening) or a racing capture.
+                match app_state.listening_for_new_hotkey.load() {
+                    ListeningForNewHotkey::Listening { .. } => {
                         if let Some(key) = e.key_press_keycode() {
-                            if let Ok(mut guard) = app_state.listening_for_new_hotkey.write() {
-                                *guard = ListeningForNewHotkey::Captured { target, key };
-                            }
+                            // If the UI cancelled the rebind between our load()
+                            // and this CAS, capture_key() returns false and we
+                            // simply drop the key — the user will have to try
+                            // again, which is the correct behaviour.
+                            let _ = app_state.listening_for_new_hotkey.capture_key(key);
                         }
                     },
                     ListeningForNewHotkey::NotListening => {
                         state.on_input(e).await;
                     },
-                    _ => {},
+                    // Captured — already holding a key waiting for the UI
+                    // thread to consume it. Do not forward to the recorder
+                    // (the user is binding, not playing), do not overwrite.
+                    ListeningForNewHotkey::Captured { .. } => {},
                 }
             },
             e = async_request_rx.recv() => {

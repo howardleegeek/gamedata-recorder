@@ -7,7 +7,7 @@ use std::{
 use crate::{
     app_state::{
         AppState, AsyncRequest, ForegroundedGame, GitHubRelease, HotkeyRebindTarget,
-        ListeningForNewHotkey, RecordingStatus,
+        RecordingStatus,
     },
     config::{
         EncoderSettings, FfmpegNvencSettings, ObsAmfSettings, ObsQsvSettings, ObsX264Settings,
@@ -354,8 +354,6 @@ fn keyboard_shortcuts_section(
         );
         let button_text = if app_state
             .listening_for_new_hotkey
-            .read()
-            .unwrap()
             .listening_hotkey_target()
             == Some(HotkeyRebindTarget::Start)
         {
@@ -365,10 +363,17 @@ fn keyboard_shortcuts_section(
         };
 
         if add_settings_widget(ui, Button::new(button_text)).clicked() {
-            *app_state.listening_for_new_hotkey.write().unwrap() =
-                ListeningForNewHotkey::Listening {
-                    target: HotkeyRebindTarget::Start,
-                };
+            // CAS-driven. If another rebind button was clicked "at the
+            // same time" (e.g. double-tapped across frames) only one
+            // wins — the other is a no-op, which matches the existing
+            // user-facing model of "one rebind in flight at a time".
+            // If a stale Captured state is hanging around because the UI
+            // thread skipped a frame, force-reset first so the next click
+            // is always responsive.
+            app_state.listening_for_new_hotkey.stop_listening();
+            let _ = app_state
+                .listening_for_new_hotkey
+                .begin_listening(HotkeyRebindTarget::Start);
         }
     });
 
@@ -376,11 +381,8 @@ fn keyboard_shortcuts_section(
     if stop_hotkey_enabled {
         ui.horizontal(|ui| {
             add_settings_text(ui, Label::new("Stop Recording:"));
-            let listening_hotkey_target = app_state
-                .listening_for_new_hotkey
-                .read()
-                .unwrap()
-                .listening_hotkey_target();
+            let listening_hotkey_target =
+                app_state.listening_for_new_hotkey.listening_hotkey_target();
             let button_text = if listening_hotkey_target == Some(HotkeyRebindTarget::Stop) {
                 "Press any key...".to_string()
             } else {
@@ -388,10 +390,11 @@ fn keyboard_shortcuts_section(
             };
 
             if add_settings_widget(ui, Button::new(button_text)).clicked() {
-                *app_state.listening_for_new_hotkey.write().unwrap() =
-                    ListeningForNewHotkey::Listening {
-                        target: HotkeyRebindTarget::Stop,
-                    };
+                // See the Start-hotkey button above for rationale.
+                app_state.listening_for_new_hotkey.stop_listening();
+                let _ = app_state
+                    .listening_for_new_hotkey
+                    .begin_listening(HotkeyRebindTarget::Stop);
             }
         });
     }
