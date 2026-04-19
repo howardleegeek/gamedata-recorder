@@ -187,10 +187,16 @@ async fn main(
                     continue;
                 }
 
-                let listening_for_new_hotkey = *app_state.listening_for_new_hotkey.read().unwrap();
+                let listening_for_new_hotkey = app_state.listening_for_new_hotkey.read()
+                    .map(|g| *g)
+                    .unwrap_or(ListeningForNewHotkey::NotListening);
                 match listening_for_new_hotkey {
                     ListeningForNewHotkey::Listening { target } => {
-                        if let Some(key) = e.key_press_keycode() { *app_state.listening_for_new_hotkey.write().unwrap() = ListeningForNewHotkey::Captured { target, key } }
+                        if let Some(key) = e.key_press_keycode() {
+                            if let Ok(mut guard) = app_state.listening_for_new_hotkey.write() {
+                                *guard = ListeningForNewHotkey::Captured { target, key };
+                            }
+                        }
                     },
                     ListeningForNewHotkey::NotListening => {
                         state.on_input(e).await;
