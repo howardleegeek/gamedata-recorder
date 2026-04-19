@@ -319,7 +319,9 @@ impl Config {
                     "Config file at {} is corrupted or invalid JSON: {e}",
                     config_path.display()
                 );
-                tracing::warn!("Using default configuration. The corrupted file will be overwritten on next save.");
+                tracing::warn!(
+                    "Using default configuration. The corrupted file will be overwritten on next save."
+                );
                 return Ok(Self::default());
             }
         };

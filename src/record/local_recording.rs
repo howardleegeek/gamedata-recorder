@@ -670,9 +670,7 @@ fn folder_size(path: &Path) -> Result<u64, std::io::Error> {
             let entry_path = entry.path();
             if entry_path.is_dir() {
                 dirs_to_visit.push(entry_path);
-            } else if entry_path.is_file()
-                && entry_path.extension().unwrap_or_default() != "tar"
-            {
+            } else if entry_path.is_file() && entry_path.extension().unwrap_or_default() != "tar" {
                 size += entry_path.metadata().map(|m| m.len()).unwrap_or(0);
             }
         }

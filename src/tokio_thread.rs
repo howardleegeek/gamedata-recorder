@@ -62,7 +62,9 @@ async fn main(
     let stream_handle = match rodio::OutputStreamBuilder::open_default_stream() {
         Ok(handle) => handle,
         Err(e) => {
-            tracing::error!("Failed to open default audio stream: {e}. Audio cues will be unavailable.");
+            tracing::error!(
+                "Failed to open default audio stream: {e}. Audio cues will be unavailable."
+            );
             return Err(color_eyre::eyre::eyre!(
                 "Failed to open audio stream: {e}. Check that an audio output device is connected."
             ));
@@ -1265,10 +1267,15 @@ impl State {
                 // Start recording from Idle or Paused state
                 // Acquire both locks atomically to avoid race condition
                 let (honk, unsupported_games) = {
-                    let config = self.app_state.config.read()
-                        .map_err(|_| color_eyre::eyre::eyre!("Config RwLock poisoned during recording start"))?;
-                    let unsupported_games = self.app_state.unsupported_games.read()
-                        .map_err(|_| color_eyre::eyre::eyre!("Unsupported games RwLock poisoned during recording start"))?;
+                    let config = self.app_state.config.read().map_err(|_| {
+                        color_eyre::eyre::eyre!("Config RwLock poisoned during recording start")
+                    })?;
+                    let unsupported_games =
+                        self.app_state.unsupported_games.read().map_err(|_| {
+                            color_eyre::eyre::eyre!(
+                                "Unsupported games RwLock poisoned during recording start"
+                            )
+                        })?;
                     (config.preferences.honk, unsupported_games.clone())
                 };
                 start_recording_safely(
