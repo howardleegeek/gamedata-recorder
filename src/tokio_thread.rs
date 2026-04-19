@@ -944,12 +944,15 @@ struct State {
 }
 impl State {
     async fn on_input(&mut self, e: Event) {
-        let (start_key, stop_key) = {
-            let cfg = self.app_state.config.read().unwrap();
-            (
+        let (start_key, stop_key) = match self.app_state.config.read() {
+            Ok(cfg) => (
                 name_to_virtual_keycode(cfg.preferences.start_recording_key()),
                 name_to_virtual_keycode(cfg.preferences.stop_recording_key()),
-            )
+            ),
+            Err(_) => {
+                tracing::error!("Config RwLock poisoned in on_input, using F9 defaults");
+                (name_to_virtual_keycode("F9"), name_to_virtual_keycode("F9"))
+            }
         };
         if let Err(e) = self.recorder.seen_input(e).await {
             tracing::error!(e=?e, "Failed to seen input");
