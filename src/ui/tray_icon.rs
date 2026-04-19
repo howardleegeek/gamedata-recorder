@@ -99,16 +99,15 @@ impl TrayIconState {
                         tracing::error!("Failed to send stop signal: {e}");
                     }
 
-                    // a bit hacky, but we have to force the window to be visible again so that the MainApp can call main loop repaint,
-                    // otherwise the app will remain active until the user clicks on tray icon to reopen it, and then it will kill itself
+                    // Make the window processable so the main loop can
+                    // receive the stop signal, but do NOT steal focus from
+                    // a running game. set_visible(true) alone is enough to
+                    // let the event loop run; focus_window() / set_minimized(false)
+                    // would yank the player out of their game.
                     if !visible.load(Ordering::Relaxed) {
                         window.set_visible(true);
-                        // window.focus_window();
                         visible.store(true, Ordering::Relaxed);
                     }
-                    // have to unminimize and focus the window to ensure that redraw and subsequent recv() of stop is called in App
-                    window.set_minimized(false);
-                    window.focus_window();
 
                     ui_update_tx.send(UiUpdate::ForceUpdate).ok();
                 }
