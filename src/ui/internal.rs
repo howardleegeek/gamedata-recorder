@@ -115,19 +115,17 @@ impl WgpuState {
 
         let surface_texture = self.surface.get_current_texture();
 
-        match surface_texture {
+        let surface_texture = match surface_texture {
+            Ok(texture) => texture,
             Err(SurfaceError::Outdated) => {
                 // Ignoring outdated to allow resizing and minimization
                 return;
             }
-            Err(_) => {
-                surface_texture.expect("Failed to acquire next swap chain texture");
+            Err(e) => {
+                tracing::error!("Failed to acquire next swap chain texture: {e}");
                 return;
             }
-            Ok(_) => {}
         };
-
-        let surface_texture = surface_texture.unwrap();
 
         let surface_view = surface_texture
             .texture
