@@ -1284,7 +1284,7 @@ impl State {
                     &mut self.recorder,
                     &self.input_capture,
                     &unsupported_games,
-                    self.sink.as_ref().map(|s| (s, honk, &self.app_state)),
+                    self.sink.as_ref().map(|s| (s, honk, &*self.app_state)),
                     &mut self.cue_cache,
                 )
                 .await?;
@@ -1312,7 +1312,7 @@ impl State {
                 stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
-                    self.sink.as_ref().map(|s| (s, honk, &self.app_state)),
+                    self.sink.as_ref().map(|s| (s, honk, &*self.app_state)),
                     &mut self.cue_cache,
                 )
                 .await?;
@@ -1337,7 +1337,7 @@ impl State {
                 stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
-                    self.sink.as_ref().map(|s| (s, honk, &self.app_state)),
+                    self.sink.as_ref().map(|s| (s, honk, &*self.app_state)),
                     &mut self.cue_cache,
                 )
                 .await?;
@@ -1401,7 +1401,7 @@ impl State {
                 stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
-                    self.sink.as_ref().map(|s| (s, false, &self.app_state)),
+                    self.sink.as_ref().map(|s| (s, false, &*self.app_state)),
                     &mut self.cue_cache,
                 )
                 .await?;
@@ -1409,7 +1409,7 @@ impl State {
                     &mut self.recorder,
                     &self.input_capture,
                     &unsupported_games,
-                    self.sink.as_ref().map(|s| (s, false, &self.app_state)),
+                    self.sink.as_ref().map(|s| (s, false, &*self.app_state)),
                     &mut self.cue_cache,
                 )
                 .await?;
