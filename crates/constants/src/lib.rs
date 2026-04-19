@@ -281,8 +281,10 @@ pub const MIN_FREE_SPACE_MB: u64 = 512;
 pub const MIN_FOOTAGE: Duration = Duration::from_secs(20);
 /// Maximum footage length
 pub const MAX_FOOTAGE: Duration = duration_from_mins(10);
-/// Maximum idle duration before stopping recording
-pub const MAX_IDLE_DURATION: Duration = Duration::from_secs(30);
+/// Maximum idle duration before stopping recording.
+/// Set to 5 minutes to handle long game loading screens (GTA V, Elden Ring, etc).
+/// Games often have 1-3 minute loading screens with zero user input.
+pub const MAX_IDLE_DURATION: Duration = Duration::from_secs(300);
 /// Maximum time to wait for OBS to hook into the application before falling back
 /// to window capture. 15 seconds gives anti-cheat games (BattlEye, EAC, Vanguard)
 /// enough time to complete their initialization before we give up on game capture.
