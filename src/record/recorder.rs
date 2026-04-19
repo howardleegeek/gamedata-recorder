@@ -284,10 +284,15 @@ impl Recorder {
         recording.flush_input_events().await
     }
 
-    pub async fn stop(&mut self, input_capture: &InputCapture) -> Result<()> {
+    /// Stops the current recording. Returns the recording folder path of the
+    /// session that was just saved (if any), so callers can use it as a
+    /// dedup key when enqueueing the session for auto-upload.
+    pub async fn stop(&mut self, input_capture: &InputCapture) -> Result<Option<PathBuf>> {
         let Some(recording) = self.recording.take() else {
-            return Ok(());
+            return Ok(None);
         };
+
+        let session_path = recording.recording_location().to_path_buf();
 
         recording
             .stop(
@@ -299,7 +304,7 @@ impl Recorder {
         *self.app_state.state.write().unwrap() = RecordingStatus::Stopped;
 
         tracing::info!("Recording stopped");
-        Ok(())
+        Ok(Some(session_path))
     }
 
     pub async fn poll(&mut self) {

@@ -44,11 +44,18 @@ pub fn run(
     log_path: PathBuf,
     async_request_rx: tokio::sync::mpsc::Receiver<AsyncRequest>,
     stopped_rx: tokio::sync::broadcast::Receiver<()>,
+    upload_trigger_rx: tokio::sync::mpsc::UnboundedReceiver<upload::UploadTrigger>,
 ) -> Result<()> {
     tracing::debug!("Creating tokio runtime");
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|e| color_eyre::eyre::eyre!("Failed to create tokio runtime: {e}"))?;
-    runtime.block_on(main(app_state, log_path, async_request_rx, stopped_rx))
+    runtime.block_on(main(
+        app_state,
+        log_path,
+        async_request_rx,
+        stopped_rx,
+        upload_trigger_rx,
+    ))
 }
 
 async fn main(
@@ -56,6 +63,7 @@ async fn main(
     log_path: PathBuf,
     mut async_request_rx: tokio::sync::mpsc::Receiver<AsyncRequest>,
     mut stopped_rx: tokio::sync::broadcast::Receiver<()>,
+    upload_trigger_rx: tokio::sync::mpsc::UnboundedReceiver<upload::UploadTrigger>,
 ) -> Result<()> {
     tracing::debug!("Tokio async main started");
     tracing::debug!("Initializing audio stream");
@@ -148,6 +156,18 @@ async fn main(
     tracing::debug!("Initializing API client");
     let api_client = Arc::new(ApiClient::new());
     let mut valid_api_key_and_user_id: Option<(String, String)> = None;
+
+    // Spawn the upload worker task *before* any recording can fire a stop event.
+    // The worker owns the upload-trigger receiver and is the single writer
+    // of `auto_upload_queue_count`, eliminating the RMW race that existed in
+    // the previous design where multiple stop events could each do
+    // `load() -> +1 -> store()` on the same counter.
+    tracing::debug!("Spawning upload worker");
+    tokio::spawn(upload::run_worker(
+        app_state.clone(),
+        api_client.clone(),
+        upload_trigger_rx,
+    ));
 
     let mut state = State {
         recording_state: RecordingState::Idle,
@@ -267,37 +287,34 @@ async fn main(
                         app_state.async_request_tx.send(AsyncRequest::LoadLocalRecordings).await.ok();
                     }
                     AsyncRequest::UploadData => {
-                        if app_state.offline.mode.load(Ordering::SeqCst) {
-                            tracing::info!("Offline mode enabled, skipping upload");
-                            app_state
-                                .ui_update_tx
-                                .send(UiUpdate::UploadFailed("Offline mode is enabled. Uploads are disabled.".to_string()))
-                                .ok();
-                        } else if app_state.upload_in_progress.compare_exchange(
-                            false, true, Ordering::SeqCst, Ordering::SeqCst
-                        ).is_err() {
-                            tracing::info!("Upload already in progress, skipping duplicate UploadData request");
-                        } else {
-                            let recording_location = app_state
-                                .config
-                                .read()
-                                .unwrap()
-                                .preferences
-                                .recording_location
-                                .clone();
-                            tokio::spawn(upload::start(app_state.clone(), api_client.clone(), recording_location));
+                        // Forward to the upload worker. The worker serializes all
+                        // uploads, dedups auto-upload enqueues, and handles
+                        // offline-mode rejection — so this branch is a simple
+                        // channel send with no atomics or CAS dance.
+                        if app_state
+                            .upload_trigger_tx
+                            .send(upload::UploadTrigger::Manual)
+                            .is_err()
+                        {
+                            tracing::error!(
+                                "Upload worker channel closed; cannot trigger manual upload"
+                            );
                         }
                     }
                     AsyncRequest::PauseUpload => {
                         app_state.upload_pause_flag.store(true, Ordering::SeqCst);
-                        // Clear the auto-upload queue when pausing
+                        // Clear the auto-upload queue when pausing. The worker
+                        // owns the queue; we just send it a Clear trigger.
                         let prev_queue_count = app_state
                             .auto_upload_queue_count
                             .load(Ordering::SeqCst);
                         tracing::info!(
                             "Upload pause requested, auto-upload queue cleared (was {prev_queue_count} recordings)"
                         );
-                        set_auto_upload_queue_count(&app_state, 0);
+                        app_state
+                            .upload_trigger_tx
+                            .send(upload::UploadTrigger::Clear)
+                            .ok();
                     }
                     AsyncRequest::OpenDataDump => {
                         let recording_location = app_state
@@ -617,43 +634,16 @@ async fn main(
                         }
                     }
                     AsyncRequest::UploadCompleted { uploaded_count } => {
-                        let prev_count = app_state
-                            .auto_upload_queue_count
-                            .load(Ordering::SeqCst);
-
-                        // When a batch uploads nothing, the recordings in the queue
-                        // aren't ready yet (e.g. still being written). Clear the queue
-                        // to avoid a tight retry loop - the next recording completion
-                        // will trigger another upload attempt.
-                        let new_count = if uploaded_count == 0 {
-                            0
-                        } else {
-                            prev_count.saturating_sub(uploaded_count)
-                        };
-
+                        // The upload worker is the single writer for
+                        // `auto_upload_queue_count` and self-schedules the next
+                        // batch via its trigger channel, so there is nothing to
+                        // do here beyond logging. The worker picks up any
+                        // triggers that arrived during the last batch on its
+                        // next loop iteration.
                         tracing::info!(
-                            "Upload completed: {} recordings uploaded, queue count {} -> {}",
-                            uploaded_count,
-                            prev_count,
-                            new_count
+                            "Upload batch completed: {} recordings uploaded",
+                            uploaded_count
                         );
-
-                        // Update queue count before triggering next batch
-                        set_auto_upload_queue_count(&app_state, new_count);
-
-                        // Check if there are still queued recordings and trigger next upload.
-                        // We've already updated the count atomically above, so a simple
-                        // load check is sufficient here.
-                        if app_state.auto_upload_queue_count.load(Ordering::SeqCst) > 0 {
-                            tracing::info!(
-                                "Auto-upload queue has remaining recordings, starting next upload batch"
-                            );
-                            app_state
-                                .async_request_tx
-                                .send(AsyncRequest::UploadData)
-                                .await
-                                .ok();
-                        }
                     }
                     AsyncRequest::ClearAutoUploadQueue => {
                         let prev_count = app_state
@@ -663,7 +653,10 @@ async fn main(
                             "Auto-upload queue cleared (was {} recordings)",
                             prev_count
                         );
-                        set_auto_upload_queue_count(&app_state, 0);
+                        app_state
+                            .upload_trigger_tx
+                            .send(upload::UploadTrigger::Clear)
+                            .ok();
                     }
                     AsyncRequest::SetOfflineMode { enabled, offline_reason } => {
                         tracing::info!("Setting offline mode to {}", enabled);
@@ -1324,7 +1317,7 @@ impl State {
             (RecordingState::Recording, RecordingState::Idle) => {
                 // Stop recording and return to Idle
                 let honk = self.app_state.config.read().unwrap().preferences.honk;
-                stop_recording_with_notification(
+                let session_path = stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
                     self.sink.as_ref().map(|s| (s, honk, &*self.app_state)),
@@ -1341,7 +1334,7 @@ impl State {
                         due_to_idle: false,
                     });
                 // Trigger auto-upload if enabled
-                self.maybe_trigger_auto_upload().await;
+                self.maybe_trigger_auto_upload(session_path).await;
                 RecordingState::Idle
             }
             (RecordingState::Recording, RecordingState::Paused { pid }) => {
@@ -1349,7 +1342,7 @@ impl State {
                 // Check if this was due to idle timeout before we stop
                 let due_to_idle = self.last_active.elapsed() > MAX_IDLE_DURATION;
                 let honk = self.app_state.config.read().unwrap().preferences.honk;
-                stop_recording_with_notification(
+                let session_path = stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
                     self.sink.as_ref().map(|s| (s, honk, &*self.app_state)),
@@ -1367,7 +1360,7 @@ impl State {
                         due_to_idle,
                     });
                 // Trigger auto-upload if enabled (recording was saved)
-                self.maybe_trigger_auto_upload().await;
+                self.maybe_trigger_auto_upload(session_path).await;
                 RecordingState::Paused { pid }
             }
             (RecordingState::Paused { .. }, RecordingState::Idle) => {
@@ -1413,7 +1406,7 @@ impl State {
                 // Here we intentionally set honk to false, we don't want audio cue to occur
                 // on an intended recording restart and confuse the user
                 let unsupported_games = self.app_state.unsupported_games.read().unwrap().clone();
-                stop_recording_with_notification(
+                let _ = stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
                     self.sink.as_ref().map(|s| (s, false, &*self.app_state)),
@@ -1442,8 +1435,16 @@ impl State {
     }
 
     /// Triggers auto-upload if the preference is enabled.
-    /// Should be called after a recording is completed/saved.
-    async fn maybe_trigger_auto_upload(&self) {
+    /// Should be called after a recording is completed/saved. The
+    /// `session_path` identifies the session that just finished and is used
+    /// by the upload worker's dedup set to drop duplicate concurrent
+    /// enqueues (e.g. two rapid stop-recording events).
+    ///
+    /// This method is branch-free on the hot path: it just does a channel
+    /// send. All "is this session already queued?" logic lives in the
+    /// upload worker, so no race window exists between the check and the
+    /// send.
+    async fn maybe_trigger_auto_upload(&self, session_path: Option<PathBuf>) {
         let Ok(config) = self.app_state.config.read() else {
             tracing::error!("Config RwLock poisoned in maybe_trigger_auto_upload, skipping");
             return;
@@ -1463,28 +1464,26 @@ impl State {
             return;
         }
 
-        let upload_in_progress = self.app_state.upload_in_progress.load(Ordering::SeqCst);
+        // Build the trigger. If we didn't get a session path (e.g. stop was
+        // a no-op because there was no active recording), fall back to a
+        // Manual trigger which causes the worker to rescan the recording
+        // directory — that's always safe.
+        let trigger = match session_path {
+            Some(path) => {
+                tracing::info!(
+                    session=%path.display(),
+                    "Auto-upload: enqueueing session"
+                );
+                upload::UploadTrigger::Auto { session_path: path }
+            }
+            None => {
+                tracing::info!("Auto-upload: enqueueing manual rescan (no session path)");
+                upload::UploadTrigger::Manual
+            }
+        };
 
-        if upload_in_progress {
-            // Upload already in progress, queue this one
-            let current_count = self
-                .app_state
-                .auto_upload_queue_count
-                .load(Ordering::SeqCst);
-            let new_count = current_count + 1;
-            tracing::info!(
-                "Auto-upload: upload in progress, queued recording (queue count: {})",
-                new_count
-            );
-            set_auto_upload_queue_count(&self.app_state, new_count);
-        } else {
-            // No upload in progress, start one now
-            tracing::info!("Auto-upload: starting upload for completed recording");
-            self.app_state
-                .async_request_tx
-                .send(AsyncRequest::UploadData)
-                .await
-                .ok();
+        if self.app_state.upload_trigger_tx.send(trigger).is_err() {
+            tracing::error!("Auto-upload worker channel closed; dropping auto-upload request");
         }
     }
 }
@@ -1514,13 +1513,16 @@ async fn start_recording_safely(
     }
 }
 
+/// Stops the recording and plays the stop notification. Returns the session
+/// folder path of the recording that was just saved (if any), so the caller
+/// can use it as a dedup key when enqueueing the session for auto-upload.
 async fn stop_recording_with_notification(
     recorder: &mut Recorder,
     input_capture: &InputCapture,
     notification_state: Option<(&Sink, bool, &AppState)>,
     cue_cache: &mut HashMap<String, Vec<u8>>,
-) -> Result<()> {
-    recorder.stop(input_capture).await?;
+) -> Result<Option<PathBuf>> {
+    let session_path = recorder.stop(input_capture).await?;
     if let Some((sink, honk, app_state)) = notification_state {
         notify_of_recording_state_change(sink, honk, app_state, false, cue_cache);
         // refresh the uploads
@@ -1530,7 +1532,7 @@ async fn stop_recording_with_notification(
             .await
             .ok();
     }
-    Ok(())
+    Ok(session_path)
 }
 
 fn notify_of_recording_state_change(
@@ -1598,18 +1600,6 @@ fn play_cue(
     sink.stop();
     sink.append(source);
     sink.play();
-}
-
-/// Helper to update the auto-upload queue count in AppState and notify the UI.
-/// Always use this instead of directly modifying `auto_upload_queue_count` to keep them in sync.
-fn set_auto_upload_queue_count(app_state: &AppState, count: usize) {
-    app_state
-        .auto_upload_queue_count
-        .store(count, Ordering::SeqCst);
-    app_state
-        .ui_update_tx
-        .send(UiUpdate::UpdateAutoUploadQueueCount(count))
-        .ok();
 }
 
 fn wait_for_ctrl_c() -> oneshot::Receiver<()> {

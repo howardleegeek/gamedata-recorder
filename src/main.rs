@@ -111,12 +111,17 @@ fn main() -> Result<()> {
     let (ui_update_tx, ui_update_rx) = app_state::UiUpdateSender::build();
     // A broadcast channel is used as older entries will be dropped if the channel is full.
     let (ui_update_unreliable_tx, ui_update_unreliable_rx) = tokio::sync::broadcast::channel(200);
+    // Upload trigger channel: unbounded so that stop-recording callers never block.
+    // The upload worker task owns the receiver and drains it with dedup.
+    let (upload_trigger_tx, upload_trigger_rx) =
+        tokio::sync::mpsc::unbounded_channel::<upload::UploadTrigger>();
     tracing::debug!("Initializing app state");
     let app_state = Arc::new(app_state::AppState::new(
         async_request_tx,
         ui_update_tx,
         ui_update_unreliable_tx,
         adapter_infos,
+        upload_trigger_tx,
     ));
     tracing::debug!("App state initialized");
 
@@ -128,8 +133,13 @@ fn main() -> Result<()> {
         let stopped_tx = stopped_tx.clone();
         let stopped_rx = stopped_rx.resubscribe();
         move || {
-            let result =
-                tokio_thread::run(app_state.clone(), log_path, async_request_rx, stopped_rx);
+            let result = tokio_thread::run(
+                app_state.clone(),
+                log_path,
+                async_request_rx,
+                stopped_rx,
+                upload_trigger_rx,
+            );
 
             if let Err(e) = result {
                 tracing::error!("Error in tokio thread: {e}");

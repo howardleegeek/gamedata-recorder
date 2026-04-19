@@ -12,7 +12,10 @@ use egui_wgpu::wgpu;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::{
-    config::Config, play_time::PlayTimeTracker, record::LocalRecording, upload::ProgressData,
+    config::Config,
+    play_time::PlayTimeTracker,
+    record::LocalRecording,
+    upload::{ProgressData, UploadTrigger},
 };
 
 pub struct AppState {
@@ -24,7 +27,12 @@ pub struct AppState {
     pub ui_update_unreliable_tx: broadcast::Sender<UiUpdateUnreliable>,
     pub adapter_infos: Vec<wgpu::AdapterInfo>,
     pub upload_pause_flag: Arc<AtomicBool>,
-    /// Number of pending auto-upload requests queued (recordings completed while upload in progress)
+    /// Sender for upload triggers. The upload worker task owns the receiver and
+    /// maintains its own dedup set, so enqueueing is branch-free and race-free.
+    /// See [`crate::upload::UploadTrigger`] for the trigger kinds.
+    pub upload_trigger_tx: mpsc::UnboundedSender<UploadTrigger>,
+    /// Displayed pending-upload count, kept in sync by the upload worker.
+    /// Read-only for everything outside the worker; the worker is the single writer.
     pub auto_upload_queue_count: Arc<AtomicUsize>,
     /// Flag indicating an upload is currently in progress
     pub upload_in_progress: Arc<AtomicBool>,
@@ -70,6 +78,7 @@ impl AppState {
         ui_update_tx: UiUpdateSender,
         ui_update_unreliable_tx: broadcast::Sender<UiUpdateUnreliable>,
         adapter_infos: Vec<wgpu::AdapterInfo>,
+        upload_trigger_tx: mpsc::UnboundedSender<UploadTrigger>,
     ) -> Self {
         tracing::debug!("AppState::new() called");
         tracing::debug!("Loading configuration");
@@ -81,6 +90,7 @@ impl AppState {
             ui_update_unreliable_tx,
             adapter_infos,
             upload_pause_flag: Arc::new(AtomicBool::new(false)),
+            upload_trigger_tx,
             auto_upload_queue_count: Arc::new(AtomicUsize::new(0)),
             upload_in_progress: Arc::new(AtomicBool::new(false)),
             listening_for_new_hotkey: RwLock::new(ListeningForNewHotkey::NotListening),

@@ -1,6 +1,7 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
 };
 
 use tokio::sync::mpsc;
@@ -20,6 +21,155 @@ mod upload_folder;
 mod create_tar;
 
 mod upload_tar;
+
+/// A message sent to the upload worker task.
+///
+/// The worker owns the receiver side of an `UnboundedSender<UploadTrigger>` channel.
+/// Enqueueing a trigger is a lock-free `send()` — there is no shared `Vec<T>` / `RwLock<T>`
+/// that multiple producers could race on.
+///
+/// The worker maintains an internal `HashSet<PathBuf>` of session paths that are
+/// already pending upload. Dedup happens inside the worker, so producers don't
+/// need to check "is this session already queued?" before sending.
+#[derive(Debug, Clone)]
+pub enum UploadTrigger {
+    /// Auto-upload fired after a recording completes. `session_path` is used
+    /// as the dedup key so that two rapid stop-recording events for the same
+    /// session don't double-enqueue.
+    Auto { session_path: PathBuf },
+    /// Manual upload fired by the user (e.g. clicking the Upload button).
+    /// These always run a full rescan of the recordings directory; no dedup key.
+    Manual,
+    /// Clear the pending auto-upload dedup set (e.g. user paused uploads or
+    /// toggled auto-upload off). The worker drops all queued sessions and
+    /// resets the UI queue count to zero.
+    Clear,
+}
+
+/// Runs the upload worker task. This task owns the receive side of the
+/// upload-trigger channel and is the only writer for
+/// [`AppState::auto_upload_queue_count`].
+///
+/// Because the worker is a single task that awaits triggers sequentially,
+/// there is no possibility of a duplicate concurrent upload being spawned,
+/// and the RMW on `auto_upload_queue_count` that existed in the old design
+/// is gone — the worker always knows the exact size of its pending set.
+///
+/// This task is spawned before any recording can fire a stop event, so the
+/// channel is always ready to receive triggers (see `tokio_thread::main`).
+pub async fn run_worker(
+    app_state: Arc<AppState>,
+    api_client: Arc<ApiClient>,
+    mut trigger_rx: mpsc::UnboundedReceiver<UploadTrigger>,
+) {
+    // Dedup set of session paths that have been enqueued for auto-upload but
+    // not yet processed. Manual triggers are not deduped (they always run a
+    // full rescan).
+    let mut pending: HashSet<PathBuf> = HashSet::new();
+    // Whether we've seen at least one Manual trigger since the last upload.
+    let mut manual_requested = false;
+
+    while let Some(trigger) = trigger_rx.recv().await {
+        // Drain any immediately-available backlog to coalesce rapid-fire triggers
+        // (e.g. two stop-recording events fired within a few milliseconds).
+        match trigger {
+            UploadTrigger::Auto { session_path } => {
+                pending.insert(session_path);
+            }
+            UploadTrigger::Manual => {
+                manual_requested = true;
+            }
+            UploadTrigger::Clear => {
+                pending.clear();
+                manual_requested = false;
+            }
+        }
+        loop {
+            match trigger_rx.try_recv() {
+                Ok(UploadTrigger::Auto { session_path }) => {
+                    pending.insert(session_path);
+                }
+                Ok(UploadTrigger::Manual) => {
+                    manual_requested = true;
+                }
+                Ok(UploadTrigger::Clear) => {
+                    pending.clear();
+                    manual_requested = false;
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Publish current queue size to UI.
+        let queue_size = pending.len();
+        app_state
+            .auto_upload_queue_count
+            .store(queue_size, Ordering::SeqCst);
+        app_state
+            .ui_update_tx
+            .send(UiUpdate::UpdateAutoUploadQueueCount(queue_size))
+            .ok();
+
+        // Offline mode: drop auto-upload work silently, but notify the user
+        // about a manual request so they know why it didn't start.
+        if app_state.offline.mode.load(Ordering::SeqCst) {
+            if manual_requested {
+                tracing::info!("Offline mode enabled, skipping upload");
+                app_state
+                    .ui_update_tx
+                    .send(UiUpdate::UploadFailed(
+                        "Offline mode is enabled. Uploads are disabled.".to_string(),
+                    ))
+                    .ok();
+                manual_requested = false;
+            }
+            pending.clear();
+            app_state.auto_upload_queue_count.store(0, Ordering::SeqCst);
+            app_state
+                .ui_update_tx
+                .send(UiUpdate::UpdateAutoUploadQueueCount(0))
+                .ok();
+            continue;
+        }
+
+        // Take ownership of this batch's state before the actual upload runs,
+        // so triggers that arrive *during* the upload are queued for the next
+        // iteration rather than being lost. We clear the dedup set here because
+        // `start` does its own filesystem scan and will pick up everything that
+        // matters; the set's job was just to coalesce rapid-fire enqueues.
+        let batch_len = pending.len();
+        pending.clear();
+        let was_manual = std::mem::take(&mut manual_requested);
+
+        if batch_len == 0 && !was_manual {
+            // Nothing to do (e.g. trigger was a duplicate already-processed path).
+            continue;
+        }
+
+        tracing::info!(
+            paths = batch_len,
+            manual = was_manual,
+            "Upload worker starting batch"
+        );
+
+        let recording_location = app_state
+            .config
+            .read()
+            .map(|c| c.preferences.recording_location.clone())
+            .unwrap_or_default();
+
+        // `start` manages `upload_in_progress` itself (sets true on entry,
+        // false on exit). Because the worker is a single task that awaits
+        // `start` to completion before picking up the next trigger, there's
+        // no concurrent writer to the flag, so no race is possible.
+        start(app_state.clone(), api_client.clone(), recording_location).await;
+
+        // After the batch, the worker loop continues and will immediately
+        // pick up any triggers that arrived during the upload.
+    }
+
+    tracing::info!("Upload worker shutting down (trigger channel closed)");
+}
 
 pub async fn start(
     app_state: Arc<AppState>,

@@ -148,6 +148,10 @@ impl Recording {
         self.hwnd
     }
 
+    pub(crate) fn recording_location(&self) -> &std::path::Path {
+        &self.recording_location
+    }
+
     pub(crate) fn game_resolution(&self) -> (u32, u32) {
         self.game_resolution
     }
