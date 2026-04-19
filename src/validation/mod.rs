@@ -216,7 +216,7 @@ fn validate_files(
         duration_minutes: (end_time - start_time) / 60.0,
     };
 
-    let mut invalid_reasons = video::validate(mp4_path, metadata);
+    let invalid_reasons = video::validate(mp4_path, metadata);
     let (keyboard_stats, keyboard_invalid_reasons) = keyboard::validate(&input);
     let (mouse_stats, mouse_invalid_reasons) = mouse::validate(&input);
     let (gamepad_stats, gamepad_invalid_reasons) = gamepad::validate(&input);

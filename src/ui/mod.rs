@@ -136,7 +136,7 @@ impl WinitApp {
         // Generate a simple 1x1 pixel fallback icon if assets are missing.
         // This lets the app start on machines where assets/ dir isn't found
         // (e.g. running from a different working directory).
-        let fallback_pixel: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // minimal data
+        let _fallback_pixel: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // minimal data
         let make_fallback_icon = || -> eyre::Result<winit::window::Icon> {
             // 1x1 red pixel RGBA
             winit::window::Icon::from_rgba(vec![255, 0, 0, 255], 1, 1)
