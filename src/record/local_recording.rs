@@ -119,6 +119,9 @@ impl UploadProgressState {
         }
 
         writer.flush()?;
+        // Ensure data reaches disk before returning — protects against
+        // data loss on power failure mid-upload.
+        writer.get_ref().sync_all()?;
         Ok(())
     }
 
