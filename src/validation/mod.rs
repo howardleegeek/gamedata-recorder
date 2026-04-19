@@ -172,13 +172,21 @@ fn validate_files(
             })
             .collect()
     } else {
-        // Legacy CSV format: skip header, parse comma-separated
+        // Legacy CSV format: skip header, parse comma-separated.
+        // Skip malformed lines instead of failing the entire validation —
+        // a single corrupted line shouldn't invalidate an otherwise valid recording.
         file_content
             .lines()
             .skip(1)
-            .map(InputEvent::from_str)
-            .collect::<Result<Vec<_>, _>>()
-            .with_context(|| format!("Error parsing CSV input file at {csv_path:?}"))?
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| match InputEvent::from_str(line) {
+                Ok(event) => Some(event),
+                Err(e) => {
+                    tracing::warn!("Skipping malformed CSV input line: {e}");
+                    None
+                }
+            })
+            .collect()
     };
 
     let start_time = events
