@@ -1038,17 +1038,29 @@ impl State {
                 .actively_recording_window
                 .is_some_and(|window| !is_window_focused(window))
             {
-                // user alt-tabbed out
-                tracing::info!(
-                    "Window {:?} lost focus, pausing recording",
-                    self.actively_recording_window
-                );
-                Some((
-                    RecordingState::Paused {
-                        pid: recording.pid(),
-                    },
-                    "pause recording on window lost focus",
-                ))
+                // Window lost focus — but don't pause if the game process is still running.
+                // Games like GTA V switch between launcher (PlayGTAV.exe) and game (GTA5.exe)
+                // processes during loading, which causes focus changes. Pausing here would
+                // stop recording right when the actual game starts.
+                // Only pause if the game process has actually exited.
+                if !does_process_exist(recording.pid()).unwrap_or_default() {
+                    tracing::info!(
+                        "Game process {} exited, pausing recording",
+                        recording.pid().0
+                    );
+                    Some((
+                        RecordingState::Paused {
+                            pid: recording.pid(),
+                        },
+                        "pause recording on game process exit",
+                    ))
+                } else {
+                    tracing::debug!(
+                        "Window lost focus but game process {} still running, continuing recording",
+                        recording.pid().0
+                    );
+                    None // Keep recording — game is still alive
+                }
             } else if let Ok(current_resolution) = get_recording_base_resolution(recording.hwnd())
                 && current_resolution != recording.game_resolution()
             {
