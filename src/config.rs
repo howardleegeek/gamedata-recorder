@@ -303,10 +303,26 @@ impl Config {
         };
 
         tracing::debug!("Reading config file");
-        let contents = fs::read_to_string(&config_path).context("Failed to read config file")?;
+        let contents = match fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to read config file at {}: {e}", config_path.display());
+                tracing::warn!("Using default configuration");
+                return Ok(Self::default());
+            }
+        };
         tracing::debug!("Parsing config file");
-        let mut config =
-            serde_json::from_str::<Config>(&contents).context("Failed to parse config file")?;
+        let mut config = match serde_json::from_str::<Config>(&contents) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(
+                    "Config file at {} is corrupted or invalid JSON: {e}",
+                    config_path.display()
+                );
+                tracing::warn!("Using default configuration. The corrupted file will be overwritten on next save.");
+                return Ok(Self::default());
+            }
+        };
 
         // Migrate hotkeys: F5 was the old default but users reported it
         // didn't work. Upgrade to F9 (matches competitor convention).
