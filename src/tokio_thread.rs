@@ -59,8 +59,15 @@ async fn main(
 ) -> Result<()> {
     tracing::debug!("Tokio async main started");
     tracing::debug!("Initializing audio stream");
-    let stream_handle = rodio::OutputStreamBuilder::open_default_stream()
-        .map_err(|e| color_eyre::eyre::eyre!("Failed to open audio stream: {e}"))?;
+    let stream_handle = match rodio::OutputStreamBuilder::open_default_stream() {
+        Ok(handle) => handle,
+        Err(e) => {
+            tracing::error!("Failed to open default audio stream: {e}. Audio cues will be unavailable.");
+            return Err(color_eyre::eyre::eyre!(
+                "Failed to open audio stream: {e}. Check that an audio output device is connected."
+            ));
+        }
+    };
 
     tracing::debug!("Initializing recorder");
     let recorder = Recorder::new(
