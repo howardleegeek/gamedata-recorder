@@ -111,17 +111,21 @@ impl TrayIconState {
                         tracing::error!("Failed to send stop signal: {e}");
                     }
 
-                    // Make the window processable so the main loop can
-                    // receive the stop signal, but do NOT steal focus from
-                    // a running game. set_visible(true) alone is enough to
-                    // let the event loop run; focus_window() / set_minimized(false)
-                    // would yank the player out of their game.
+                    // Wake the event loop via ForceUpdate so it processes the
+                    // stop signal. Avoid set_visible(true) here — on some Windows
+                    // builds it briefly activates the window and yanks focus from
+                    // the running game. The event loop will shut down via the
+                    // broadcast channel regardless of window visibility.
+                    ui_update_tx.send(UiUpdate::ForceUpdate).ok();
+
+                    // Only make visible as a last resort if the UI doesn't
+                    // shut down from the ForceUpdate alone (needed for the
+                    // known bug where minimized-to-tray apps don't process
+                    // events until repainted).
                     if !visible.load(Ordering::Relaxed) {
                         window.set_visible(true);
                         visible.store(true, Ordering::Relaxed);
                     }
-
-                    ui_update_tx.send(UiUpdate::ForceUpdate).ok();
                 }
                 _ => {}
             })
