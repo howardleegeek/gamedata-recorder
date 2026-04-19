@@ -949,12 +949,13 @@ impl State {
         if let Err(e) = match (&self.recording_state, e.key_press_keycode()) {
             (RecordingState::Idle, key) if key == start_key => {
                 if self.app_state.is_out_of_date.load(Ordering::SeqCst) {
-                    error_message_box(concat!(
-                        "You are using an outdated version of GameData Recorder. ",
-                        "Please update to the latest version to continue.\n\n",
-                        "Recording and uploading will be blocked until you update."
-                    ));
-                    return;
+                    // Don't block recording with a modal dialog — it steals game focus
+                    // and causes the user to be kicked back to desktop.
+                    // Just log the warning and allow recording to continue.
+                    tracing::warn!(
+                        "Running an outdated version of GameData Recorder. \
+                         Consider updating to the latest version."
+                    );
                 }
                 self.handle_transition(RecordingState::Recording).await
             }

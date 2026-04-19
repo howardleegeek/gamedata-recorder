@@ -279,8 +279,9 @@ pub const MIN_FREE_SPACE_MB: u64 = 512;
 
 /// Minimum footage length
 pub const MIN_FOOTAGE: Duration = Duration::from_secs(20);
-/// Maximum footage length
-pub const MAX_FOOTAGE: Duration = duration_from_mins(10);
+/// Maximum footage length per segment. Recording auto-restarts after this.
+/// 30 minutes balances file size with uninterrupted recording.
+pub const MAX_FOOTAGE: Duration = duration_from_mins(30);
 /// Maximum idle duration before stopping recording.
 /// Set to 5 minutes to handle long game loading screens (GTA V, Elden Ring, etc).
 /// Games often have 1-3 minute loading screens with zero user input.
