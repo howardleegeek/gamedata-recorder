@@ -508,9 +508,7 @@ fn current_available_ram_gb() -> Option<f64> {
 /// the full `new_all()` (which is ~20ms slower on spinning disks).
 fn current_physical_core_count() -> Option<u32> {
     use sysinfo::{CpuRefreshKind, RefreshKind, System};
-    let sys = System::new_with_specifics(
-        RefreshKind::new().with_cpu(CpuRefreshKind::everything()),
-    );
+    let sys = System::new_with_specifics(RefreshKind::new().with_cpu(CpuRefreshKind::everything()));
     sys.physical_core_count().map(|n| n as u32)
 }
 

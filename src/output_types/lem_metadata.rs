@@ -348,7 +348,10 @@ mod tests {
             ray_tracing: false,
         };
         let json = serde_json::to_string(&gs).unwrap();
-        assert!(!json.contains("fov"), "fov should be absent when None, got: {json}");
+        assert!(
+            !json.contains("fov"),
+            "fov should be absent when None, got: {json}"
+        );
     }
 
     /// When fov IS detected (future enhancement), it must serialize with
@@ -363,6 +366,9 @@ mod tests {
             ray_tracing: false,
         };
         let json = serde_json::to_string(&gs).unwrap();
-        assert!(json.contains("\"fov\":103.5"), "expected fov:103.5, got: {json}");
+        assert!(
+            json.contains("\"fov\":103.5"),
+            "expected fov:103.5, got: {json}"
+        );
     }
 }

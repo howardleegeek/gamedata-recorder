@@ -134,9 +134,7 @@ async fn main(
     let consent_guard = match consent_guard {
         Some(g) => g,
         None => {
-            tracing::info!(
-                "App shut down before consent was granted; skipping input capture init"
-            );
+            tracing::info!("App shut down before consent was granted; skipping input capture init");
             return Ok(());
         }
     };

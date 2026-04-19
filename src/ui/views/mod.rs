@@ -357,8 +357,7 @@ impl App {
         // backend integration is required.
         let needs_consent = {
             let current = crate::config::current_pkg_version();
-            self.local_credentials.consent_status(&current)
-                != input_capture::ConsentStatus::Granted
+            self.local_credentials.consent_status(&current) != input_capture::ConsentStatus::Granted
         };
         if needs_consent {
             self.consent_view(ctx);

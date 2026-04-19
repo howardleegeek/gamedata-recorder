@@ -7,8 +7,8 @@ use color_eyre::Result;
 use tokio::sync::mpsc;
 
 mod kbm_capture;
-pub use kbm_capture::{ConsentGuard, ConsentStatus};
 use kbm_capture::KbmCapture;
+pub use kbm_capture::{ConsentGuard, ConsentStatus};
 
 mod gamepad_capture;
 pub use gamepad_capture::{ActiveGamepad, GamepadId, GamepadMetadata};

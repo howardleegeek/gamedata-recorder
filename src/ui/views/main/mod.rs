@@ -198,10 +198,7 @@ impl App {
         );
 
         // Recording Location Error Window (security guard rejection)
-        recording_location_error_window(
-            ctx,
-            &mut self.main_view_state.recording_location_error,
-        );
+        recording_location_error_window(ctx, &mut self.main_view_state.recording_location_error);
 
         // Games Window
         {
@@ -352,9 +349,7 @@ fn keyboard_shortcuts_section(
                 "Toggle Recording:"
             }),
         );
-        let button_text = if app_state
-            .listening_for_new_hotkey
-            .listening_hotkey_target()
+        let button_text = if app_state.listening_for_new_hotkey.listening_hotkey_target()
             == Some(HotkeyRebindTarget::Start)
         {
             "Press any key...".to_string()

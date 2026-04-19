@@ -224,9 +224,7 @@ impl AtomicListeningForNewHotkey {
                 Self::TAG_LISTENING | Self::encode_target(target)
             }
             ListeningForNewHotkey::Captured { target, key } => {
-                Self::TAG_CAPTURED
-                    | Self::encode_target(target)
-                    | ((key as u32) << Self::KEY_SHIFT)
+                Self::TAG_CAPTURED | Self::encode_target(target) | ((key as u32) << Self::KEY_SHIFT)
             }
         }
     }
@@ -318,9 +316,7 @@ impl AtomicListeningForNewHotkey {
     /// Unconditionally return to `NotListening`. Returns the prior state —
     /// useful when the UI wants to know what it just cancelled/consumed.
     pub fn stop_listening(&self) -> ListeningForNewHotkey {
-        let prev = self
-            .state
-            .swap(Self::TAG_NOT_LISTENING, Ordering::AcqRel);
+        let prev = self.state.swap(Self::TAG_NOT_LISTENING, Ordering::AcqRel);
         Self::decode(prev)
     }
 }

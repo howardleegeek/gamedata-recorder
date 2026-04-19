@@ -182,10 +182,7 @@ impl KbmCapture {
     /// before `RegisterRawInputDevices` is called. If consent is not granted
     /// this function returns `Err` immediately without installing any hook.
     /// See the module-level doc comment for the full contract.
-    pub fn initialize(
-        active_keys: Arc<Mutex<ActiveKeys>>,
-        consent: &ConsentGuard,
-    ) -> Result<Self> {
+    pub fn initialize(active_keys: Arc<Mutex<ActiveKeys>>, consent: &ConsentGuard) -> Result<Self> {
         // R46: no hook installation without consent. This MUST run before any
         // Win32 call that registers a system-wide input sink.
         consent.require_granted()?;

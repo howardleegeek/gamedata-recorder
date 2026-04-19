@@ -239,13 +239,8 @@ impl Recorder {
             (params, consent_guard_from_config(&config))
         };
 
-        let recording = Recording::start(
-            self.video_recorder.as_mut(),
-            params,
-            input_capture,
-            consent,
-        )
-        .await;
+        let recording =
+            Recording::start(self.video_recorder.as_mut(), params, input_capture, consent).await;
 
         let recording = match recording {
             Ok(recording) => recording,

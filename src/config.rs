@@ -706,8 +706,7 @@ fn dpapi_unprotect(ciphertext: &[u8]) -> Result<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHA: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
     let mut i = 0;
     while i + 3 <= bytes.len() {
@@ -1196,8 +1195,7 @@ mod tests {
         // Build a path with an explicit `..` component. We don't care whether
         // the path canonicalizes — the raw-component check must fire first.
         let p = PathBuf::from("some").join("..").join("elsewhere");
-        let err = validate_recording_location(&p)
-            .expect_err("path with `..` must be rejected");
+        let err = validate_recording_location(&p).expect_err("path with `..` must be rejected");
         assert!(
             format!("{err}").contains(".."),
             "error should mention `..`, got: {err}"
@@ -1215,10 +1213,7 @@ mod tests {
         // If the tempdir happens to live under LocalAppData (rare, but
         // possible on CI), skip — the test's premise doesn't hold.
         if let Ok(root) = allowed_recording_root() {
-            if let (Ok(t), Ok(r)) = (
-                dunce::canonicalize(tmp.path()),
-                dunce::canonicalize(&root),
-            ) {
+            if let (Ok(t), Ok(r)) = (dunce::canonicalize(tmp.path()), dunce::canonicalize(&root)) {
                 if t.starts_with(&r) {
                     eprintln!(
                         "test skipped: tempdir {} is under allowed root {}",
@@ -1283,8 +1278,7 @@ mod tests {
         let _ = std::fs::remove_file(&link);
         symlink(&target, &link).expect("create symlink");
 
-        let err =
-            validate_recording_location(&link).expect_err("symlink leaf must be rejected");
+        let err = validate_recording_location(&link).expect_err("symlink leaf must be rejected");
         let msg = format!("{err}");
         assert!(
             msg.contains("symlink") || msg.contains("reparse"),

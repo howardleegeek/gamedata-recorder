@@ -90,8 +90,8 @@ fn detect_disk_type_impl(path: &Path) -> Result<DiskType, String> {
             Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
             Storage::FileSystem::{
                 BusTypeNvme, BusTypeSata, BusTypeUsb, CreateFileW, FILE_FLAGS_AND_ATTRIBUTES,
-                FILE_SHARE_READ, FILE_SHARE_WRITE, GetDriveTypeW, GetVolumePathNameW, OPEN_EXISTING,
-                STORAGE_BUS_TYPE,
+                FILE_SHARE_READ, FILE_SHARE_WRITE, GetDriveTypeW, GetVolumePathNameW,
+                OPEN_EXISTING, STORAGE_BUS_TYPE,
             },
             System::{
                 Ioctl::{STORAGE_PROPERTY_ID, StorageDeviceSeekPenaltyProperty},
@@ -161,7 +161,12 @@ fn detect_disk_type_impl(path: &Path) -> Result<DiskType, String> {
             None,
         )
     }
-    .map_err(|e| format!("CreateFileW(\\\\.\\{}:) failed: {e}", drive_letter as u8 as char))?;
+    .map_err(|e| {
+        format!(
+            "CreateFileW(\\\\.\\{}:) failed: {e}",
+            drive_letter as u8 as char
+        )
+    })?;
     if handle.is_invalid() || handle == INVALID_HANDLE_VALUE {
         return Err("CreateFileW returned INVALID_HANDLE_VALUE".to_string());
     }
@@ -178,8 +183,9 @@ fn detect_disk_type_impl(path: &Path) -> Result<DiskType, String> {
     let _guard = CloseOnDrop(handle);
 
     // Query 1: bus type (NVMe / SATA / USB / ...)
-    let bus_type = query_adapter_bus_type(handle, STORAGE_ADAPTER_PROPERTY, PROPERTY_STANDARD_QUERY)
-        .unwrap_or(STORAGE_BUS_TYPE(0));
+    let bus_type =
+        query_adapter_bus_type(handle, STORAGE_ADAPTER_PROPERTY, PROPERTY_STANDARD_QUERY)
+            .unwrap_or(STORAGE_BUS_TYPE(0));
 
     // Query 2: seek penalty (HDD has seek penalty, SSD does not)
     let incurs_seek_penalty = query_seek_penalty(
