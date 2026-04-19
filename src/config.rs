@@ -3,6 +3,32 @@ use constants::encoding::VideoEncoderType;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 
+/// Quick probe: does any GPU report NVIDIA as its vendor?
+/// Uses `sysinfo` (already a dep) to avoid pulling in extra crates.
+fn detect_nvidia_gpu() -> Result<bool> {
+    // sysinfo doesn't expose GPU info directly on all platforms; on Windows
+    // we can shell out to `wmic path win32_VideoController get Name` and
+    // match "NVIDIA". This is a best-effort check — false/error just keeps
+    // the existing encoder choice.
+    #[cfg(target_os = "windows")]
+    {
+        let output = std::process::Command::new("wmic")
+            .args(["path", "win32_VideoController", "get", "Name"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW — no cmd popup
+            .output()
+            .wrap_err("wmic probe failed")?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        Ok(text.to_lowercase().contains("nvidia"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(false)
+    }
+}
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 // camel case renames are legacy from old existing configs, we want it to be backwards-compatible with previous owl releases that used electron
 #[serde(rename_all = "camelCase")]
@@ -343,6 +369,65 @@ impl Config {
             || config.preferences.stop_recording_key == "F5"
         {
             config.preferences.stop_recording_key = default_stop_key();
+        }
+
+        // v2.5.4 migration: scrub per-game `use_window_capture: true` overrides
+        // that v2.5.1 wrote silently on every hook timeout. These overrides
+        // forced window capture, which made `find_window_for_pid` hook the
+        // recorder's OWN UI window (because the function wrongly returned
+        // foreground instead of the real game HWND). On a client machine
+        // this produced 4 minutes of recording of our own UI. Strip them.
+        let games_to_fix: Vec<String> = config
+            .preferences
+            .games
+            .iter()
+            .filter(|(_, cfg)| cfg.use_window_capture)
+            .map(|(name, _)| name.clone())
+            .collect();
+        if !games_to_fix.is_empty() {
+            tracing::warn!(
+                games = ?games_to_fix,
+                "Scrubbing legacy per-game use_window_capture=true overrides \
+                 (v2.5.4 migration) — these were written by v2.5.1's \
+                 auto-flip-on-hook-timeout bug and force self-capture."
+            );
+            for name in &games_to_fix {
+                if let Some(cfg) = config.preferences.games.get_mut(name) {
+                    cfg.use_window_capture = false;
+                }
+            }
+            if let Err(e) = config.save() {
+                tracing::error!(
+                    e=?e,
+                    "Failed to persist config after v2.5.4 migration — \
+                     will retry on next save"
+                );
+            }
+        }
+
+        // v2.5.4: NVENC auto-selection. If the user has an NVIDIA GPU but
+        // encoder is still on X264, flip to NvEnc. Discrete NVIDIA GPUs can
+        // encode essentially for free; x264 software encoding chews CPU
+        // (we saw 1 FPS effective on an AMD iGPU, and NVIDIA users often
+        // end up here by default too).
+        if matches!(
+            config.preferences.encoder.encoder,
+            constants::encoding::VideoEncoderType::X264
+        ) {
+            match detect_nvidia_gpu() {
+                Ok(true) => {
+                    tracing::info!("NVIDIA GPU detected — upgrading encoder X264 -> NvEnc");
+                    config.preferences.encoder.encoder =
+                        constants::encoding::VideoEncoderType::NvEnc;
+                    if let Err(e) = config.save() {
+                        tracing::warn!(e=?e, "Failed to persist NvEnc migration");
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!(e=?e, "GPU vendor probe failed, keeping X264");
+                }
+            }
         }
 
         tracing::debug!("Config::load() complete");
