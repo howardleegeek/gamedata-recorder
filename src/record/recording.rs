@@ -143,7 +143,11 @@ impl Recording {
         };
 
         let title_len = unsafe { GetWindowTextLengthW(self.hwnd) };
-        if title_len > 0 {
+        if title_len <= 0 || title_len > 4096 {
+            // 0 means error or empty title; cap at 4096 to prevent absurd allocations
+            return None;
+        }
+        {
             let mut buf = vec![0u16; (title_len + 1) as usize];
             let copied = unsafe { GetWindowTextW(self.hwnd, &mut buf) };
             if copied > 0 {
