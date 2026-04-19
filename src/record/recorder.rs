@@ -390,9 +390,8 @@ pub fn get_foregrounded_game() -> Result<Option<(String, game_process::Pid, HWND
     let exe_name = exe_path
         .file_name()
         .ok_or_eyre("Failed to get file name from exe path")?
-        .to_str()
-        .ok_or_eyre("Failed to convert exe name to unicode string")?
-        .to_owned();
+        .to_string_lossy()
+        .into_owned();
 
     // Never record ourselves or known non-game processes
     let exe_lower = exe_name.to_lowercase();
