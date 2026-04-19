@@ -503,11 +503,16 @@ struct EnumContext {
 unsafe extern "system" fn enum_windows_proc(
     hwnd: HWND,
     lparam: windows::Win32::Foundation::LPARAM,
-) -> windows::Win32::Foundation::BOOL {
-    use windows::Win32::Foundation::{BOOL, RECT};
+) -> windows::core::BOOL {
+    // v2.5.6: `BOOL` relocated to `windows::core::BOOL` in the `windows` crate
+    // 0.60+ series; pre-v2.5.6 we imported it from `Win32::Foundation` and
+    // CI went red on every push. The callback ABI is unchanged — it's still
+    // a repr-transparent `i32` — so the fix is purely the import path.
+    use windows::Win32::Foundation::RECT;
     use windows::Win32::UI::WindowsAndMessaging::{
         GetClientRect, GetWindowThreadProcessId, IsWindowVisible,
     };
+    use windows::core::BOOL;
     let ctx = unsafe { &mut *(lparam.0 as *mut EnumContext) };
     let mut pid: u32 = 0;
     let _ = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
