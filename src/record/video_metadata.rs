@@ -80,7 +80,11 @@ impl VideoMetadataExtractor {
                 if is_keyframe {
                     let pts = frame
                         .get("pkt_pts_time")
-                        .and_then(|p| p.as_f64())
+                        .and_then(|p| {
+                            // ffprobe may return the value as either a number or a string
+                            p.as_f64()
+                                .or_else(|| p.as_str().and_then(|s| s.parse::<f64>().ok()))
+                        })
                         .map(|p| (p * 1_000_000_000.0) as u64)
                         .unwrap_or(0);
 
