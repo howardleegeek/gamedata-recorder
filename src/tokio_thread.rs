@@ -878,8 +878,8 @@ async fn main(
 fn enable_window_capture_for_game(app_state: &AppState, game_exe: &str) -> Result<()> {
     let exe_without_ext = std::path::Path::new(game_exe)
         .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(game_exe)
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| game_exe.to_string())
         .to_lowercase();
 
     let mut config = app_state.config.write().unwrap();
@@ -1107,8 +1107,8 @@ impl State {
                 // Check if we should attempt fallback (only if window capture is not already enabled)
                 let exe_without_ext = std::path::Path::new(&game_exe)
                     .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(&game_exe)
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| game_exe.clone())
                     .to_lowercase();
 
                 let should_fallback = {
@@ -1600,8 +1600,8 @@ fn get_foregrounded_game(
 
     let exe_without_ext = std::path::Path::new(&exe_name)
         .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(&exe_name)
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| exe_name.clone())
         .to_lowercase();
 
     let unsupported_reason = if let Some(unsupported) = unsupported_games.get(&exe_without_ext) {
