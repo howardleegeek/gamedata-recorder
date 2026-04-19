@@ -8,7 +8,7 @@ use crate::{
     play_time::PlayTimeTransition,
     record::LocalRecording,
     system::keycode::name_to_virtual_keycode,
-    ui::notification::error_message_box,
+    // error_message_box removed — never show popups during recording
     upload,
     util::version::is_version_newer,
 };
@@ -1454,7 +1454,7 @@ async fn start_recording_safely(
 ) -> Result<()> {
     if let Err(e) = recorder.start(input_capture, unsupported_games).await {
         tracing::error!(e=?e, "Failed to start recording");
-        error_message_box(&e.to_string());
+        // No message box — never steal game focus
         recorder.stop(input_capture).await.ok();
         Err(e)
     } else {
