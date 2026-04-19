@@ -181,6 +181,26 @@ impl VideoRecorder for ObsEmbeddedRecorder {
     }
 }
 
+impl Drop for ObsEmbeddedRecorder {
+    fn drop(&mut self) {
+        // Drop the sender first to signal the OBS thread to stop.
+        // The thread's blocking_recv() will return None, causing the loop to exit.
+        drop(std::mem::replace(
+            &mut self.obs_tx,
+            tokio::sync::mpsc::channel(1).0,
+        ));
+
+        // Join the thread to ensure it has fully exited.
+        // Use std::mem::replace to take ownership of the handle,
+        // replacing it with a dummy spawned thread that completes immediately.
+        let handle = std::mem::replace(&mut self._obs_thread, std::thread::spawn(|| {}));
+        // Note: We can't timeout easily in a Drop impl, so we'll just try to join.
+        // If the thread is stuck, this will block. In practice, the OBS thread
+        // should exit promptly when the channel is closed.
+        handle.join().ok();
+    }
+}
+
 enum RecorderMessage {
     StartRecording {
         request: Box<RecordingRequest>,

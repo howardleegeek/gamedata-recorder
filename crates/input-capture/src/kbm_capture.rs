@@ -115,7 +115,8 @@ impl KbmCapture {
                 usUsagePage: 0x01, // Generic Desktop Controls
                 usUsage: usage,
                 dwFlags: RIDEV_INPUTSINK, // Receive input even when not in foreground
-                hwndTarget: hwnd,
+                // For message-only windows (HWND_MESSAGE parent), hwndTarget should be NULL
+                hwndTarget: HWND::default(),
             });
 
             let device_count = raw_input_devices.len() as u32;
