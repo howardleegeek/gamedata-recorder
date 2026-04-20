@@ -28,22 +28,24 @@ use std::sync::Arc;
 use crate::system::ensure_single_instance::ensure_single_instance;
 
 fn main() -> Result<()> {
-    // Security hardening: restrict DLL search to System32 BEFORE any other Win32 call.
-    // This prevents DLL-hijack / side-loading attacks where a malicious DLL dropped in
-    // the app's own directory (or CWD) would otherwise be preferred over the genuine
-    // system DLL. Must run first — once any Win32 API has been called, the loader's
+    // Security hardening: restrict DLL search to a safe set BEFORE any other
+    // Win32 call. Must run first — once any Win32 API has run, the loader's
     // per-process search list may already be fixed.
+    //
+    // v2.5.11: we used to pass ONLY `LOAD_LIBRARY_SEARCH_SYSTEM32`, but that
+    // broke OBS's `LoadLibrary("libobs-d3d11.dll")` because the app-directory
+    // fell out of the search path entirely and the bundled DLLs ship next to
+    // the exe in the release zip. The correct hardening is
+    // `LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`, which is equivalent to
+    // `SYSTEM32 | APPLICATION_DIR | USER_DIRS` — it still excludes the
+    // current-working-directory (which is the actual DLL-hijack vector) but
+    // keeps SxS / app-local DLL loading functional.
     #[cfg(windows)]
     unsafe {
         use windows::Win32::System::LibraryLoader::{
-            LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, SetDefaultDllDirectories,
         };
-        // Best-effort: if this fails (extremely unlikely on supported Windows),
-        // there is nothing useful we can do before logging is up. Swallow the
-        // result so the app still launches; the fallback DLL search order is
-        // still safer than a crash-at-startup. The windows-rs 0.62 binding
-        // wants the typed `LOAD_LIBRARY_FLAGS` constant directly, not `.0`.
-        let _ = SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+        let _ = SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     }
 
     // Set up logging, including to file with rotation (20MB max, 3 files)
