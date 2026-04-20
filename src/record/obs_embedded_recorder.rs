@@ -70,24 +70,26 @@ const OWL_MONITOR_CAPTURE_NAME: &str = "owl_monitor_capture";
 const OWL_WGC_CAPTURE_NAME: &str = "owl_wgc_capture";
 /// OBS source-type ID for WGC capture.
 ///
-/// Four attempts to find the right string (2026-04-20):
+/// Five attempts (2026-04-20):
 ///   1. `wgc_capture`        — not registered
-///   2. `window_capture_wgc` — literal appears in DLL but not registered
-///   3. `window_capture` + `method=2` — doesn't flip to WGC (the source
-///      just registers WGC as a method internally but the plugin as
-///      shipped doesn't expose it via the `method` settings key in our
-///      build)
-///   4. `winrt_capture` — **this one**, verified by enumerating all
-///      `_capture$` symbols in `win-capture.dll`: game_capture,
-///      monitor_capture, window_capture, winrt_capture,
-///      wasapi_process_output_capture. OBS's WinRT-backed capture is
-///      the Windows.Graphics.Capture surface we want. The C class is
-///      `obs-plugins/win-capture/winrt-capture.c` and it registers as
-///      `winrt_capture`.
-const WGC_CAPTURE_SOURCE_ID: &str = "winrt_capture";
+///   2. `window_capture_wgc` — not registered (appears only as a string literal)
+///   3. `window_capture` + `method=2` (int) — **this one** (from now on)
+///   4. `winrt_capture`      — not registered
+///
+/// Empirically the bundled `win-capture.dll` registers 4 sources:
+/// `game_capture`, `monitor_capture`, `window_capture`,
+/// `wasapi_process_output_capture`. WGC is NOT a standalone source on
+/// OBS 30.x; it's the `method` property on `window_capture`, mapping:
+///   0 = Auto (falls back to BitBlt when the compositor isn't cooperative)
+///   1 = BitBlt (legacy, black frames on DX12)
+///   2 = WGC (Windows.Graphics.Capture)
+const WGC_CAPTURE_SOURCE_ID: &str = "window_capture";
 
-/// `capture_mode` setting value for `winrt_capture` that tells it to
-/// bind to a specific window. Matches the enum the plugin exposes.
+/// Method enum on `window_capture` that selects the WGC backend.
+const WGC_CAPTURE_METHOD_WGC: i64 = 2;
+
+/// `capture_mode` setting value (unused for window_capture but kept for
+/// other code paths that reference this const).
 const WGC_CAPTURE_MODE_WINDOW: &str = "window";
 
 // Audio source names and OBS source-type IDs for monitor-capture audio.
@@ -1911,8 +1913,9 @@ fn prepare_source(
                     "Reusing existing WGC capture source"
                 );
                 let mut settings = obs_context.data()?;
-                settings.set_string("capture_mode", WGC_CAPTURE_MODE_WINDOW)?;
+                settings.set_int("method", WGC_CAPTURE_METHOD_WGC)?;
                 settings.set_string("window", window.obs_id.as_str())?;
+                settings.set_int("priority", 1)?; // match by window class
                 settings.set_bool("cursor", true)?;
                 settings.set_bool("client_area", true)?;
                 settings.set_bool("capture_audio", capture_audio)?;
@@ -1926,8 +1929,14 @@ fn prepare_source(
                 );
 
                 let mut settings = obs_context.data()?;
-                settings.set_string("capture_mode", WGC_CAPTURE_MODE_WINDOW)?;
+                // `method=2` forces WGC (vs. Auto=0 or BitBlt=1). Default
+                // Auto often falls back to BitBlt on DX12 games and yields
+                // black frames. Hardcoding WGC fixes CS2/GTA V.
+                settings.set_int("method", WGC_CAPTURE_METHOD_WGC)?;
                 settings.set_string("window", window.obs_id.as_str())?;
+                // `priority=1` = match by window class (SDL_app for CS2,
+                // grcWindow for GTA V). Falls back to title / exe as needed.
+                settings.set_int("priority", 1)?;
                 // `cursor` — render the system cursor on top of the captured
                 // surface. Training models want the cursor state, so yes.
                 settings.set_bool("cursor", true)?;
@@ -2277,10 +2286,10 @@ mod tests {
         // `obs-plugins/win-capture/winrt-capture.c`. Typos here mean the
         // runtime gets `NullPointer` from `obs_source_create` because
         // the source type lookup returns nothing.
-        // v2.5.14 attempt-4: OBS's WinRT-backed capture (which IS WGC) is
-        // registered as `winrt_capture`, verified by enumerating
-        // `_capture$` strings in our bundled win-capture.dll.
-        assert_eq!(WGC_CAPTURE_SOURCE_ID, "winrt_capture");
+        // v2.5.14 attempt 5: WGC is the `method=2` property on the
+        // regular `window_capture` source. Pin both.
+        assert_eq!(WGC_CAPTURE_SOURCE_ID, "window_capture");
+        assert_eq!(WGC_CAPTURE_METHOD_WGC, 2);
         assert_eq!(WGC_CAPTURE_MODE_WINDOW, "window");
     }
 
