@@ -90,6 +90,20 @@ fn main() -> Result<()> {
         git_version::git_version!()
     );
 
+    // CI mode banner. Emitted as `warn` so it's hard to miss in logs — every
+    // safety gate (consent, whitelist) is bypassed when this is active and
+    // anyone reading the log needs to know that.
+    if config::ci_mode() {
+        let out = config::ci_output_dir_override()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<unset; using config default>".to_string());
+        tracing::warn!(
+            output = %out,
+            "CI MODE ACTIVE — consent auto-granted, whitelist bypassed, \
+             this build must NOT ship to end users"
+        );
+    }
+
     color_eyre::install()?;
 
     // Ensure only one instance is running
@@ -124,6 +138,29 @@ fn main() -> Result<()> {
         upload_trigger_tx,
     ));
     tracing::debug!("App state initialized");
+
+    // CI mode: redirect recordings to GAMEDATA_OUTPUT_DIR (in-memory only;
+    // never persisted to disk). All downstream readers go through
+    // `app_state.config.preferences.recording_location`, so a single mutation
+    // here propagates to recorder, upload scanner, and UI without touching any
+    // read site.
+    if let Some(ci_dir) = config::ci_output_dir_override() {
+        if let Err(e) = std::fs::create_dir_all(&ci_dir) {
+            tracing::warn!(
+                error = %e,
+                dir = %ci_dir.display(),
+                "CI mode: failed to create GAMEDATA_OUTPUT_DIR; recordings may fail"
+            );
+        }
+        let mut config = app_state.config.write().unwrap();
+        tracing::info!(
+            old = %config.preferences.recording_location.display(),
+            new = %ci_dir.display(),
+            "CI mode: overriding recording_location"
+        );
+        config.preferences.recording_location = ci_dir;
+        // NB: no `config.save()` — the override is session-only.
+    }
 
     // launch tokio (which hosts the recorder) on seperate thread
     tracing::debug!("Spawning tokio thread");

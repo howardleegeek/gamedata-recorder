@@ -593,9 +593,66 @@ pub fn current_pkg_version() -> Version {
 ///
 /// This is the single entry point for every recording path that needs to
 /// verify consent — input capture, OBS recorder, etc.
+///
+/// CI mode (see [`ci_mode`]) short-circuits to a session-only granted guard
+/// without consulting the on-disk config. This is a test-scaffolding bypass:
+/// it never persists `has_consented` to disk, so the next non-CI launch still
+/// requires a real user click on the ConsentView.
 pub fn consent_guard_from_config(config: &Config) -> ConsentGuard {
+    if ci_mode() {
+        return ConsentGuard::granted();
+    }
     let current = current_pkg_version();
     ConsentGuard::new(config.credentials.consent_status(&current))
+}
+
+/// Returns `true` when the recorder is running under the automated CI test
+/// harness (`run_ci.ps1`).
+///
+/// Activated by setting the environment variable `GAMEDATA_CI_MODE=1` before
+/// launching the binary. The value is sampled once at first call and cached
+/// in a `OnceLock` so subsequent reads are branch-prediction-friendly and
+/// agree with each other for the lifetime of the process.
+///
+/// When active, the binary:
+/// * auto-grants consent in-memory only (no disk write)
+/// * treats any foreground window with a non-null HWND as a recordable game,
+///   bypassing `GAME_WHITELIST` and `is_process_game_shaped`
+/// * if `GAMEDATA_OUTPUT_DIR` is also set, redirects recordings there
+///   instead of `%LocalAppData%\GameData Recorder\recordings`
+///
+/// Production builds with neither variable set behave exactly as before.
+pub fn ci_mode() -> bool {
+    use std::sync::OnceLock;
+    static CI_MODE: OnceLock<bool> = OnceLock::new();
+    *CI_MODE.get_or_init(|| {
+        matches!(
+            std::env::var("GAMEDATA_CI_MODE").ok().as_deref(),
+            Some("1") | Some("true") | Some("TRUE")
+        )
+    })
+}
+
+/// If `GAMEDATA_OUTPUT_DIR` is set (and CI mode is active), return its value
+/// as the recording root. Otherwise return `None` and the caller should fall
+/// back to `Preferences::recording_location`.
+///
+/// The value is sampled and validated once on first call. We deliberately
+/// SKIP `validate_recording_location` here because the CI harness writes to
+/// `<repo>\ci_output`, which is outside the user's `LocalAppData` tree and
+/// would be rejected by the normal symlink/path-escape guard. The CI mode
+/// gate (env-var presence) is the trust boundary for this override.
+pub fn ci_output_dir_override() -> Option<PathBuf> {
+    use std::sync::OnceLock;
+    static OVERRIDE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    OVERRIDE
+        .get_or_init(|| {
+            if !ci_mode() {
+                return None;
+            }
+            std::env::var_os("GAMEDATA_OUTPUT_DIR").map(PathBuf::from)
+        })
+        .clone()
 }
 
 // ---------------------------------------------------------------------------

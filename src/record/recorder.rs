@@ -204,9 +204,20 @@ impl Recorder {
         }
 
         if let Err(error) = is_process_game_shaped(pid) {
-            bail!(
-                "This application ({game_exe}) doesn't look like a game. Please contact us if you think this is a mistake. Error: {error}"
-            );
+            // CI mode: log and continue. The test_game binary is small and
+            // may not load every D3D module the heuristic looks for; the
+            // CI gate (env var) is the trust boundary.
+            if crate::config::ci_mode() {
+                tracing::warn!(
+                    error = ?error,
+                    game_exe,
+                    "CI mode: bypassing is_process_game_shaped check"
+                );
+            } else {
+                bail!(
+                    "This application ({game_exe}) doesn't look like a game. Please contact us if you think this is a mistake. Error: {error}"
+                );
+            }
         }
 
         tracing::info!(
@@ -433,6 +444,15 @@ pub fn get_foregrounded_game() -> Result<Option<(String, game_process::Pid, HWND
         return find_running_game();
     }
 
+    // CI mode: any foreground process that isn't blacklisted counts as "the
+    // game". The harness launches `test_game.exe` (D3D11) which is not in
+    // GAME_WHITELIST, so without this bypass the recorder would idle. We
+    // still require a non-null HWND (foreground_window already enforced
+    // that) and we still skip our own process via the blacklist above.
+    if crate::config::ci_mode() {
+        return Ok(Some((exe_name, pid, hwnd)));
+    }
+
     // Validate executable has .exe extension and strip it for whitelist comparison
     let Some(exe_stem) = exe_lower.strip_suffix(".exe") else {
         // Not a .exe in foreground — try scanning all processes
@@ -452,6 +472,7 @@ pub fn get_foregrounded_game() -> Result<Option<(String, game_process::Pid, HWND
 /// This enables recording even when the game window isn't in focus — common when
 /// the recorder UI, Steam overlay, or a Rockstar launcher is in front.
 fn find_running_game() -> Result<Option<(String, game_process::Pid, HWND)>> {
+    let ci = crate::config::ci_mode();
     let mut found: Option<(String, game_process::Pid)> = None;
 
     game_process::for_each_process(|entry| {
@@ -468,9 +489,18 @@ fn find_running_game() -> Result<Option<(String, game_process::Pid, HWND)>> {
             return true;
         }
 
-        // Check whitelist
+        // Check whitelist (or, in CI mode, accept the test harness binary
+        // by exact name to avoid grabbing a random user process).
         if let Some(stem) = name_lower.strip_suffix(".exe") {
-            if constants::GAME_WHITELIST.iter().any(|g| stem == *g) {
+            let is_match = if ci {
+                // CI harness builds `test_game/target/release/test_game.exe`.
+                // Matching by exact stem keeps the bypass narrow even when
+                // the env var is accidentally left set on a developer box.
+                stem == "test_game"
+            } else {
+                constants::GAME_WHITELIST.iter().any(|g| stem == *g)
+            };
+            if is_match {
                 found = Some((name.clone(), game_process::Pid(entry.th32ProcessID)));
                 return false; // stop scanning
             }

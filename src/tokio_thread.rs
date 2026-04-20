@@ -1638,9 +1638,14 @@ fn get_foregrounded_game(
         .unwrap_or_else(|| exe_name.clone())
         .to_lowercase();
 
-    let unsupported_reason = if let Some(unsupported) = unsupported_games.get(&exe_without_ext) {
+    let ci = crate::config::ci_mode();
+    let unsupported_reason = if !ci && let Some(unsupported) = unsupported_games.get(&exe_without_ext) {
         Some(unsupported.reason.to_string())
-    } else if !recorder.is_window_capturable(hwnd) {
+    } else if !ci && !recorder.is_window_capturable(hwnd) {
+        // CI mode skips this check: monitor-capture mode (the v2.5.8 default)
+        // doesn't actually need a libobs-recognised "game window" — it grabs
+        // the whole display — so the heuristic is overly strict for the
+        // synthetic test_game window.
         Some(
             "Recorder cannot capture this window. Try running GameData Recorder in admin mode."
                 .to_string(),
@@ -1955,6 +1960,15 @@ async fn wait_for_consent(
     app_state: &Arc<AppState>,
     stopped_rx: &mut tokio::sync::broadcast::Receiver<()>,
 ) -> Option<input_capture::ConsentGuard> {
+    // CI mode short-circuit: skip the poll loop and return a granted guard
+    // immediately. `consent_guard_from_config` already does this, but doing
+    // it explicitly here means we never even read the config lock and the
+    // intent is unmistakable on grep. PROD path is unchanged.
+    if crate::config::ci_mode() {
+        tracing::warn!("CI mode: bypassing R46 consent gate (session-only)");
+        return Some(input_capture::ConsentGuard::granted());
+    }
+
     loop {
         let guard = {
             let config = app_state.config.read().unwrap();
