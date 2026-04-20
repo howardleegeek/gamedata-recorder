@@ -36,9 +36,14 @@ $RepoRoot          = $PSScriptRoot
 $RecorderExePinned = "$RepoRoot\target\x86_64-pc-windows-msvc\release\gamedata-recorder.exe"
 $RecorderExeShort  = "$RepoRoot\target\release\gamedata-recorder.exe"
 $RecorderExe       = $RecorderExePinned  # default; re-resolved post-build
-# test_game excluded from the workspace (see a01d5b2) so it uses its
-# own target/ dir with the default (unpinned) target.
-$TestGameExe       = "$RepoRoot\test_game\target\release\test_game.exe"
+
+# test_game is excluded from the workspace (a01d5b2) BUT cargo still
+# walks up for `.cargo/config.toml` which pins the MSVC target for the
+# whole tree — so the test_game binary also lands under the pinned dir,
+# not the default one. Try both.
+$TestGameExePinned = "$RepoRoot\test_game\target\x86_64-pc-windows-msvc\release\test_game.exe"
+$TestGameExeShort  = "$RepoRoot\test_game\target\release\test_game.exe"
+$TestGameExe       = $TestGameExePinned  # default; re-resolved post-build
 
 function Resolve-RecorderExe {
     if (Test-Path $script:RecorderExePinned) {
@@ -47,6 +52,18 @@ function Resolve-RecorderExe {
     }
     if (Test-Path $script:RecorderExeShort) {
         $script:RecorderExe = $script:RecorderExeShort
+        return $true
+    }
+    return $false
+}
+
+function Resolve-TestGameExe {
+    if (Test-Path $script:TestGameExePinned) {
+        $script:TestGameExe = $script:TestGameExePinned
+        return $true
+    }
+    if (Test-Path $script:TestGameExeShort) {
+        $script:TestGameExe = $script:TestGameExeShort
         return $true
     }
     return $false
@@ -174,10 +191,13 @@ if ($SkipBuild) {
     Write-OK "test_game built"
 }
 
-if (-not (Test-Path $TestGameExe)) {
-    Write-Fail "Test game binary not found: $TestGameExe"
+if (-not (Resolve-TestGameExe)) {
+    Write-Fail "Test game binary not found at either path:"
+    Write-Fail "  $TestGameExePinned"
+    Write-Fail "  $TestGameExeShort"
     exit 1
 }
+Write-OK "Resolved test_game binary: $TestGameExe"
 
 # ─── Step 3: Prepare output dir ───────────────────────────────────────────────
 
