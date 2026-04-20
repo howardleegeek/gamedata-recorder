@@ -1639,20 +1639,21 @@ fn get_foregrounded_game(
         .to_lowercase();
 
     let ci = crate::config::ci_mode();
-    let unsupported_reason = if !ci && let Some(unsupported) = unsupported_games.get(&exe_without_ext) {
-        Some(unsupported.reason.to_string())
-    } else if !ci && !recorder.is_window_capturable(hwnd) {
-        // CI mode skips this check: monitor-capture mode (the v2.5.8 default)
-        // doesn't actually need a libobs-recognised "game window" — it grabs
-        // the whole display — so the heuristic is overly strict for the
-        // synthetic test_game window.
-        Some(
-            "Recorder cannot capture this window. Try running GameData Recorder in admin mode."
-                .to_string(),
-        )
-    } else {
-        None
-    };
+    let unsupported_reason =
+        if !ci && let Some(unsupported) = unsupported_games.get(&exe_without_ext) {
+            Some(unsupported.reason.to_string())
+        } else if !ci && !recorder.is_window_capturable(hwnd) {
+            // CI mode skips this check: monitor-capture mode (the v2.5.8 default)
+            // doesn't actually need a libobs-recognised "game window" — it grabs
+            // the whole display — so the heuristic is overly strict for the
+            // synthetic test_game window.
+            Some(
+                "Recorder cannot capture this window. Try running GameData Recorder in admin mode."
+                    .to_string(),
+            )
+        } else {
+            None
+        };
 
     Some(ForegroundedGame {
         exe_name: Some(exe_name),
