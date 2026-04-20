@@ -2,8 +2,8 @@
 #
 # Steps:
 #   1. Build gamedata-recorder
-#   2. Build d3d_test_game
-#   3. Launch d3d_test_game (simulates a real GPU-rendered game)
+#   2. Build test_game
+#   3. Launch test_game (simulates a real GPU-rendered game)
 #   4. Launch gamedata-recorder and wait for it to start recording
 #   5. Let it record for a few seconds
 #   6. Stop recording and close processes
@@ -29,12 +29,12 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot          = $PSScriptRoot
 $RecorderExe       = "$RepoRoot\target\release\gamedata-recorder.exe"
-$TestGameExe       = "$RepoRoot\d3d_test_game\target\release\d3d_test_game.exe"
+$TestGameExe       = "$RepoRoot\test_game\target\release\test_game.exe"
 $VideoOutputDir    = "$RepoRoot\ci_output"
 $CheckVideoScript  = "$RepoRoot\check_video.py"
 
 $TestGameTitle     = "D3D Test Game"      # must match window title in Rust code
-$TestGameProcess   = "d3d_test_game"
+$TestGameProcess   = "test_game"
 
 $MinBrightness     = 10.0
 $MinFps            = 27.0
@@ -126,21 +126,21 @@ if (-not (Test-Path $RecorderExe)) {
     exit 1
 }
 
-# ─── Step 2: Build d3d_test_game ──────────────────────────────────────────────
+# ─── Step 2: Build test_game ──────────────────────────────────────────────
 
-Write-Step "Build d3d_test_game"
+Write-Step "Build test_game"
 
 if ($SkipBuild) {
     Write-Host "  Skipped (--SkipBuild)" -ForegroundColor Yellow
 } else {
-    Push-Location "$RepoRoot\d3d_test_game"
+    Push-Location "$RepoRoot\test_game"
     cargo build --release
     if ($LASTEXITCODE -ne 0) {
-        Write-Fail "cargo build failed for d3d_test_game"
+        Write-Fail "cargo build failed for test_game"
         exit 1
     }
     Pop-Location
-    Write-OK "d3d_test_game built"
+    Write-OK "test_game built"
 }
 
 if (-not (Test-Path $TestGameExe)) {
@@ -159,18 +159,18 @@ Write-OK "Output dir ready: $VideoOutputDir"
 
 # ─── Step 4: Launch test game ─────────────────────────────────────────────────
 
-Write-Step "Launch d3d_test_game"
+Write-Step "Launch test_game"
 
 $gameProc = Start-Process -FilePath $TestGameExe -PassThru
 
 # Wait for the window to appear (proof that D3D init succeeded)
 $windowReady = Wait-ForWindow -Title $TestGameTitle -TimeoutSec 15
 if (-not $windowReady) {
-    Write-Fail "d3d_test_game window never appeared (D3D init may have failed)"
+    Write-Fail "test_game window never appeared (D3D init may have failed)"
     Stop-ProcessSafe $TestGameProcess
     exit 1
 }
-Write-OK "d3d_test_game window visible"
+Write-OK "test_game window visible"
 
 # ─── Step 5: Launch recorder ──────────────────────────────────────────────────
 
