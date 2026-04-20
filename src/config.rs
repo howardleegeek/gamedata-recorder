@@ -414,7 +414,10 @@ pub struct Credentials {
     /// opens a video/audio capture pipeline — see `Credentials::consent_status`
     /// and `input_capture::ConsentGuard`. Serialized as a semver string (e.g.
     /// `"2.5.5"`); `None` round-trips as `null` / missing.
-    #[serde(default)]
+    ///
+    /// Credentials uses a manual Serialize/Deserialize via `CredentialsOnDisk`
+    /// (the DPAPI wrap path), so `#[serde(default)]` would be a no-op here
+    /// — the field is threaded through the shadow struct instead.
     pub consent_given_at_version: Option<Version>,
 }
 
@@ -434,6 +437,11 @@ struct CredentialsOnDisk {
     api_key_encrypted: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_string_bool")]
     has_consented: Option<bool>,
+    /// R46 consent version — semver string of the binary the user accepted.
+    /// `None` means never accepted or stored under an older schema. Bumped
+    /// package versions invalidate stored consent and re-prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    consent_given_at_version: Option<Version>,
 }
 
 impl serde::Serialize for Credentials {
@@ -460,6 +468,7 @@ impl serde::Serialize for Credentials {
             api_key: None,
             api_key_encrypted,
             has_consented: Some(self.has_consented),
+            consent_given_at_version: self.consent_given_at_version.clone(),
         }
         .serialize(serializer)
     }
@@ -517,6 +526,7 @@ impl<'de> serde::Deserialize<'de> for Credentials {
         Ok(Credentials {
             api_key,
             has_consented: raw.has_consented.unwrap_or(false),
+            consent_given_at_version: raw.consent_given_at_version,
         })
     }
 }
