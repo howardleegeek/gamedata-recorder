@@ -38,6 +38,15 @@ jobs:
       - name: Build Rust application (release)
         run: cargo build --release --target x86_64-pc-windows-msvc
 
+      - name: Build test_game (release)
+        # test_game is excluded from the workspace but still targeted at the
+        # pinned MSVC triple because .cargo/config.toml at workspace root
+        # applies to it via cargo's config walk-up.
+        run: |
+          Push-Location test_game
+          cargo build --release --target x86_64-pc-windows-msvc
+          Pop-Location
+
       - name: Create dist directory
         run: New-Item -ItemType Directory -Force -Path dist
 
@@ -64,11 +73,26 @@ jobs:
             Copy-Item $mux "dist\obs-ffmpeg-mux.exe"
           }
 
+      - name: Copy test_game binary
+        # Bundled so ops/QA can run run_ci.ps1 from the extracted zip on any
+        # Windows machine with a GPU, without needing cargo/MSVC installed.
+        run: |
+          $tg = "test_game\target\x86_64-pc-windows-msvc\release\test_game.exe"
+          if (Test-Path $tg) {
+            Copy-Item $tg "dist\test_game.exe"
+          } else {
+            Write-Host "WARN: test_game.exe not found — skipping (zip will not include it)"
+          }
+
       - name: Copy assets
         run: |
           if (Test-Path assets) { Copy-Item -Path assets -Destination dist\assets -Recurse }
           if (Test-Path README.md) { Copy-Item README.md dist\README.md }
           if (Test-Path LICENSE) { Copy-Item LICENSE dist\LICENSE }
+          # Self-contained E2E kit: whoever extracts the zip can run
+          # `.\run_ci.ps1 -SkipBuild` without needing the repo checkout.
+          if (Test-Path run_ci.ps1) { Copy-Item run_ci.ps1 dist\run_ci.ps1 }
+          if (Test-Path check_video.py) { Copy-Item check_video.py dist\check_video.py }
 
       - name: Verify dist contents
         run: |

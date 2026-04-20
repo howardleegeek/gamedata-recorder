@@ -46,6 +46,9 @@ $TestGameExeShort  = "$RepoRoot\test_game\target\release\test_game.exe"
 $TestGameExe       = $TestGameExePinned  # default; re-resolved post-build
 
 function Resolve-RecorderExe {
+    # `dist` zip layout: the exe is a sibling of this script.
+    $sibling = "$script:RepoRoot\gamedata-recorder.exe"
+    if (Test-Path $sibling) { $script:RecorderExe = $sibling; return $true }
     if (Test-Path $script:RecorderExePinned) {
         $script:RecorderExe = $script:RecorderExePinned
         return $true
@@ -58,6 +61,9 @@ function Resolve-RecorderExe {
 }
 
 function Resolve-TestGameExe {
+    # `dist` zip layout: the exe is a sibling of this script.
+    $sibling = "$script:RepoRoot\test_game.exe"
+    if (Test-Path $sibling) { $script:TestGameExe = $sibling; return $true }
     if (Test-Path $script:TestGameExePinned) {
         $script:TestGameExe = $script:TestGameExePinned
         return $true
