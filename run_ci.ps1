@@ -120,7 +120,10 @@ function Wait-ForProcessReady([string]$name, [int]$timeoutSec = 15) {
 }
 
 function Get-LatestVideo([string]$dir) {
-    return Get-ChildItem -Path $dir -Filter "*.mp4" -ErrorAction SilentlyContinue |
+    # Recordings land at $dir\session_YYYYMMDD_HHMMSS_<suffix>\*.mp4 — use
+    # -Recurse so we find them inside the session subfolders, not just at
+    # the top level.
+    return Get-ChildItem -Path $dir -Filter "*.mp4" -Recurse -ErrorAction SilentlyContinue |
            Sort-Object LastWriteTime -Descending |
            Select-Object -First 1
 }
@@ -204,8 +207,10 @@ Write-OK "Resolved test_game binary: $TestGameExe"
 Write-Step "Prepare output directory"
 
 New-Item -ItemType Directory -Force -Path $VideoOutputDir | Out-Null
-# Clear old CI videos so we can reliably pick the latest one
-Get-ChildItem -Path $VideoOutputDir -Filter "*.mp4" | Remove-Item -Force
+# Clear everything in the output dir so we don't confuse a prior run's
+# mp4 for the current one. Recordings nest under session_*/ subfolders.
+Get-ChildItem -Path $VideoOutputDir -Recurse -Force -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Write-OK "Output dir ready: $VideoOutputDir"
 
 # ─── Step 4: Launch test game ─────────────────────────────────────────────────
@@ -230,7 +235,13 @@ Write-Step "Launch gamedata-recorder"
 # Tell recorder where to save output
 $env:GAMEDATA_OUTPUT_DIR = $VideoOutputDir
 
-$recorderProc = Start-Process -FilePath $RecorderExe -PassThru
+# Redirect recorder stdout/stderr to files so CI can surface errors
+# that would otherwise vanish into a detached console window.
+$recorderStdout = Join-Path $VideoOutputDir "recorder.stdout.log"
+$recorderStderr = Join-Path $VideoOutputDir "recorder.stderr.log"
+$recorderProc = Start-Process -FilePath $RecorderExe -PassThru `
+    -RedirectStandardOutput $recorderStdout `
+    -RedirectStandardError  $recorderStderr
 
 # Wait for recorder process to be alive
 $recorderReady = Wait-ForProcess -Name "gamedata-recorder" -TimeoutSec 15
@@ -267,6 +278,22 @@ Write-Step "Locate output video"
 $video = Get-LatestVideo -Dir $VideoOutputDir
 if (-not $video) {
     Write-Fail "No video file found in $VideoOutputDir"
+    Write-Host "--- output dir listing ---" -ForegroundColor Yellow
+    Get-ChildItem -Path $VideoOutputDir -Recurse -Force -ErrorAction SilentlyContinue |
+        Select-Object FullName, Length | Format-Table
+    foreach ($logName in @("recorder.stdout.log", "recorder.stderr.log")) {
+        $logPath = Join-Path $VideoOutputDir $logName
+        if (Test-Path $logPath) {
+            Write-Host "--- tail of $logName ---" -ForegroundColor Yellow
+            Get-Content $logPath -Tail 60
+        }
+    }
+    $appLogDir = Join-Path $env:LOCALAPPDATA "GameData Recorder"
+    if (Test-Path $appLogDir) {
+        Write-Host "--- recorder LocalAppData listing ---" -ForegroundColor Yellow
+        Get-ChildItem -Path $appLogDir -Recurse -Force -ErrorAction SilentlyContinue |
+            Select-Object FullName, Length | Format-Table
+    }
     exit 1
 }
 Write-OK "Found video: $($video.FullName)"
