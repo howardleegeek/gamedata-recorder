@@ -1584,11 +1584,15 @@ impl State {
         // window whose client rect is ~1264x680 (below the threshold).
         // The E2E workflow relies on auto-record firing within seconds,
         // so we skip the gate entirely for this one stem.
+        //
+        // F5 fix: gate this bypass behind `ci_mode()` so a user whose
+        // binary happens to be named `test_game.exe` in production can't
+        // accidentally bypass the stability gate.
         let stem = std::path::Path::new(exe_name)
             .file_stem()
             .map(|s| s.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
-        if stem == AUTO_RECORD_TEST_GAME_STEM {
+        if stem == AUTO_RECORD_TEST_GAME_STEM && crate::config::ci_mode() {
             return true;
         }
 

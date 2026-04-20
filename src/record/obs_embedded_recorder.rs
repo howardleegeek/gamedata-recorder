@@ -1828,13 +1828,11 @@ fn prepare_source(
             // `game_resolution` to the monitor-native size so the hook draws
             // into a correctly-sized surface instead of the transient 600x286
             // boot window.
+            // `find_game_capture_window` already bails with a user-facing
+            // message when `window.is_game` is false (see its body above), so
+            // by the time we get here we know we have a capturable game
+            // window — no second `is_game` check needed.
             let window = find_game_capture_window(Some(game_exe), hwnd)?;
-
-            if !window.is_game {
-                bail!(
-                    "The window you're trying to record ({game_exe}) cannot be captured. Please ensure you are capturing a game."
-                );
-            }
 
             let capture_mode = ObsGameCaptureMode::CaptureSpecificWindow;
 
@@ -1898,13 +1896,10 @@ fn prepare_source(
             // `client_area`, `capture_audio`) match the property ids the
             // `win-capture` plugin registers in
             // `obs-plugins/win-capture/winrt-capture.c`.
+            // See F2 above — `find_game_capture_window` already guards
+            // against non-game windows, so the outer `is_game` check here
+            // was unreachable dead code.
             let window = find_game_capture_window(Some(game_exe), hwnd)?;
-
-            if !window.is_game {
-                bail!(
-                    "The window you're trying to record ({game_exe}) cannot be captured. Please ensure you are capturing a game."
-                );
-            }
 
             if let Some(mut source) = last_source.take() {
                 tracing::info!(
