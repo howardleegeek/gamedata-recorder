@@ -5,7 +5,7 @@ exclude = ["tools/vm", "test_game"]
 default-members = ["."]
 
 [workspace.package]
-version = "2.5.9"
+version = "2.5.10"
 
 [workspace.dependencies]
 input-capture = { path = "crates/input-capture" }

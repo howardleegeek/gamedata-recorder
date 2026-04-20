@@ -10,10 +10,23 @@ name: E2E CI (run_ci.ps1)
 #   to install VS Build Tools / MSVC without interactive UAC prompt.
 # - windows-latest runner has everything pre-installed and elevation
 #   isn't an issue (the runner IS admin on its own VM).
+#
+# KNOWN LIMITATION: windows-latest runners have NO real GPU / OpenGL.
+# Empirically (iter 7, 2026-04-20):
+#   - OBS init fails with RuntimeChannelError — libobs can't create
+#     a working D3D device on the runner's software adapter
+#   - egui_overlay panics with "WGL: The driver does not appear to
+#     support OpenGL" — egui_overlay is built with glfw + OpenGL
+# Net: the recorder CANNOT execute a real recording on a GH runner;
+# the workflow can only verify compile + deps wiring.
+#
+# For a real end-to-end smoke test, run run_ci.ps1 locally on any
+# Windows machine with a GPU (nucbox, a dev laptop, a teammate's box).
+# See docs/NUCBOX_SETUP_SOP.md for the bring-up steps.
+#
+# Set to workflow_dispatch ONLY so every push doesn't red this run.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       record_seconds:
