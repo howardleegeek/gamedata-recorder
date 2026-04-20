@@ -1,0 +1,90 @@
+name: E2E CI (run_ci.ps1)
+
+# Runs the teammate's end-to-end test harness on a GitHub Actions
+# windows-latest runner (free compute, has cargo + MSVC + Python +
+# ffmpeg pre-installed). Drives the recorder via GAMEDATA_CI_MODE=1
+# against the synthetic test_game D3D window and validates the MP4.
+#
+# Why not run on nucbox directly:
+# - OpenSSH session on nucbox runs as filtered UAC token; can't elevate
+#   to install VS Build Tools / MSVC without interactive UAC prompt.
+# - windows-latest runner has everything pre-installed and elevation
+#   isn't an issue (the runner IS admin on its own VM).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      record_seconds:
+        description: 'Seconds to record'
+        required: false
+        default: '5'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Bypass consent gate, game-whitelist, and use $GAMEDATA_OUTPUT_DIR
+  # instead of %LocalAppData%. See `feat(ci): GAMEDATA_CI_MODE`.
+  GAMEDATA_CI_MODE: '1'
+
+jobs:
+  e2e:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify Python + ffprobe present
+        run: |
+          python --version
+          ffprobe -version | Select-Object -First 1
+        shell: pwsh
+
+      - name: Install cargo-obs-build
+        run: cargo install cargo-obs-build
+        shell: pwsh
+
+      - name: Pre-stage OBS runtime next to target/release
+        # run_ci.ps1 expects the recorder binary at target\release\
+        # The recorder needs libobs DLLs + data next to the exe.
+        run: |
+          New-Item -ItemType Directory -Force -Path target\release
+          cargo obs-build build --out-dir target\release
+        shell: pwsh
+
+      - name: Run E2E pipeline
+        # Pass workflow input via env (safe from injection).
+        env:
+          RECORD_SECONDS_RAW: ${{ inputs.record_seconds }}
+        run: |
+          $raw = if ([string]::IsNullOrWhiteSpace($env:RECORD_SECONDS_RAW)) { '5' } else { $env:RECORD_SECONDS_RAW }
+          $seconds = [int]$raw
+          Write-Host "Running run_ci.ps1 with -RecordSeconds $seconds"
+          .\run_ci.ps1 -RecordSeconds $seconds -SkipCommit
+        shell: pwsh
+
+      - name: Upload recorded MP4 + logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-output-${{ github.run_id }}
+          path: |
+            ci_output/*.mp4
+            target/x86_64-pc-windows-msvc/release/*.log
+            target/release/*.log
+          retention-days: 14
+          if-no-files-found: warn
