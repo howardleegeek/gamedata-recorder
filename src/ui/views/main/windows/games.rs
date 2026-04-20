@@ -198,7 +198,10 @@ fn game_settings_window(
 
                 ui.horizontal(|ui| {
                     if ui
-                        .checkbox(&mut config.use_window_capture, "Use Screen Capture (Default)")
+                        .checkbox(
+                            &mut config.use_window_capture,
+                            "Use Screen Capture (Default)",
+                        )
                         .changed()
                     {
                         changed = true;
