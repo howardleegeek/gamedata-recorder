@@ -1697,7 +1697,10 @@ fn prepare_source(
         }
     }
 
-    let result = if matches!(state.effective_mode, crate::config::EffectiveCaptureMode::Monitor) {
+    let result = if matches!(
+        state.effective_mode,
+        crate::config::EffectiveCaptureMode::Monitor
+    ) {
         // Use monitor capture (full screen) — works with all games including
         // fullscreen exclusive, anti-cheat, DRM. Same approach as competing products.
         // This captures the entire display, guaranteeing visible game content.

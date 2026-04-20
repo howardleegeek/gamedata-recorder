@@ -460,7 +460,8 @@ pub fn get_monitor_resolution_for_hwnd(hwnd: HWND) -> Result<(u32, u32)> {
         let h = (info.rcMonitor.bottom - info.rcMonitor.top) as u32;
         if w == 0 || h == 0 {
             tracing::warn!(
-                w, h,
+                w,
+                h,
                 "GetMonitorInfoW returned zero-sized rect, falling back to primary"
             );
             return hardware_specs::get_primary_monitor_resolution()
