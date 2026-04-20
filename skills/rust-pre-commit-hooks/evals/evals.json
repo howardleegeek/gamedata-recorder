@@ -1,0 +1,23 @@
+{
+  "skill_name": "rust-pre-commit-hooks",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I just started a new Rust project and I want to make sure every commit is formatted correctly before pushing. Can you set up git hooks that run cargo fmt automatically?",
+      "expected_output": "The skill should install a git pre-commit hook that runs cargo fmt before each commit. The hook should be located at .git/hooks/pre-commit and be executable. Instructions should be provided for running the setup script.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "My team keeps pushing Rust code with formatting inconsistencies. We need something that blocks commits if cargo fmt would make changes. Also, the code should actually build before committing.",
+      "expected_output": "The skill should set up a pre-commit hook that runs both cargo build and cargo fmt --check. If cargo build fails, the commit should be blocked. If cargo fmt --check fails, it should auto-run cargo fmt and then check again.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "I'm working on a Rust project and I'm tired of CI failing because someone pushed unformatted code. Set up git pre-commit hooks for me so this gets caught locally first.",
+      "expected_output": "The skill should provide a setup script that installs a pre-commit hook. The hook should run cargo build (to ensure it compiles) and cargo fmt (to ensure proper formatting). The hook should auto-fix formatting issues and only allow commits when both checks pass.",
+      "files": []
+    }
+  ]
+}
