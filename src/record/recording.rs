@@ -3,7 +3,10 @@ use std::{
     time::{Instant, SystemTime},
 };
 
-use color_eyre::{Result, eyre::ContextCompat};
+use color_eyre::{
+    Result,
+    eyre::{Context as _, ContextCompat},
+};
 use egui_wgpu::wgpu;
 use game_process::{Pid, windows::Win32::Foundation::HWND};
 use input_capture::{ConsentGuard, InputCapture};
