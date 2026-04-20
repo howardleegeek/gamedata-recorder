@@ -30,15 +30,27 @@ $ErrorActionPreference = "Stop"
 $RepoRoot          = $PSScriptRoot
 # .cargo/config.toml pins target = "x86_64-pc-windows-msvc", so the
 # recorder binary lives under target\x86_64-pc-windows-msvc\release\
-# — NOT target\release\ as a naive cargo setup would produce. Fall
-# back to the short path for dev setups without the pin.
-$RecorderExe       = "$RepoRoot\target\x86_64-pc-windows-msvc\release\gamedata-recorder.exe"
-if (-not (Test-Path $RecorderExe)) {
-    $RecorderExe   = "$RepoRoot\target\release\gamedata-recorder.exe"
-}
+# — NOT target\release\ as a naive cargo setup would produce.
+# These are evaluated as *candidates*; the actual selection happens
+# AFTER cargo build, via Resolve-RecorderExe below.
+$RecorderExePinned = "$RepoRoot\target\x86_64-pc-windows-msvc\release\gamedata-recorder.exe"
+$RecorderExeShort  = "$RepoRoot\target\release\gamedata-recorder.exe"
+$RecorderExe       = $RecorderExePinned  # default; re-resolved post-build
 # test_game excluded from the workspace (see a01d5b2) so it uses its
 # own target/ dir with the default (unpinned) target.
 $TestGameExe       = "$RepoRoot\test_game\target\release\test_game.exe"
+
+function Resolve-RecorderExe {
+    if (Test-Path $script:RecorderExePinned) {
+        $script:RecorderExe = $script:RecorderExePinned
+        return $true
+    }
+    if (Test-Path $script:RecorderExeShort) {
+        $script:RecorderExe = $script:RecorderExeShort
+        return $true
+    }
+    return $false
+}
 $VideoOutputDir    = "$RepoRoot\ci_output"
 $CheckVideoScript  = "$RepoRoot\check_video.py"
 
@@ -130,10 +142,15 @@ if ($SkipBuild) {
     Write-OK "gamedata-recorder built"
 }
 
-if (-not (Test-Path $RecorderExe)) {
-    Write-Fail "Recorder binary not found: $RecorderExe"
+# Resolve the binary path now that cargo has placed the artifact —
+# pinned target dir is preferred, short path is the fallback.
+if (-not (Resolve-RecorderExe)) {
+    Write-Fail "Recorder binary not found at either path:"
+    Write-Fail "  $RecorderExePinned"
+    Write-Fail "  $RecorderExeShort"
     exit 1
 }
+Write-OK "Resolved recorder binary: $RecorderExe"
 
 # ─── Step 2: Build test_game ──────────────────────────────────────────────
 
