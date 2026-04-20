@@ -28,7 +28,16 @@ $ErrorActionPreference = "Stop"
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 $RepoRoot          = $PSScriptRoot
-$RecorderExe       = "$RepoRoot\target\release\gamedata-recorder.exe"
+# .cargo/config.toml pins target = "x86_64-pc-windows-msvc", so the
+# recorder binary lives under target\x86_64-pc-windows-msvc\release\
+# — NOT target\release\ as a naive cargo setup would produce. Fall
+# back to the short path for dev setups without the pin.
+$RecorderExe       = "$RepoRoot\target\x86_64-pc-windows-msvc\release\gamedata-recorder.exe"
+if (-not (Test-Path $RecorderExe)) {
+    $RecorderExe   = "$RepoRoot\target\release\gamedata-recorder.exe"
+}
+# test_game excluded from the workspace (see a01d5b2) so it uses its
+# own target/ dir with the default (unpinned) target.
 $TestGameExe       = "$RepoRoot\test_game\target\release\test_game.exe"
 $VideoOutputDir    = "$RepoRoot\ci_output"
 $CheckVideoScript  = "$RepoRoot\check_video.py"

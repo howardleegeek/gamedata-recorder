@@ -64,12 +64,14 @@ jobs:
         run: cargo install cargo-obs-build
         shell: pwsh
 
-      - name: Pre-stage OBS runtime next to target/release
-        # run_ci.ps1 expects the recorder binary at target\release\
-        # The recorder needs libobs DLLs + data next to the exe.
+      - name: Pre-stage OBS runtime next to the recorder binary
+        # The recorder needs libobs DLLs + data folder next to the
+        # .exe at runtime. `.cargo/config.toml` pins the triple so
+        # the exe lands under target\x86_64-pc-windows-msvc\release\.
         run: |
-          New-Item -ItemType Directory -Force -Path target\release
-          cargo obs-build build --out-dir target\release
+          $outDir = "target\x86_64-pc-windows-msvc\release"
+          New-Item -ItemType Directory -Force -Path $outDir
+          cargo obs-build build --out-dir $outDir
         shell: pwsh
 
       - name: Run E2E pipeline
