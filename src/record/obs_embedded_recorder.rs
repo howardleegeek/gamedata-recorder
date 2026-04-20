@@ -17,6 +17,9 @@ use input_capture::ConsentGuard;
 use windows::Win32::{
     Foundation::HWND,
     Graphics::Gdi::{HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorFromWindow},
+    System::StationsAndDesktops::{
+        CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, OpenInputDesktop,
+    },
     UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
 };
 
@@ -87,6 +90,101 @@ pub struct ObsEmbeddedRecorder {
     /// instead of sleeping a fixed duration.
     skipped_frames_notify: Arc<tokio::sync::Notify>,
 }
+
+/// Monitor-capture recovery state machine for DXGI desktop-duplication
+/// access loss. When the user hits Win+L, switches RDP sessions, or the UAC
+/// secure desktop appears, Windows yanks our DX11 duplicator out from under
+/// libobs and OBS emits `DXGI_ERROR_ACCESS_LOST` (0x887A0026). Before this
+/// machine existed, the encoder would keep running and silently produce a
+/// truncated / black MP4 after the lock screen.
+///
+/// The flow, advanced by `RecorderState::poll` (called ~1Hz from the tokio
+/// thread):
+///
+///   Active
+///     └─ `access_lost_flag` set by `TracingObsLogger` (OBS-thread side)
+///         → call `output.pause(true)`; libobs freezes the MP4 timeline
+///         → transition to Paused(now) and clear the flag
+///
+///   Paused(started)
+///     ├─ interactive desktop is back → `output.pause(false)` → Active
+///     ├─ flag re-fires (duplication still busted after unpause) → re-Paused
+///     └─ elapsed >= ACCESS_LOST_RESUME_TIMEOUT → emit `workstation_locked_timeout`
+///         on the next PollUpdate. `Recorder::poll` then calls
+///         `self.stop(..)` gracefully to flush whatever we have on disk.
+///
+/// The machine is only ever installed on the monitor-capture path because
+/// that's the only path that uses the desktop-duplication API in libobs.
+/// Game-capture hooks into the game's own swapchain; window-capture uses
+/// PrintWindow — neither sees DXGI_ERROR_ACCESS_LOST on a workstation lock.
+#[derive(Debug, Clone, Copy)]
+enum AccessLostState {
+    Active,
+    Paused(Instant),
+}
+
+/// Time budget for the user to unlock / come back from the secure desktop
+/// before we give up and gracefully stop the recording. 5 minutes is long
+/// enough to step away for a quick UAC prompt or sign-in without losing a
+/// whole session, and short enough that we're not sitting on a dead
+/// duplicator for hours.
+const ACCESS_LOST_RESUME_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// Probe whether an interactive desktop is currently attached to our
+/// window station. Returns `true` when the logged-in user is at the normal
+/// desktop (i.e. not on the Winlogon secure desktop, not on a locked
+/// workstation, not inside a UAC elevation prompt, not inside a fast-user-
+/// switch / RDP session handoff).
+///
+/// Mechanism: `OpenInputDesktop(DESKTOP_READOBJECTS)` succeeds only when the
+/// current process's window station has access to the foreground input
+/// desktop. During a workstation lock or secure-desktop takeover, Windows
+/// swaps the input desktop to `Winlogon` (which a normal process cannot
+/// open), and the call fails with `ERROR_ACCESS_DENIED` (5). We treat any
+/// error as "not interactive" — the cost of a false negative is that we
+/// keep the MP4 paused for another tick, which is exactly the right thing.
+///
+/// The handle is closed immediately with `CloseDesktop`; we never keep a
+/// desktop handle across polls (doing so would itself count as interactive-
+/// desktop usage and interfere with other processes' handle accounting).
+///
+/// # Safety
+///
+/// `OpenInputDesktop` and `CloseDesktop` are plain Win32 API calls with no
+/// callback, no out-pointers, and no thread-affinity requirements. The
+/// `windows` crate wraps them as `unsafe fn` because they touch OS-managed
+/// handles; there is nothing to invariant-prove beyond "close what we
+/// opened," which we do unconditionally on the success branch.
+fn session_is_interactive() -> bool {
+    // SAFETY: OpenInputDesktop is a read-only Win32 query. DESKTOP_READOBJECTS
+    // is the lowest-rights access mask that still succeeds on the real
+    // interactive desktop and fails with ACCESS_DENIED on Winlogon's secure
+    // desktop — exactly the discrimination we need. `finherit = false` means
+    // the handle is not inherited by child processes (we create none here).
+    let result = unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) };
+    match result {
+        Ok(hdesk) => {
+            // Close immediately. If this fails we log and move on — leaking
+            // a desktop handle for the process lifetime is bad, but blocking
+            // or retrying here would add failure modes without buying much.
+            // SAFETY: `hdesk` was just returned by OpenInputDesktop above;
+            // it is a valid HDESK we own and haven't dereferenced.
+            if let Err(e) = unsafe { CloseDesktop(hdesk) } {
+                tracing::warn!(
+                    e=?e,
+                    "CloseDesktop on interactive-desktop probe failed; handle \
+                     will leak until process exit"
+                );
+            }
+            true
+        }
+        Err(_) => {
+            // ACCESS_DENIED / other failures both mean "we can't see the
+            // interactive desktop right now" — keep the MP4 paused.
+            false
+        }
+    }
+}
 impl ObsEmbeddedRecorder {
     pub async fn new(adapter_index: usize) -> Result<Self>
     where
@@ -130,6 +228,30 @@ impl ObsEmbeddedRecorder {
         })
     }
 }
+
+/// Case-insensitive substrings that identify OBS log lines reporting that
+/// our DX11 desktop-duplication surface has been invalidated. When the user
+/// hits Win+L, switches RDP sessions, or Windows pops a UAC secure desktop
+/// the duplication ACL changes out from under libobs and the D3D runtime
+/// emits `DXGI_ERROR_ACCESS_LOST (0x887A0026)`. The exact log wording varies
+/// across OBS / win-capture versions, so we match against a set of tokens
+/// seen in practice rather than a single brittle string. Matching is done
+/// on the already-lowercased message.
+///
+/// False-positive risk is low: these phrases are narrow by construction
+/// (the hex code is unique, and the English phrases all originate from
+/// `d3d11-monitor-duplicator.c`). The failure mode for a false positive is
+/// a harmless pause/unpause cycle with no effect on the MP4 — the first
+/// unpause happens as soon as `session_is_interactive()` returns true,
+/// which it will within one poll tick on a false alarm.
+const ACCESS_LOST_LOG_NEEDLES: &[&str] = &[
+    "access_lost",
+    "0x887a0026",
+    "device_removed",
+    "duplicator is invalid",
+    "lost duplicator",
+    "could not get next frame",
+];
 #[async_trait::async_trait(?Send)]
 impl VideoRecorder for ObsEmbeddedRecorder {
     fn id(&self) -> &'static str {
@@ -270,9 +392,34 @@ impl VideoRecorder for ObsEmbeddedRecorder {
     }
 
     async fn poll(&mut self) -> PollUpdate {
-        self.obs_tx.send(RecorderMessage::Poll).await.ok();
+        // Round-trip Poll so the OBS-thread-side state machine can report
+        // the DXGI_ERROR_ACCESS_LOST recovery verdict back up to the
+        // `Recorder` layer. The previous implementation dispatched Poll
+        // fire-and-forget, which was fine when `poll()` only did
+        // bookkeeping; now that it also drives the monitor-capture pause/
+        // resume machine we need its answer before building the PollUpdate.
+        //
+        // If the round-trip fails (channel closed because the OBS thread
+        // died mid-shutdown, or reply dropped), we fall back to "no
+        // timeout" and let the next poll try again. A failed send here
+        // means recording is already torn down, so suppressing the flag
+        // is the safe choice — the upstream stop path will run either way.
+        let workstation_locked_timeout = {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            if self
+                .obs_tx
+                .send(RecorderMessage::Poll { reply_tx })
+                .await
+                .is_err()
+            {
+                false
+            } else {
+                reply_rx.await.unwrap_or(false)
+            }
+        };
         PollUpdate {
             active_fps: Some(unsafe { libobs_wrapper::sys::obs_get_active_fps() }),
+            workstation_locked_timeout,
         }
     }
 
@@ -401,7 +548,15 @@ enum RecorderMessage {
         partial_settings: serde_json::Value,
         result_tx: tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
     },
-    Poll,
+    /// Periodic (~1Hz) tick from the tokio thread. Drives the monitor-
+    /// capture DXGI_ERROR_ACCESS_LOST recovery state machine and the
+    /// "game window closed" source-teardown check. Replies with
+    /// `workstation_locked_timeout = true` exactly once, when the 5-minute
+    /// resume window expires on a locked workstation; the tokio caller
+    /// then calls `Recorder::stop` to flush the MP4.
+    Poll {
+        reply_tx: tokio::sync::oneshot::Sender<bool>,
+    },
     CheckHookTimeout {
         result_tx: tokio::sync::oneshot::Sender<bool>,
     },
@@ -530,10 +685,22 @@ fn recorder_thread_impl(
                     .send(state.stop_recording_phase2(partial_settings))
                     .ok();
             }
-            RecorderMessage::Poll => {
-                if let Err(e) = state.poll() {
-                    tracing::error!("Failed to poll OBS embedded recorder: {e}");
-                }
+            RecorderMessage::Poll { reply_tx } => {
+                // `poll` reports `true` in exactly one case: monitor-capture
+                // was paused on DXGI_ERROR_ACCESS_LOST, the user's
+                // workstation is still locked, and we've crossed the
+                // resume deadline. Returning `Err(_)` from the inner poll
+                // (e.g. a libobs scene lookup blew up) is unrelated to
+                // workstation-lock handling and must not fire the graceful
+                // stop, so we coerce errors to `false` and log them.
+                let workstation_locked_timeout = match state.poll() {
+                    Ok(flag) => flag,
+                    Err(e) => {
+                        tracing::error!("Failed to poll OBS embedded recorder: {e}");
+                        false
+                    }
+                };
+                reply_tx.send(workstation_locked_timeout).ok();
             }
             RecorderMessage::CheckHookTimeout { result_tx } => {
                 result_tx.send(state.check_hook_timeout()).ok();
@@ -545,6 +712,18 @@ fn recorder_thread_impl(
 struct RecorderState {
     adapter_index: usize,
     skipped_frames: Arc<Mutex<Option<SkippedFrames>>>,
+    /// Latched to `true` by `TracingObsLogger` the moment OBS logs a
+    /// DXGI_ERROR_ACCESS_LOST (or equivalent duplicator-invalid) message on
+    /// the monitor-capture path. Read + cleared on the OBS thread inside
+    /// `poll()`. Stored as `AtomicBool` rather than behind a mutex because
+    /// the logger runs on a hot path (called for every OBS message) and
+    /// must not block the OBS thread on a poisoned mutex.
+    access_lost_flag: Arc<AtomicBool>,
+    /// Current monitor-capture recovery state (Active or Paused(started)).
+    /// Advanced by `poll()` based on `access_lost_flag` +
+    /// `session_is_interactive()`. Starts `Active` every time a new
+    /// recording begins — we do not carry pause state across recordings.
+    access_lost_state: AccessLostState,
     output: ObsOutputRef,
     source: Option<ObsSourceRef>,
     /// WASAPI desktop (output) audio source, attached only when running in
@@ -591,6 +770,11 @@ impl RecorderState {
         skipped_frames_notify: Arc<tokio::sync::Notify>,
     ) -> Result<(Self, Vec<VideoEncoderType>), libobs_wrapper::utils::ObsError> {
         tracing::debug!("RecorderState::new() called");
+        // Latched access-lost flag shared between TracingObsLogger (producer,
+        // runs on the OBS log thread) and the RecorderState::poll state
+        // machine (consumer, runs on the OBS thread via the message loop).
+        // AtomicBool so the logger can never block the OBS thread.
+        let access_lost_flag = Arc::new(AtomicBool::new(false));
         // Create OBS context
         tracing::debug!("Creating OBS context");
         let mut obs_context = ObsContext::new(
@@ -598,6 +782,7 @@ impl RecorderState {
                 .set_logger(Box::new(TracingObsLogger {
                     skipped_frames: skipped_frames.clone(),
                     skipped_frames_notify: skipped_frames_notify.clone(),
+                    access_lost_flag: access_lost_flag.clone(),
                 }))
                 .set_video_info(video_info(
                     adapter_index,
@@ -651,6 +836,8 @@ impl RecorderState {
             Self {
                 adapter_index,
                 skipped_frames,
+                access_lost_flag,
+                access_lost_state: AccessLostState::Active,
                 output,
                 source: None,
                 desktop_audio_source: None,
@@ -885,6 +1072,16 @@ impl RecorderState {
             tracing::warn!("Skipped frames mutex poisoned, continuing anyway");
         }
 
+        // Reset monitor-capture DXGI-access-lost recovery state. A stale
+        // flag could be sitting here if the previous recording hit Win+L
+        // and the flag was set *after* stop_recording_phase1 cleared it
+        // (race window between `output.stop()` and the last log-line
+        // flush). Starting a fresh recording in Paused state would be
+        // catastrophic — we'd immediately call `output.pause(true)` on an
+        // output that isn't even paused yet in OBS's eyes. Force Active.
+        self.access_lost_flag.store(false, Ordering::Relaxed);
+        self.access_lost_state = AccessLostState::Active;
+
         // A stale `notify_one` permit can exist here if the previous
         // recording's stop timed out waiting for the skipped-frames log
         // line and OBS emitted it afterwards. We do NOT drain the permit
@@ -1016,7 +1213,12 @@ impl RecorderState {
         Ok(settings)
     }
 
-    fn poll(&mut self) -> eyre::Result<()> {
+    /// Periodic tick (~1Hz). Returns `true` exactly once, when the
+    /// monitor-capture DXGI_ERROR_ACCESS_LOST recovery window has expired
+    /// and the caller should gracefully stop the recording. All other
+    /// internal bookkeeping (source teardown when the game closes, pause /
+    /// resume around workstation lock) is advanced in place.
+    fn poll(&mut self) -> eyre::Result<bool> {
         if self
             .last_application
             .as_ref()
@@ -1031,7 +1233,110 @@ impl RecorderState {
             }
         }
 
-        Ok(())
+        // Drive the monitor-capture DXGI_ERROR_ACCESS_LOST recovery state
+        // machine. Only runs while a recording is actually in progress —
+        // the flag can't be set otherwise and pausing an inactive output
+        // would error out of libobs_wrapper.
+        let workstation_locked_timeout = if self.is_recording {
+            self.advance_access_lost_state()
+        } else {
+            // Drop any late-arriving flag while idle. Prevents a stale
+            // latched signal from leaking into the next recording (the
+            // start_recording path also clears this, but belt-and-braces
+            // is cheap here).
+            self.access_lost_flag.store(false, Ordering::Relaxed);
+            false
+        };
+
+        Ok(workstation_locked_timeout)
+    }
+
+    /// Advance the monitor-capture DXGI_ERROR_ACCESS_LOST recovery state
+    /// machine by one tick. See the `AccessLostState` doc comment for the
+    /// full transition table. Returns `true` exactly when the resume
+    /// deadline has expired on a still-locked workstation and the caller
+    /// should stop the recording.
+    ///
+    /// Pause/unpause errors are logged and the state machine keeps trying
+    /// on the next tick. We never propagate the error out of `poll` because
+    /// the top-level tokio loop treats errors as "log and continue" anyway
+    /// and we don't want a transient pause failure to wedge the machine.
+    fn advance_access_lost_state(&mut self) -> bool {
+        let flag_set = self.access_lost_flag.load(Ordering::Relaxed);
+        match self.access_lost_state {
+            AccessLostState::Active => {
+                if flag_set {
+                    tracing::warn!(
+                        "DXGI_ERROR_ACCESS_LOST detected on monitor-capture \
+                         path — pausing recording until the interactive \
+                         desktop returns (workstation lock / UAC / RDP \
+                         switch). Recording will auto-resume on unlock."
+                    );
+                    match self.output.pause(true) {
+                        Ok(()) => {
+                            self.access_lost_state = AccessLostState::Paused(Instant::now());
+                            // Clear so a fresh access-lost burst after
+                            // unpause can re-trigger the pause path.
+                            self.access_lost_flag.store(false, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                e=?e,
+                                "Failed to pause OBS output on access-lost; \
+                                 will retry on next poll tick. MP4 may show \
+                                 a stretch of bad frames until pause succeeds."
+                            );
+                        }
+                    }
+                }
+                false
+            }
+            AccessLostState::Paused(started) => {
+                if started.elapsed() >= ACCESS_LOST_RESUME_TIMEOUT {
+                    tracing::warn!(
+                        elapsed_s = started.elapsed().as_secs(),
+                        deadline_s = ACCESS_LOST_RESUME_TIMEOUT.as_secs(),
+                        "Workstation stayed locked past DXGI access-lost \
+                         recovery window — signalling upstream to stop \
+                         recording gracefully. The MP4 up to the pause \
+                         point is valid and will be flushed by stop()."
+                    );
+                    // Do NOT unpause here — the caller is about to stop the
+                    // output, and unpausing would briefly re-engage the
+                    // (still-broken) duplicator. Just flag and bail.
+                    return true;
+                }
+                if session_is_interactive() {
+                    tracing::info!(
+                        elapsed_s = started.elapsed().as_secs(),
+                        "Interactive desktop is back — resuming recording \
+                         from DXGI access-lost pause"
+                    );
+                    match self.output.pause(false) {
+                        Ok(()) => {
+                            self.access_lost_state = AccessLostState::Active;
+                            // If duplication is still broken, the logger
+                            // will latch the flag again on the very next
+                            // frame attempt and the Active-branch above
+                            // will re-pause. We explicitly do NOT remove
+                            // and re-add the source on a re-failure — the
+                            // task spec forbids it, and libobs's monitor-
+                            // capture source re-acquires a duplicator on
+                            // its own once access is granted again.
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                e=?e,
+                                "Failed to unpause OBS output after \
+                                 interactive desktop returned; staying in \
+                                 Paused and will retry on next poll tick"
+                            );
+                        }
+                    }
+                }
+                false
+            }
+        }
     }
 
     fn check_hook_timeout(&mut self) -> bool {
@@ -1503,12 +1808,43 @@ struct TracingObsLogger {
     /// when the stop-recording path awaits on this, the runtime keeps
     /// draining the input-capture mpsc so WM_INPUT events don't back up.
     skipped_frames_notify: Arc<tokio::sync::Notify>,
+    /// Shared with `RecorderState`. Latched to `true` when an error-level
+    /// OBS log line matches any needle in `ACCESS_LOST_LOG_NEEDLES`. Read
+    /// + cleared by the monitor-capture state machine in `poll()`. Stored
+    /// as `AtomicBool` specifically so this hot-path write is a single
+    /// lock-free store — the OBS log thread must never block on a mutex,
+    /// or it would back up and stall the encoder.
+    access_lost_flag: Arc<AtomicBool>,
 }
 impl ObsLogger for TracingObsLogger {
     fn log(&mut self, level: libobs_wrapper::enums::ObsLogLevel, msg: String) {
         use libobs_wrapper::enums::ObsLogLevel;
         match level {
-            ObsLogLevel::Error => tracing::error!(target: "obs", "{msg}"),
+            ObsLogLevel::Error => {
+                // DXGI_ERROR_ACCESS_LOST recovery: latch the shared flag
+                // when OBS reports that the desktop-duplication surface
+                // has gone away. The state machine in `RecorderState::poll`
+                // picks it up on the next ~1Hz tick and pauses the output.
+                //
+                // We deliberately do the match on the *lowercased* message
+                // because OBS formats these strings differently across
+                // libobs versions (`Could not get next frame`, `DXGI_ERROR_
+                // ACCESS_LOST (0x887A0026)`, `duplicator is invalid`, etc.)
+                // and case-insensitive matching is the cheapest way to be
+                // robust against wording drift. Building the lowercase
+                // string is only O(len); error-level log lines are rare
+                // enough that this never shows up in profiles.
+                let msg_lower = msg.to_ascii_lowercase();
+                if ACCESS_LOST_LOG_NEEDLES
+                    .iter()
+                    .any(|needle| msg_lower.contains(needle))
+                {
+                    // `Release` not required — the state machine only reads
+                    // the bool for a simple branch, no piggy-backed data.
+                    self.access_lost_flag.store(true, Ordering::Relaxed);
+                }
+                tracing::error!(target: "obs", "{msg}");
+            }
             ObsLogLevel::Warning => tracing::warn!(target: "obs", "{msg}"),
             ObsLogLevel::Info => {
                 // HACK: If we encounter a message of the sort
@@ -1642,6 +1978,96 @@ mod tests {
         // and the scene ends up silent again — so lock the strings in.
         assert_eq!(WASAPI_OUTPUT_CAPTURE_ID, "wasapi_output_capture");
         assert_eq!(WASAPI_INPUT_CAPTURE_ID, "wasapi_input_capture");
+    }
+
+    // --- DXGI_ERROR_ACCESS_LOST log matching -------------------------
+    //
+    // We can't simulate a live duplicator-invalid event in a unit test
+    // (no OBS thread, no DXGI, no Windows), but we CAN pin down the log-
+    // line matcher that decides whether a given error string should trip
+    // the monitor-capture pause/resume machine. These tests are the
+    // first-line defence against:
+    //   - A regression that adds a new DXGI phrasing without updating
+    //     `ACCESS_LOST_LOG_NEEDLES` (false negative: lock recording fails).
+    //   - A regression that accidentally broadens a needle so benign
+    //     unrelated errors trip the machine (false positive: every OBS
+    //     error pauses the recording).
+
+    /// Lowercase-match helper mirroring the logic in `TracingObsLogger::log`.
+    /// Keeping the test local to the matcher body means refactors to the
+    /// logger don't silently bypass the test — both paths go through the
+    /// same needle list and the same case-normalization.
+    fn access_lost_log_matches(msg: &str) -> bool {
+        let msg_lower = msg.to_ascii_lowercase();
+        ACCESS_LOST_LOG_NEEDLES
+            .iter()
+            .any(|needle| msg_lower.contains(needle))
+    }
+
+    #[test]
+    fn access_lost_matches_dxgi_hex_code() {
+        // The canonical libobs wording mentions the hex HRESULT. Case-
+        // insensitive so upper-case hex ("0x887A0026") still matches.
+        assert!(access_lost_log_matches(
+            "d3d11-monitor-duplicator: DXGI_ERROR_ACCESS_LOST (0x887A0026)"
+        ));
+    }
+
+    #[test]
+    fn access_lost_matches_duplicator_invalid_phrase() {
+        // win-capture emits this phrasing when ReleaseFrame on a revoked
+        // duplicator comes back with E_INVALIDARG.
+        assert!(access_lost_log_matches(
+            "monitor-capture: duplicator is invalid, recreating"
+        ));
+    }
+
+    #[test]
+    fn access_lost_matches_next_frame_failure() {
+        assert!(access_lost_log_matches(
+            "IDXGIOutputDuplication::AcquireNextFrame: Could not get next frame (0x887A0026)"
+        ));
+    }
+
+    #[test]
+    fn access_lost_ignores_unrelated_errors() {
+        // These are plausible OBS error lines we do NOT want to treat as
+        // workstation-lock signals. If any of these trip the matcher,
+        // we'd pause the recording mid-session on a transient encoder
+        // hiccup and produce a broken MP4 on UAC-less systems.
+        for unrelated in [
+            "encoder: failed to allocate frame buffer",
+            "audio source: sample rate mismatch",
+            "ffmpeg-mux: write failed, disk full",
+            "source: failed to load plugin",
+        ] {
+            assert!(
+                !access_lost_log_matches(unrelated),
+                "unrelated error tripped access-lost matcher: {unrelated:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn access_lost_resume_timeout_is_five_minutes() {
+        // Fail loudly if someone changes the deadline to something
+        // wildly wrong. The task spec calls this out explicitly.
+        assert_eq!(ACCESS_LOST_RESUME_TIMEOUT, Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn access_lost_needles_are_lowercase() {
+        // Matching in `TracingObsLogger::log` lower-cases the message
+        // once and then scans needles against it. If a needle has upper-
+        // case characters it can never match — a silent correctness bug
+        // that wouldn't surface until someone hits Win+L in production.
+        for needle in ACCESS_LOST_LOG_NEEDLES {
+            assert_eq!(
+                *needle,
+                needle.to_ascii_lowercase(),
+                "ACCESS_LOST_LOG_NEEDLES entry is not lowercase: {needle:?}"
+            );
+        }
     }
 
     #[test]

@@ -71,6 +71,14 @@ pub trait VideoRecorder {
 #[derive(Default)]
 pub struct PollUpdate {
     pub active_fps: Option<f64>,
+    /// Set by the embedded OBS recorder when the DXGI desktop-duplication
+    /// capture has been paused for a workstation lock (Win+L, RDP switch,
+    /// UAC secure desktop) for longer than the retry deadline
+    /// (see `obs_embedded_recorder::ACCESS_LOST_RESUME_TIMEOUT`). The
+    /// recording cannot recover past this point without silently producing
+    /// a truncated/black MP4, so `Recorder::poll` treats this as a graceful
+    /// stop signal and calls `self.stop(..)`.
+    pub workstation_locked_timeout: bool,
 }
 pub struct Recorder {
     recording_dir: Box<dyn FnMut() -> PathBuf>,
@@ -313,7 +321,7 @@ impl Recorder {
         Ok(Some(session_path))
     }
 
-    pub async fn poll(&mut self) {
+    pub async fn poll(&mut self, input_capture: &InputCapture) {
         let update = self.video_recorder.poll().await;
         if let Some(fps) = update.active_fps {
             let mut state = self.app_state.state.write().unwrap();
@@ -322,6 +330,32 @@ impl Recorder {
             }
             if let Some(recording) = self.recording.as_mut() {
                 recording.update_fps(fps);
+            }
+        }
+
+        // DXGI_ERROR_ACCESS_LOST recovery timeout (Win+L / RDP / UAC).
+        // The embedded recorder pauses the MP4 timeline on first access-lost
+        // detection and polls for the interactive desktop to return. If we
+        // don't recover within the deadline the capture surface is gone for
+        // good and the only correct action is to flush what we have to disk
+        // — continuing would either block the tokio loop waiting for frames
+        // that will never come or silently record a black screen once the
+        // user returns. This path is distinct from user-initiated stop
+        // (hotkey / UI button) — we intentionally do NOT set
+        // `user_stopped_game_exe` upstream so auto-record can kick back in
+        // once the user is back at their desk.
+        if update.workstation_locked_timeout {
+            tracing::warn!(
+                "Workstation lock / secure desktop persisted past DXGI \
+                 access-lost recovery window — stopping recording gracefully \
+                 to preserve the MP4 we already have on disk"
+            );
+            if let Err(e) = self.stop(input_capture).await {
+                tracing::error!(
+                    e=?e,
+                    "Failed to stop recording after workstation-lock timeout; \
+                     MP4 may be left in an inconsistent state"
+                );
             }
         }
     }

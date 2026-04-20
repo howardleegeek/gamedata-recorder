@@ -1264,8 +1264,12 @@ impl State {
             }
         }
 
-        // Remember to poll the recorder for its own internal work
-        self.recorder.poll().await;
+        // Remember to poll the recorder for its own internal work.
+        // The recorder needs `&InputCapture` so that its internal
+        // workstation-lock recovery path can stop the recording cleanly
+        // when the DXGI access-lost retry window expires (Win+L / RDP /
+        // UAC secure desktop persisted too long — see `Recorder::poll`).
+        self.recorder.poll(&self.input_capture).await;
         None
     }
 

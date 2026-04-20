@@ -36,6 +36,11 @@ windows = { version = "0.62.2", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Ioctl",
     "Win32_System_IO",
+    # DXGI_ERROR_ACCESS_LOST recovery in src/record/obs_embedded_recorder.rs —
+    # `session_is_interactive()` probes the interactive desktop with
+    # OpenInputDesktop / CloseDesktop to decide whether we've returned from
+    # a workstation lock (Win+L), RDP session switch, or UAC secure desktop.
+    "Win32_System_StationsAndDesktops",
 ] }
 winit = "0.30.12"
 uuid = { version = "1.17.0", features = ["v4"] }
