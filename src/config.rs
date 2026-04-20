@@ -747,10 +747,21 @@ pub fn ci_mode() -> bool {
     use std::sync::OnceLock;
     static CI_MODE: OnceLock<bool> = OnceLock::new();
     *CI_MODE.get_or_init(|| {
-        matches!(
-            std::env::var("GAMEDATA_CI_MODE").ok().as_deref(),
-            Some("1") | Some("true") | Some("TRUE")
-        )
+        // F8 fix: the original match only accepted `"1"|"true"|"TRUE"`,
+        // which silently rejected common truthy values like `"yes"`,
+        // `"on"`, `"True"`, or `"YES"`. Accept them case-insensitively so
+        // the env-var contract matches what operators expect.
+        match std::env::var("GAMEDATA_CI_MODE").ok().as_deref() {
+            Some(v)
+                if v.eq_ignore_ascii_case("1")
+                    || v.eq_ignore_ascii_case("true")
+                    || v.eq_ignore_ascii_case("yes")
+                    || v.eq_ignore_ascii_case("on") =>
+            {
+                true
+            }
+            _ => false,
+        }
     })
 }
 
