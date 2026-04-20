@@ -85,14 +85,17 @@ function Wait-ForProcess([string]$name, [int]$timeoutSec = 15) {
     return $false
 }
 
-function Wait-ForWindow([string]$title, [int]$timeoutSec = 20) {
-    Add-Type -AssemblyName System.Windows.Forms
+function Wait-ForProcessReady([string]$name, [int]$timeoutSec = 15) {
     $elapsed = 0
     while ($elapsed -lt $timeoutSec) {
-        $found = [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { $_.DeviceName }
-        # Use FindWindow via P/Invoke to check for window title
-        $hwnd = [Win32.NativeMethods]::FindWindow($null, $title)
-        if ($hwnd -ne [IntPtr]::Zero) { return $true }
+        $proc = Get-Process -Name $name -ErrorAction SilentlyContinue
+        if ($proc -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
+            Write-Host "    Found $name with window" -ForegroundColor Green
+            return $true
+        }
+        if ($proc) {
+            Write-Host "    $name running, waiting for window... (elapsed: ${elapsed}s)" -ForegroundColor Gray
+        }
         Start-Sleep -Milliseconds 500
         $elapsed++
     }
@@ -114,16 +117,18 @@ function Stop-ProcessSafe([string]$name) {
 }
 
 # P/Invoke for FindWindow (to detect when game window appears)
-Add-Type @"
+if (-not ("Win32.NativeMethods" -as [type])) {
+    Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 namespace Win32 {
     public class NativeMethods {
-        [DllImport("user32.dll", SetLastError = true)]
-        public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+        public static extern IntPtr FindWindowA(string lpClassName, string lpWindowName);
     }
 }
 "@
+}
 
 # ─── Step 1: Build recorder ───────────────────────────────────────────────────
 
@@ -190,7 +195,7 @@ Write-Step "Launch test_game"
 $gameProc = Start-Process -FilePath $TestGameExe -PassThru
 
 # Wait for the window to appear (proof that D3D init succeeded)
-$windowReady = Wait-ForWindow -Title $TestGameTitle -TimeoutSec 15
+$windowReady = Wait-ForProcessReady -Name $TestGameProcess -TimeoutSec 15
 if (-not $windowReady) {
     Write-Fail "test_game window never appeared (D3D init may have failed)"
     Stop-ProcessSafe $TestGameProcess
