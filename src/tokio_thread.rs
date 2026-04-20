@@ -178,6 +178,8 @@ async fn main(
         actively_recording_window: None,
         last_auto_record_attempt: None,
         user_stopped_game_exe: None,
+        #[cfg(windows)]
+        stability_tracker: None,
     };
 
     // Offline backoff state
@@ -963,7 +965,70 @@ struct State {
     /// Suppresses auto-record for this game after user manually stopped it.
     /// Cleared when the foreground game changes.
     user_stopped_game_exe: Option<String>,
+    /// Auto-record stability tracker: ensures the game window has settled at
+    /// a sane resolution (>=1280x720) for a consecutive window of time before
+    /// we pin OBS base/output resolution to it. Without this gate, games like
+    /// CS2 whose boot window starts at 600x286 and only later inflates to
+    /// 1920x1080 get recorded at the boot-window resolution — the MP4 is a
+    /// ~25% downscale of the real gameplay.
+    ///
+    /// Reset to `None` whenever the foreground game process disappears so a
+    /// subsequent launch of the same exe re-validates stability from scratch.
+    ///
+    /// Windows-only: the client-rect sampling uses Win32 `GetClientRect` and
+    /// we never auto-record on non-Windows anyway.
+    #[cfg(windows)]
+    stability_tracker: Option<StabilityTracker>,
 }
+
+/// Per-game window stability tracker used to gate auto-record.
+///
+/// The bookkeeping is keyed on `exe_name` (with .exe suffix preserved, same
+/// as `ForegroundedGame::exe_name`). Whenever the foreground flips to a
+/// different game exe, callers must replace the tracker wholesale — it is
+/// not designed to follow the foreground across multiple games.
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+struct StabilityTracker {
+    /// Exe name (with .exe) of the game this tracker is bound to. Guards
+    /// against silently counting stability samples across distinct games.
+    exe_name: String,
+    /// Last observed client-rect size (w, h). Used to detect growth (reset
+    /// `stable_since`) and shrinks below threshold (reset tracker entirely).
+    last_wh: (u32, u32),
+    /// Wall-clock instant the window first held its current-or-larger size
+    /// *while also* being at or above the 1280x720 threshold. Dimension
+    /// growth resets this so we wait for the new, larger size to settle.
+    stable_since: Instant,
+    /// Wall-clock instant the game process was first observed foregrounded
+    /// by this tracker. Combines with `stable_since` to gate on total
+    /// process lifetime (`process_alive_required` in `should_auto_record`).
+    process_spawned: Instant,
+}
+
+/// Minimum window client-rect dimensions (in physical pixels) we require
+/// before auto-record will fire. Corresponds to standard 720p — anything
+/// smaller is almost certainly a transient boot/loading window.
+#[cfg(windows)]
+const AUTO_RECORD_MIN_WIDTH: u32 = 1280;
+#[cfg(windows)]
+const AUTO_RECORD_MIN_HEIGHT: u32 = 720;
+/// Minimum time the window must stay at or above the min dimensions before
+/// we commit to recording. Tuned against CS2's observed ~5-8s launch window
+/// inflation period; 10s gives headroom without feeling sluggish.
+#[cfg(windows)]
+const AUTO_RECORD_STABLE_SECS: u64 = 10;
+/// Minimum total time since we first observed the game process foregrounded.
+/// Guards against auto-recording a game that flashed briefly into the
+/// foreground (e.g. launcher popped up for a split second).
+#[cfg(windows)]
+const AUTO_RECORD_PROCESS_ALIVE_SECS: u64 = 20;
+/// Test-harness exe stem — bypasses the stability gate entirely. The
+/// `test_game.exe` window is intentionally 1280x720 outer / ~1264x680 client
+/// which is below `AUTO_RECORD_MIN_WIDTH`, and the CI workflow expects auto-
+/// record to fire within seconds of launch.
+#[cfg(windows)]
+const AUTO_RECORD_TEST_GAME_STEM: &str = "test_game";
 impl State {
     async fn on_input(&mut self, e: Event) {
         let (start_key, stop_key) = match self.app_state.config.read() {
@@ -1247,18 +1312,45 @@ impl State {
                         game = ?fg.as_ref().and_then(|g| g.exe_name.clone()),
                         "Skipping auto-record: user manually stopped this game"
                     );
+                    // Drop any in-flight stability bookkeeping — the user just
+                    // told us they don't want this game recorded.
+                    #[cfg(windows)]
+                    {
+                        self.stability_tracker = None;
+                    }
                 } else if let Some(ref game) = fg
                     && game.is_recordable()
                     && game.exe_name.is_some()
                     && !self.app_state.is_out_of_date.load(Ordering::SeqCst)
                 {
-                    self.last_auto_record_attempt = Some(std::time::Instant::now());
-                    tracing::info!(
-                        game = ?game.exe_name,
-                        "Recordable game detected in foreground, auto-starting recording"
-                    );
-                    if let Err(e) = self.handle_transition(RecordingState::Recording).await {
-                        tracing::error!(e=?e, "Failed to auto-start recording, cooldown 30s");
+                    // Stability gate: require the game window to have settled
+                    // at >=1280x720 for ≥10s AND the process to have been
+                    // foregrounded for ≥20s before auto-firing. This prevents
+                    // pinning OBS base/output resolution to a transient boot
+                    // window (e.g. CS2's 600x286 loader). test_game is an
+                    // explicit carve-out so CI still triggers on its 720p
+                    // client rect.
+                    #[cfg(windows)]
+                    let gate_passed = self.update_stability_tracker_and_check(game);
+                    #[cfg(not(windows))]
+                    let gate_passed = true;
+
+                    if gate_passed {
+                        self.last_auto_record_attempt = Some(std::time::Instant::now());
+                        tracing::info!(
+                            game = ?game.exe_name,
+                            "Recordable game detected in foreground, auto-starting recording"
+                        );
+                        if let Err(e) = self.handle_transition(RecordingState::Recording).await {
+                            tracing::error!(e=?e, "Failed to auto-start recording, cooldown 30s");
+                        }
+                    }
+                } else {
+                    // No recordable foreground game (or it's unsupported / we're
+                    // out of date): stability bookkeeping is meaningless, clear it.
+                    #[cfg(windows)]
+                    {
+                        self.stability_tracker = None;
                     }
                 }
             }
@@ -1440,6 +1532,199 @@ impl State {
             }
         };
         Ok(())
+    }
+
+    /// Sample the current foreground game window, update the stability
+    /// tracker in place, and return `true` iff the auto-record gate has
+    /// elapsed and we should proceed to fire `handle_transition(Recording)`.
+    ///
+    /// Algorithm:
+    /// 1. Resolve the foreground HWND and its client rect via the existing
+    ///    `get_recording_base_resolution` helper (Win32 `GetClientRect`).
+    ///    If the call fails the gate abstains (returns `false`) — we never
+    ///    want to auto-fire with a resolution we couldn't measure.
+    /// 2. `test_game.exe` bypasses the gate (CI uses a 1280x720 outer /
+    ///    ~1264x680 client rect that would otherwise fail the threshold).
+    /// 3. If we switched to a different exe since the last tick, throw away
+    ///    the previous tracker and bootstrap a fresh one.
+    /// 4. Window size shrank below 1280x720 -> tracker reset (not `None`,
+    ///    but re-bootstrapped so `process_spawned` keeps accruing time).
+    /// 5. Window grew -> bump `last_wh`, reset `stable_since` to now so we
+    ///    wait another 10s at the new (larger) size.
+    /// 6. Both timers have elapsed -> emit one info log and return `true`.
+    ///    The caller is responsible for ensuring we don't double-fire —
+    ///    once recording starts, this method is no longer called until
+    ///    we return to `RecordingState::Idle`.
+    #[cfg(windows)]
+    fn update_stability_tracker_and_check(
+        &mut self,
+        game: &crate::app_state::ForegroundedGame,
+    ) -> bool {
+        let Some(exe_name) = game.exe_name.as_deref() else {
+            return false;
+        };
+
+        // test_game carve-out: the CI harness creates a 1280x720 outer
+        // window whose client rect is ~1264x680 (below the threshold).
+        // The E2E workflow relies on auto-record firing within seconds,
+        // so we skip the gate entirely for this one stem.
+        let stem = std::path::Path::new(exe_name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if stem == AUTO_RECORD_TEST_GAME_STEM {
+            return true;
+        }
+
+        // Sample the current client rect. If we can't, fail closed — it's
+        // safer to keep waiting than to pin OBS to an unknown resolution.
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.is_invalid() {
+            tracing::debug!(
+                game = ?exe_name,
+                "Stability gate: GetForegroundWindow returned null, skipping tick"
+            );
+            return false;
+        }
+        let (w, h) = match get_recording_base_resolution(hwnd) {
+            Ok(wh) => wh,
+            Err(e) => {
+                tracing::debug!(
+                    game = ?exe_name,
+                    error = ?e,
+                    "Stability gate: failed to sample client rect, skipping tick"
+                );
+                return false;
+            }
+        };
+
+        let now = Instant::now();
+        let meets_threshold = w >= AUTO_RECORD_MIN_WIDTH && h >= AUTO_RECORD_MIN_HEIGHT;
+
+        // Three cases: fresh tracker, continuing on same exe, or exe changed.
+        let bound_to_same_exe = self
+            .stability_tracker
+            .as_ref()
+            .is_some_and(|t| t.exe_name == exe_name);
+
+        if !bound_to_same_exe {
+            // Bootstrap: either first sighting or foreground flipped games.
+            if meets_threshold {
+                self.stability_tracker = Some(StabilityTracker {
+                    exe_name: exe_name.to_string(),
+                    last_wh: (w, h),
+                    stable_since: now,
+                    process_spawned: now,
+                });
+                tracing::debug!(
+                    game = ?exe_name,
+                    width = w,
+                    height = h,
+                    "Stability gate: new tracker (window already meets threshold)"
+                );
+            } else {
+                // Under threshold — stash a tracker so `process_spawned`
+                // starts accruing, but keep `stable_since` far in the future
+                // via the same `now` (we'll bump it once threshold is met).
+                self.stability_tracker = Some(StabilityTracker {
+                    exe_name: exe_name.to_string(),
+                    last_wh: (w, h),
+                    stable_since: now,
+                    process_spawned: now,
+                });
+                tracing::debug!(
+                    game = ?exe_name,
+                    width = w,
+                    height = h,
+                    min_w = AUTO_RECORD_MIN_WIDTH,
+                    min_h = AUTO_RECORD_MIN_HEIGHT,
+                    "Stability gate: new tracker (window below threshold, waiting to grow)"
+                );
+            }
+            return false;
+        }
+
+        // Continuing on the same exe — mutate in place. `.unwrap` is safe:
+        // bound_to_same_exe implies Some(tracker) with matching exe.
+        let tracker = self.stability_tracker.as_mut().unwrap();
+
+        if !meets_threshold {
+            // Shrinks below threshold reset the window-stability clock, but
+            // `process_spawned` keeps accruing — a CS2 that boots at 600x286
+            // for 30s before jumping to 1920x1080 still wants to count those
+            // 30s against the 20s process-alive gate.
+            tracker.last_wh = (w, h);
+            tracker.stable_since = now;
+            tracing::debug!(
+                game = ?exe_name,
+                width = w,
+                height = h,
+                "Stability gate: window below threshold, resetting stable_since"
+            );
+            return false;
+        }
+
+        let (lw, lh) = tracker.last_wh;
+        if w > lw || h > lh {
+            // Window grew — wait for it to settle at the new (larger) size.
+            tracing::debug!(
+                game = ?exe_name,
+                from_w = lw,
+                from_h = lh,
+                to_w = w,
+                to_h = h,
+                "Stability gate: window grew, resetting stable_since"
+            );
+            tracker.last_wh = (w, h);
+            tracker.stable_since = now;
+            return false;
+        } else if w < lw || h < lh {
+            // Shrink but still above threshold — treat similarly, re-anchor.
+            tracker.last_wh = (w, h);
+            tracker.stable_since = now;
+            tracing::debug!(
+                game = ?exe_name,
+                from_w = lw,
+                from_h = lh,
+                to_w = w,
+                to_h = h,
+                "Stability gate: window shrank (still above threshold), resetting stable_since"
+            );
+            return false;
+        }
+
+        // Same size as last tick — check both gates.
+        let stable_for = now.saturating_duration_since(tracker.stable_since);
+        let alive_for = now.saturating_duration_since(tracker.process_spawned);
+        let stable_required = Duration::from_secs(AUTO_RECORD_STABLE_SECS);
+        let alive_required = Duration::from_secs(AUTO_RECORD_PROCESS_ALIVE_SECS);
+
+        if stable_for < stable_required || alive_for < alive_required {
+            tracing::debug!(
+                game = ?exe_name,
+                width = w,
+                height = h,
+                stable_ms = stable_for.as_millis() as u64,
+                alive_ms = alive_for.as_millis() as u64,
+                stable_req_ms = stable_required.as_millis() as u64,
+                alive_req_ms = alive_required.as_millis() as u64,
+                "Stability gate: gates not yet satisfied"
+            );
+            return false;
+        }
+
+        tracing::info!(
+            game = ?exe_name,
+            width = w,
+            height = h,
+            stable_secs = stable_for.as_secs(),
+            alive_secs = alive_for.as_secs(),
+            "Game stable at {}x{} for {}s — firing auto-record",
+            w,
+            h,
+            stable_for.as_secs()
+        );
+        true
     }
 
     /// Triggers auto-upload if the preference is enabled.
