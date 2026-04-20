@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/constants", "crates/game-process", "crates/input-capture"]
-exclude = ["tools/vm"]
+exclude = ["tools/vm", "test_game"]
 default-members = ["."]
 
 [workspace.package]
