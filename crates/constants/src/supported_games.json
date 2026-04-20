@@ -1,5 +1,10 @@
 [
   {
+    "game": "D3D Test Game",
+    "url": "https://github.com/howardleegeek/gamedata-recorder",
+    "binaries": ["test_game"]
+  },
+  {
     "game": "Abyssus",
     "url": "https://store.steampowered.com/app/1721110/Abyssus/",
     "binaries": ["abyssus", "rgame"]
