@@ -176,10 +176,11 @@ fn game_settings_window(
     }
 
     let hover_text = concat!(
-        "Enable this if game capture doesn't work for this game.\n",
-        "Window capture may have lower performance but better compatibility.\n",
-        "NOTE: This will capture any overlays that render within the game window (Discord, Steam, etc) ",
-        "- please turn these off."
+        "Screen capture records the entire display and works with all games, ",
+        "including those with anti-cheat software. This is the default mode.\n\n",
+        "Game capture uses hook injection for potentially better performance, ",
+        "but may fail with anti-cheat software. Only disable screen capture if ",
+        "you're experiencing issues with the default mode."
     );
 
     let mut keep_open = true;
@@ -197,7 +198,7 @@ fn game_settings_window(
 
                 ui.horizontal(|ui| {
                     if ui
-                        .checkbox(&mut config.use_window_capture, "Use Window Capture")
+                        .checkbox(&mut config.use_window_capture, "Use Screen Capture (Default)")
                         .changed()
                     {
                         changed = true;
