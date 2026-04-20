@@ -523,16 +523,16 @@ fn find_running_game() -> Result<Option<(String, game_process::Pid, HWND)>> {
             return true;
         }
 
-        // Check whitelist (or, in CI mode, accept the test harness binary
-        // by exact name to avoid grabbing a random user process).
+        // Check whitelist (and in CI mode, ALSO accept the test harness
+        // binary by exact name). CI mode must still find real whitelisted
+        // games — a release candidate getting tested against CS2 or GTA V
+        // on nucbox needs the same code path as production.
         if let Some(stem) = name_lower.strip_suffix(".exe") {
+            let is_whitelisted = constants::GAME_WHITELIST.iter().any(|g| stem == *g);
             let is_match = if ci {
-                // CI harness builds `test_game/target/release/test_game.exe`.
-                // Matching by exact stem keeps the bypass narrow even when
-                // the env var is accidentally left set on a developer box.
-                stem == "test_game"
+                stem == "test_game" || is_whitelisted
             } else {
-                constants::GAME_WHITELIST.iter().any(|g| stem == *g)
+                is_whitelisted
             };
             if is_match {
                 found = Some((name.clone(), game_process::Pid(entry.th32ProcessID)));
