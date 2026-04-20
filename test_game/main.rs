@@ -1,6 +1,6 @@
 // d3d_test_game - Simulates a GPU-rendered game window for CI testing
 // Renders animated colored rectangles using D3D11, mimicking real game behavior.
-// Window title: "D3D Test Game" | Process: d3d_test_game.exe
+// Window title: "D3D Test Game" | Process: test_game.exe
 
 use std::mem;
 use windows::{
@@ -16,32 +16,34 @@ use windows::{
         UI::WindowsAndMessaging::*,
     },
 };
+use windows::Win32::UI::WindowsAndMessaging::WNDCLASSEXA;
+use windows::Win32::UI::WindowsAndMessaging::RegisterClassExA;
 
 fn main() -> Result<()> {
     unsafe {
         let hinstance = GetModuleHandleW(None)?;
 
         // Register window class
-        let class_name = w!("D3DTestGameClass");
-        let wc = WNDCLASSEXW {
-            cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
+        let class_name = s!("D3DTestGameClass");
+        let wc = WNDCLASSEXA {
+            cbSize: mem::size_of::<WNDCLASSEXA>() as u32,
             lpfnWndProc: Some(wnd_proc),
-            hInstance: hinstance.into(),
+            hInstance: HINSTANCE(hinstance.0),
             lpszClassName: class_name,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             ..Default::default()
         };
-        RegisterClassExW(&wc);
+        RegisterClassExA(&wc);
 
         // Create window — 1280x720 windowed, same as a typical game
-        let hwnd = CreateWindowExW(
+        let hwnd = CreateWindowExA(
             WINDOW_EX_STYLE::default(),
             class_name,
-            w!("D3D Test Game"),
+            s!("D3D Test Game"),
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             100, 100, 1280, 720,
             None, None,
-            hinstance,
+            Some(HINSTANCE(hinstance.0)),
             None,
         )?;
 
@@ -70,8 +72,8 @@ fn main() -> Result<()> {
         D3D11CreateDeviceAndSwapChain(
             None,
             D3D_DRIVER_TYPE_HARDWARE,
-            None,
-            D3D11_CREATE_DEVICE_FLAGS::default(),
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_FLAG(0),
             None,
             D3D11_SDK_VERSION,
             Some(&swap_chain_desc),
@@ -87,7 +89,9 @@ fn main() -> Result<()> {
 
         // Get render target view from back buffer
         let back_buffer: ID3D11Texture2D = swap_chain.GetBuffer(0)?;
-        let rtv = device.CreateRenderTargetView(&back_buffer, None)?;
+        let mut rtv: Option<ID3D11RenderTargetView> = None;
+        device.CreateRenderTargetView(&back_buffer, None, Some(&mut rtv))?;
+        let rtv = rtv.unwrap();
 
         // Message + render loop
         // Colors cycle through to prove the capture is live, not a static frame
@@ -104,12 +108,12 @@ fn main() -> Result<()> {
         let mut msg = MSG::default();
         loop {
             // Drain window messages
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+            while PeekMessageA(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 if msg.message == WM_QUIT {
                     return Ok(());
                 }
                 TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+                DispatchMessageA(&msg);
             }
 
             // Render — cycle color every 60 frames (~1 second at 60fps)
@@ -119,7 +123,7 @@ fn main() -> Result<()> {
             context.ClearRenderTargetView(&rtv, &clear_color);
             context.OMSetRenderTargets(Some(&[Some(rtv.clone())]), None);
 
-            swap_chain.Present(1, 0).ok()?; // vsync on
+            swap_chain.Present(1, DXGI_PRESENT(0)).ok()?; // vsync on
 
             frame += 1;
         }
@@ -135,7 +139,7 @@ extern "system" fn wnd_proc(
                 PostQuitMessage(0);
                 LRESULT(0)
             }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+            _ => DefWindowProcA(hwnd, msg, wparam, lparam),
         }
     }
 }
