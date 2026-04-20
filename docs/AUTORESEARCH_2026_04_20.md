@@ -36,13 +36,39 @@
 | F8 | `src/config.rs:749-754` | Docs claim `"yes"/"on"` activate CI mode but code only matches `"1"/"true"/"TRUE"` | 82 |
 | F10 | `src/config.rs:747-755,767-776` | `OnceLock` means CI mode is permanent once set at process start — unsetting env var mid-run doesn't clear it | 88 |
 
-## Recommended Gate B.1 (this week)
+## FREEZE NOTICE (2026-04-20, Howard)
 
-1. **F11 + F12 + F13** — frames timeline anchor: capture `Instant` on first `on_frame()` call; write `{session_start_unix_ns, session_start_instant_ns}` to metadata; set `B_FRAMES=0`. All three together fix AI-training data correctness.
-2. **F14** — write `InputEvent::SessionGap/Resume` sentinels on `AccessLostState::Paused` / resume.
-3. **F7** — apply `validate_recording_location` to CI override path OR gate behind a CLI arg that can't be injected via env. System32 write primitive is real.
-4. **F4** — pass game's HWND into stability tracker instead of `GetForegroundWindow()`. Fixes Edge D.
-5. **F9** — in CI mode, skip ConsentView render entirely. Prevents persistent consent leak.
+> "别瞎改了 如果现在代码可以跑起来。我怕 introduce 新的问题。"
+
+Current state **works**: CS2 9/10, GTA V, 3-min long session all verified recording real game content. Every recent PR has regressed something and required another PR to fix. **Do not dispatch fixes for this audit without explicit re-authorization.** The list below is triage for WHEN we revisit, not a TODO.
+
+## Triage for future work (ranked by "must vs nice")
+
+### MUST (real user pain already triggered or one command away)
+
+None. Everything that would cause immediate user pain was fixed already (DLL hijack guard, WGC source id, fmt, binary path, etc).
+
+### SHOULD (bite only at scale or adversarial conditions)
+
+1. **F11 + F12 + F13** — frame/input timeline alignment. **Only matters when the AI trainer actually tries to correlate inputs with frames**. Until downstream starts complaining, recordings are "good enough" and the trainer can do its own calibration. If client ships a training pipeline → must fix.
+2. **F4** — stability gate reverse-order bug. Only affects users who launch a tray daemon AFTER game is already running. In the real daemon model, recorder starts on boot; games launch later. Edge D is a synthetic test configuration. Fix when someone reports it.
+3. **F7** — `GAMEDATA_OUTPUT_DIR` System32 write primitive. **Only exploitable if attacker already has env-var injection** on the user's machine; at that point they already own the box. Belt-and-suspenders fix but not urgent.
+
+### NICE (cosmetic / future hardening)
+
+4. **F1** — Monitor-mode client-rect vs monitor downscale. Our default is WGC now so Monitor mode is a fallback. Real usage will almost never hit it.
+5. **F14** — session gap sentinel in inputs.jsonl. Small data quality win for Win+L edge case.
+6. **F9** — CI-mode consent UI leak. Real impact only if a CI-mode machine gets repurposed for a real user session without wiping config.
+7. **F15** — metadata stubs (sensitivity, keybindings, VRAM). Fix per-game as we add support.
+8. **F5** — `test_game` bypass without `ci_mode()` guard. Architectural nit; not exploitable today.
+9. **F6** — `process_spawned` anchored to recorder-launch. Adds 20s delay in reverse-order only.
+
+### NITS (don't touch)
+
+10. F2 (dead-code redundant is_game bail)
+11. F3 (stale Notify permit)
+12. F8 (doc inconsistency on CI env values)
+13. F10 (OnceLock permanence — by design)
 
 ## Non-findings (confidence-building)
 
