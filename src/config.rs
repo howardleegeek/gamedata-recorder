@@ -177,20 +177,19 @@ impl Default for AudioCues {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct GameConfig {
-    /// Use window capture instead of game capture for this game.
-    /// Default: false — monitor capture is used by default, which works for
-    /// fullscreen-exclusive games (like GTA V) where window capture would
-    /// attach to the wrong HWND (e.g. Rockstar Games Launcher) or capture
-    /// a 1-second heartbeat stream instead of the actual game frames.
-    /// v2.5.2: flipped to false after session metadata from nucbox test
-    /// proved window capture was hooking the launcher, not the game.
+    /// Use screen/monitor capture instead of game capture for this game.
+    /// When true: captures the entire display (works with all games including anti-cheat)
+    /// When false: uses game capture hook injection (may fail with anti-cheat)
+    /// Default: true — screen capture is the default for maximum compatibility.
+    /// Game capture can be enabled per-game for potentially better performance,
+    /// but it requires hook injection and may fail with anti-cheat software.
     pub use_window_capture: bool,
 }
 
 impl Default for GameConfig {
     fn default() -> Self {
         Self {
-            use_window_capture: false, // v2.5.2: monitor capture is now the default
+            use_window_capture: true, // v2.5.8+: screen capture is the default for compatibility
         }
     }
 }
@@ -890,39 +889,8 @@ impl Config {
             config.preferences.stop_recording_key = default_stop_key();
         }
 
-        // v2.5.4 migration: scrub per-game `use_window_capture: true` overrides
-        // that v2.5.1 wrote silently on every hook timeout. These overrides
-        // forced window capture, which made `find_window_for_pid` hook the
-        // recorder's OWN UI window (because the function wrongly returned
-        // foreground instead of the real game HWND). On a client machine
-        // this produced 4 minutes of recording of our own UI. Strip them.
-        let games_to_fix: Vec<String> = config
-            .preferences
-            .games
-            .iter()
-            .filter(|(_, cfg)| cfg.use_window_capture)
-            .map(|(name, _)| name.clone())
-            .collect();
-        if !games_to_fix.is_empty() {
-            tracing::warn!(
-                games = ?games_to_fix,
-                "Scrubbing legacy per-game use_window_capture=true overrides \
-                 (v2.5.4 migration) — these were written by v2.5.1's \
-                 auto-flip-on-hook-timeout bug and force self-capture."
-            );
-            for name in &games_to_fix {
-                if let Some(cfg) = config.preferences.games.get_mut(name) {
-                    cfg.use_window_capture = false;
-                }
-            }
-            if let Err(e) = config.save() {
-                tracing::error!(
-                    e=?e,
-                    "Failed to persist config after v2.5.4 migration — \
-                     will retry on next save"
-                );
-            }
-        }
+        // Note: v2.5.4 migration removed in v2.5.8+ since screen capture is now the default.
+        // The find_window_for_pid fix from v2.5.4 remains active.
 
         // Security: validate the recording_location loaded from disk against
         // the symlink / path-escape guard. If the stored value is unsafe
