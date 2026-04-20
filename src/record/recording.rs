@@ -96,7 +96,14 @@ impl Recording {
         let effective_mode = game_config.effective_capture_mode(&game_exe_stem);
 
         let game_resolution = match effective_mode {
-            crate::config::EffectiveCaptureMode::GameHook => {
+            // WGC paints into a surface sized to the captured window's
+            // client rect — the same behaviour as the game_capture hook
+            // in practice. Use monitor-native resolution for both so the
+            // composited output doesn't get downscaled into a transient
+            // boot-window client rect (CS2 reports 600x286 during load
+            // and then 1920x1080 once gameplay begins).
+            crate::config::EffectiveCaptureMode::GameHook
+            | crate::config::EffectiveCaptureMode::Wgc => {
                 // Use monitor native resolution, NOT the game-window client
                 // rect. See top-of-block comment for rationale.
                 #[cfg(target_os = "windows")]
@@ -107,7 +114,7 @@ impl Recording {
                                 ?wh,
                                 mode = ?effective_mode,
                                 game_exe_stem,
-                                "Game resolution (monitor-native for game-capture hook)"
+                                "Game resolution (monitor-native for game-capture/wgc)"
                             );
                             wh
                         }

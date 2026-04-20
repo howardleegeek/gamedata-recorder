@@ -189,6 +189,9 @@ pub enum CaptureMode {
     ///   DWM desktop-duplication starts returning black.
     /// - Any other game → Monitor (current default for compatibility
     ///   with anti-cheat and DRM; see v2.5.8 release notes).
+    ///
+    /// A follow-up refactor flips this to prefer WGC; for now Auto is
+    /// the historical Monitor-or-GameHook decision.
     #[default]
     Auto,
     /// Force monitor capture regardless of game. Correct choice for games
@@ -201,6 +204,13 @@ pub enum CaptureMode {
     /// AMD integrated, some GTA V modes), where monitor capture fails to
     /// composite and produces black frames.
     GameHook,
+    /// Force Windows.Graphics.Capture (WGC) — Microsoft's official capture
+    /// API, Win10 1903+. Captures the game's surface through the OS
+    /// compositor without injecting into the process, so it bypasses
+    /// anti-hook heuristics that stop `GameCapture`. Correct choice for
+    /// modern fullscreen-exclusive titles where the hook no longer
+    /// attaches (CS2 with anti-hook, newer Valve games).
+    Wgc,
 }
 
 /// Per-game configuration settings
@@ -235,6 +245,13 @@ pub enum EffectiveCaptureMode {
     Monitor,
     /// GameCaptureSource hooked into the game process.
     GameHook,
+    /// Windows.Graphics.Capture (`wgc_capture` source). Win10 1903+.
+    /// Captures the window's swapchain surface via OS compositor APIs —
+    /// no DLL injection, works for exclusive fullscreen D3D11/D3D12.
+    /// Only produced when the user explicitly opts into
+    /// [`CaptureMode::Wgc`] today; a subsequent refactor adds Auto
+    /// promotion to WGC on Win10 1903+.
+    Wgc,
 }
 
 impl GameConfig {
@@ -247,6 +264,7 @@ impl GameConfig {
         match self.capture_mode {
             CaptureMode::Monitor => EffectiveCaptureMode::Monitor,
             CaptureMode::GameHook => EffectiveCaptureMode::GameHook,
+            CaptureMode::Wgc => EffectiveCaptureMode::Wgc,
             CaptureMode::Auto => {
                 if constants::KNOWN_FULLSCREEN_EXCLUSIVE_GAMES
                     .iter()

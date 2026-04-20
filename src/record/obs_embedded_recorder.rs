@@ -62,6 +62,19 @@ const OWL_SCENE_NAME: &str = "owl_data_collection_scene";
 const OWL_WINDOW_CAPTURE_NAME: &str = "owl_window_capture";
 const OWL_GAME_CAPTURE_NAME: &str = "owl_game_capture";
 const OWL_MONITOR_CAPTURE_NAME: &str = "owl_monitor_capture";
+/// Name of the scene item we create for the Windows.Graphics.Capture
+/// (WGC) source. The OBS source id itself is `wgc_capture` (registered
+/// by `win-capture.dll` / `data/obs-plugins/win-capture/`). WGC is
+/// Microsoft's official Win10 1903+ capture API — no DLL injection,
+/// handles fullscreen-exclusive D3D11/D3D12 cleanly, friendly to HDR.
+const OWL_WGC_CAPTURE_NAME: &str = "owl_wgc_capture";
+/// OBS source-type ID for the WGC capture source. Matches the plugin
+/// registration in `obs-plugins/win-capture/winrt-capture.c`.
+const WGC_CAPTURE_SOURCE_ID: &str = "wgc_capture";
+/// `capture_mode` setting value for `wgc_capture` that tells it to bind
+/// to a specific window (as opposed to a monitor). Matches the enum the
+/// C plugin exposes via its properties UI.
+const WGC_CAPTURE_MODE_WINDOW: &str = "window";
 
 // Audio source names and OBS source-type IDs for monitor-capture audio.
 // v2.5.6: monitor-capture has no hooked audio path (game-capture and
@@ -1089,14 +1102,15 @@ impl RecorderState {
                     request.game_config.use_window_capture.into(),
                 );
                 // Record the resolved capture mode for post-hoc analysis.
-                // Lets us see "this recording ran the game-capture hook
-                // because CS2 is on the fullscreen-exclusive allowlist" in
-                // recording_metadata.json without cross-referencing logs.
+                // Lets us see "this recording ran WGC because Auto picked
+                // it on Win10 1903+" in recording_metadata.json without
+                // cross-referencing logs.
                 object.insert(
                     "effective_capture_mode".to_string(),
                     match effective_mode {
                         crate::config::EffectiveCaptureMode::Monitor => "monitor",
                         crate::config::EffectiveCaptureMode::GameHook => "game_hook",
+                        crate::config::EffectiveCaptureMode::Wgc => "wgc",
                     }
                     .into(),
                 );
@@ -1528,10 +1542,11 @@ const MICROPHONE_AUDIO_CHANNEL: u32 = 2;
 /// need to attach WASAPI desktop/mic sources to the scene.
 ///
 /// Only the monitor-capture sub-path is silent by default — the
-/// window-capture fallback (used when no monitors are enumerated) and
-/// game-capture both tap audio via `set_capture_audio`. Extracted as a
-/// free function so tests can exercise the branching logic without a
-/// live OBS context.
+/// window-capture fallback (used when no monitors are enumerated),
+/// game-capture, AND wgc_capture all tap audio via `capture_audio`
+/// themselves. Attaching WASAPI on top of any of those paths would
+/// double the desktop-audio track. Extracted as a free function so
+/// tests can exercise the branching logic without a live OBS context.
 fn should_attach_monitor_audio(
     mode: crate::config::EffectiveCaptureMode,
     monitors_available: bool,
@@ -1697,156 +1712,231 @@ fn prepare_source(
         }
     }
 
-    let result = if matches!(
-        state.effective_mode,
-        crate::config::EffectiveCaptureMode::Monitor
-    ) {
-        // Use monitor capture (full screen) — works with all games including
-        // fullscreen exclusive, anti-cheat, DRM. Same approach as competing products.
-        // This captures the entire display, guaranteeing visible game content.
-        tracing::info!("Using monitor capture mode (full screen capture)");
+    let result = match state.effective_mode {
+        crate::config::EffectiveCaptureMode::Monitor => {
+            // Use monitor capture (full screen) — works with all games including
+            // fullscreen exclusive, anti-cheat, DRM. Same approach as competing products.
+            // This captures the entire display, guaranteeing visible game content.
+            tracing::info!("Using monitor capture mode (full screen capture)");
 
-        let monitors = MonitorCaptureSourceBuilder::get_monitors().unwrap_or_default();
+            let monitors = MonitorCaptureSourceBuilder::get_monitors().unwrap_or_default();
 
-        if monitors.is_empty() {
-            // Fallback to window capture if monitor list unavailable
-            tracing::warn!("No monitors found for monitor capture, falling back to window capture");
-            let window = libobs_wrapper::unsafe_send::Sendable(find_game_capture_window(
-                Some(game_exe),
-                hwnd,
-            )?);
-            let client_area = false;
-            if let Some(mut source) = last_source.take() {
-                source
-                    .create_updater::<WindowCaptureSourceUpdater>()?
-                    .set_window(&window)
-                    .set_capture_audio(capture_audio)?
-                    .set_client_area(client_area)
-                    .update()?;
-                Ok(source)
-            } else {
-                obs_context
-                    .source_builder::<WindowCaptureSourceBuilder, _>(OWL_WINDOW_CAPTURE_NAME)?
-                    .set_window(&window)
-                    .set_capture_audio(capture_audio)?
-                    .set_client_area(client_area)
-                    .add_to_scene(scene)
-            }
-        } else {
-            // Pick the monitor the game window currently lives on — falls back
-            // to primary when MonitorFromWindow can't resolve or when the HMONITOR
-            // doesn't match any enumerated DisplayInfo.
-            let target_ptr = hmonitor_ptr_for_hwnd(hwnd);
-            let monitor_idx = if target_ptr == 0 {
+            if monitors.is_empty() {
+                // Fallback to window capture if monitor list unavailable
                 tracing::warn!(
-                    "MonitorFromWindow failed, falling back to primary monitor (index 0)"
+                    "No monitors found for monitor capture, falling back to window capture"
                 );
-                0
+                let window = libobs_wrapper::unsafe_send::Sendable(find_game_capture_window(
+                    Some(game_exe),
+                    hwnd,
+                )?);
+                let client_area = false;
+                if let Some(mut source) = last_source.take() {
+                    source
+                        .create_updater::<WindowCaptureSourceUpdater>()?
+                        .set_window(&window)
+                        .set_capture_audio(capture_audio)?
+                        .set_client_area(client_area)
+                        .update()?;
+                    Ok(source)
+                } else {
+                    obs_context
+                        .source_builder::<WindowCaptureSourceBuilder, _>(OWL_WINDOW_CAPTURE_NAME)?
+                        .set_window(&window)
+                        .set_capture_audio(capture_audio)?
+                        .set_client_area(client_area)
+                        .add_to_scene(scene)
+                }
             } else {
-                monitors
-                    .iter()
-                    .position(|m| m.0.raw_handle.0 as usize == target_ptr)
-                    .unwrap_or_else(|| {
-                        tracing::warn!(
-                            "HMONITOR {target_ptr:#x} not matched in {} enumerated monitors, \
+                // Pick the monitor the game window currently lives on — falls back
+                // to primary when MonitorFromWindow can't resolve or when the HMONITOR
+                // doesn't match any enumerated DisplayInfo.
+                let target_ptr = hmonitor_ptr_for_hwnd(hwnd);
+                let monitor_idx = if target_ptr == 0 {
+                    tracing::warn!(
+                        "MonitorFromWindow failed, falling back to primary monitor (index 0)"
+                    );
+                    0
+                } else {
+                    monitors
+                        .iter()
+                        .position(|m| m.0.raw_handle.0 as usize == target_ptr)
+                        .unwrap_or_else(|| {
+                            tracing::warn!(
+                                "HMONITOR {target_ptr:#x} not matched in {} enumerated monitors, \
                              falling back to primary (index 0)",
-                            monitors.len()
-                        );
-                        0
-                    })
-            };
-            let monitor = &monitors[monitor_idx];
-            tracing::info!(
-                "Capturing monitor {} of {}: {:?}",
-                monitor_idx,
-                monitors.len(),
-                monitor
-            );
+                                monitors.len()
+                            );
+                            0
+                        })
+                };
+                let monitor = &monitors[monitor_idx];
+                tracing::info!(
+                    "Capturing monitor {} of {}: {:?}",
+                    monitor_idx,
+                    monitors.len(),
+                    monitor
+                );
 
-            // Log the effective DPI scale of the capture monitor so we can
-            // diagnose future "wrong resolution" / "blurry recording" reports.
-            // We are per-monitor-v2 DPI-aware (see build.rs), so Windows hands
-            // us physical pixels; this line confirms what those pixels look like.
-            log_monitor_dpi_scale(
-                hwnd,
-                &format!("Monitor {monitor_idx} of {}", monitors.len()),
-            );
+                // Log the effective DPI scale of the capture monitor so we can
+                // diagnose future "wrong resolution" / "blurry recording" reports.
+                // We are per-monitor-v2 DPI-aware (see build.rs), so Windows hands
+                // us physical pixels; this line confirms what those pixels look like.
+                log_monitor_dpi_scale(
+                    hwnd,
+                    &format!("Monitor {monitor_idx} of {}", monitors.len()),
+                );
+
+                if let Some(mut source) = last_source.take() {
+                    tracing::info!("Reusing existing monitor capture source");
+                    source
+                        .create_updater::<MonitorCaptureSourceUpdater>()?
+                        .set_monitor(monitor)
+                        .update()?;
+                    Ok(source)
+                } else {
+                    tracing::info!("Creating new monitor capture source");
+                    obs_context
+                        .source_builder::<MonitorCaptureSourceBuilder, _>(OWL_MONITOR_CAPTURE_NAME)?
+                        .set_monitor(monitor)
+                        .add_to_scene(scene)
+                }
+            }
+        }
+        crate::config::EffectiveCaptureMode::GameHook => {
+            // Inject the libobs game_capture hook into the target process.
+            // Required for fullscreen-exclusive D3D12 titles on integrated
+            // GPUs where DWM desktop-duplication bridging fails — AND where
+            // WGC is known-broken (see `KNOWN_HOOK_REQUIRED_GAMES`). The
+            // caller (Recording::start) has already overridden
+            // `game_resolution` to the monitor-native size so the hook draws
+            // into a correctly-sized surface instead of the transient 600x286
+            // boot window.
+            let window = find_game_capture_window(Some(game_exe), hwnd)?;
+
+            if !window.is_game {
+                bail!(
+                    "The window you're trying to record ({game_exe}) cannot be captured. Please ensure you are capturing a game."
+                );
+            }
+
+            let capture_mode = ObsGameCaptureMode::CaptureSpecificWindow;
 
             if let Some(mut source) = last_source.take() {
-                tracing::info!("Reusing existing monitor capture source");
+                tracing::info!(
+                    game = game_exe,
+                    window_id = %window.obs_id,
+                    "Reusing existing game-capture hook source"
+                );
                 source
-                    .create_updater::<MonitorCaptureSourceUpdater>()?
-                    .set_monitor(monitor)
+                    .create_updater::<GameCaptureSourceUpdater>()?
+                    .set_capture_mode(capture_mode)
+                    .set_window_raw(window.obs_id.as_str())
+                    // Class-priority match ("priority: 1" in raw OBS JSON) —
+                    // the game's window class is the most stable identifier;
+                    // titles change ("Loading..." -> "Counter-Strike 2") and
+                    // exe paths vary across Steam/Epic/Rockstar installs.
+                    .set_priority(ObsWindowPriority::Class)
+                    .set_capture_cursor(true)
+                    .set_capture_audio(capture_audio)?
                     .update()?;
                 Ok(source)
             } else {
-                tracing::info!("Creating new monitor capture source");
+                tracing::info!(
+                    game = game_exe,
+                    window_id = %window.obs_id,
+                    "Creating new game-capture hook source"
+                );
+
+                if GameCaptureSourceBuilder::is_window_in_use_by_other_instance(window.pid)? {
+                    // We should only check this if we're creating a new source, as "another process" could be us otherwise
+                    bail!(
+                        "The window you're trying to record ({game_exe}) is already being captured by another process. Do you have OBS or another instance of GameData Recorder open?\n\nNote that OBS is no longer required to use GameData Recorder - please close it if you have it running!",
+                    );
+                }
+
                 obs_context
-                    .source_builder::<MonitorCaptureSourceBuilder, _>(OWL_MONITOR_CAPTURE_NAME)?
-                    .set_monitor(monitor)
+                    .source_builder::<GameCaptureSourceBuilder, _>(OWL_GAME_CAPTURE_NAME)?
+                    .set_capture_mode(capture_mode)
+                    .set_window(&window)
+                    .set_priority(ObsWindowPriority::Class)
+                    .set_capture_cursor(true)
+                    .set_capture_audio(capture_audio)?
                     .add_to_scene(scene)
             }
         }
-    } else {
-        // EffectiveCaptureMode::GameHook — inject the libobs game_capture
-        // hook into the target process. Required for fullscreen-exclusive
-        // D3D12 titles (CS2, GTA V) on integrated GPUs where DWM desktop-
-        // duplication bridging fails and monitor capture returns black
-        // frames. The caller (Recording::start) has already overridden
-        // `game_resolution` to the monitor-native size so the hook draws
-        // into a correctly-sized surface instead of the transient 600x286
-        // boot window.
-        let window = find_game_capture_window(Some(game_exe), hwnd)?;
+        crate::config::EffectiveCaptureMode::Wgc => {
+            // Windows.Graphics.Capture — Microsoft's official Win10 1903+
+            // capture API. Captures the game's DXGI swap-chain surface
+            // through the OS compositor, so it works for exclusive
+            // fullscreen D3D11/D3D12 without needing to inject into the
+            // game process. This is the modern default for games not on
+            // `KNOWN_HOOK_REQUIRED_GAMES` — it's the path CS2 works through
+            // (where the game_capture hook is refused by Valve's anti-hook
+            // even when the recording app is VAC-whitelisted).
+            //
+            // libobs-wrapper does not expose a typed builder for
+            // `wgc_capture`, so we build the source with a raw
+            // `ObsSourceRef::new(...)` + an `ObsData` settings blob. The
+            // settings keys (`capture_mode`, `window`, `cursor`,
+            // `client_area`, `capture_audio`) match the property ids the
+            // `win-capture` plugin registers in
+            // `obs-plugins/win-capture/winrt-capture.c`.
+            let window = find_game_capture_window(Some(game_exe), hwnd)?;
 
-        if !window.is_game {
-            bail!(
-                "The window you're trying to record ({game_exe}) cannot be captured. Please ensure you are capturing a game."
-            );
-        }
-
-        let capture_mode = ObsGameCaptureMode::CaptureSpecificWindow;
-
-        if let Some(mut source) = last_source.take() {
-            tracing::info!(
-                game = game_exe,
-                window_id = %window.obs_id,
-                "Reusing existing game-capture hook source"
-            );
-            source
-                .create_updater::<GameCaptureSourceUpdater>()?
-                .set_capture_mode(capture_mode)
-                .set_window_raw(window.obs_id.as_str())
-                // Class-priority match ("priority: 1" in raw OBS JSON) —
-                // the game's window class is the most stable identifier;
-                // titles change ("Loading..." -> "Counter-Strike 2") and
-                // exe paths vary across Steam/Epic/Rockstar installs.
-                .set_priority(ObsWindowPriority::Class)
-                .set_capture_cursor(true)
-                .set_capture_audio(capture_audio)?
-                .update()?;
-            Ok(source)
-        } else {
-            tracing::info!(
-                game = game_exe,
-                window_id = %window.obs_id,
-                "Creating new game-capture hook source"
-            );
-
-            if GameCaptureSourceBuilder::is_window_in_use_by_other_instance(window.pid)? {
-                // We should only check this if we're creating a new source, as "another process" could be us otherwise
+            if !window.is_game {
                 bail!(
-                    "The window you're trying to record ({game_exe}) is already being captured by another process. Do you have OBS or another instance of GameData Recorder open?\n\nNote that OBS is no longer required to use GameData Recorder - please close it if you have it running!",
+                    "The window you're trying to record ({game_exe}) cannot be captured. Please ensure you are capturing a game."
                 );
             }
 
-            obs_context
-                .source_builder::<GameCaptureSourceBuilder, _>(OWL_GAME_CAPTURE_NAME)?
-                .set_capture_mode(capture_mode)
-                .set_window(&window)
-                .set_priority(ObsWindowPriority::Class)
-                .set_capture_cursor(true)
-                .set_capture_audio(capture_audio)?
-                .add_to_scene(scene)
+            if let Some(mut source) = last_source.take() {
+                tracing::info!(
+                    game = game_exe,
+                    window_id = %window.obs_id,
+                    "Reusing existing WGC capture source"
+                );
+                let mut settings = obs_context.data()?;
+                settings.set_string("capture_mode", WGC_CAPTURE_MODE_WINDOW)?;
+                settings.set_string("window", window.obs_id.as_str())?;
+                settings.set_bool("cursor", true)?;
+                settings.set_bool("client_area", true)?;
+                settings.set_bool("capture_audio", capture_audio)?;
+                source.reset_and_update_raw(settings)?;
+                Ok(source)
+            } else {
+                tracing::info!(
+                    game = game_exe,
+                    window_id = %window.obs_id,
+                    "Creating new WGC capture source"
+                );
+
+                let mut settings = obs_context.data()?;
+                settings.set_string("capture_mode", WGC_CAPTURE_MODE_WINDOW)?;
+                settings.set_string("window", window.obs_id.as_str())?;
+                // `cursor` — render the system cursor on top of the captured
+                // surface. Training models want the cursor state, so yes.
+                settings.set_bool("cursor", true)?;
+                // `client_area` — exclude title bar and non-client borders
+                // so the framed content matches what monitor-duplication
+                // would have handed us. Matters for games running in
+                // windowed/borderless; no-op for true fullscreen.
+                settings.set_bool("client_area", true)?;
+                // `capture_audio` — WGC's own audio tap. Like game_capture,
+                // this produces an "Application Audio Capture" stream for
+                // the target window. When set, `should_attach_monitor_audio`
+                // (further down) will NOT attach the WASAPI desktop/mic
+                // sources on top, avoiding double-audio.
+                settings.set_bool("capture_audio", capture_audio)?;
+
+                let source_info = libobs_wrapper::utils::SourceInfo::new(
+                    WGC_CAPTURE_SOURCE_ID,
+                    OWL_WGC_CAPTURE_NAME,
+                    Some(settings),
+                    None,
+                );
+                scene.add_source(source_info)
+            }
         }
     };
 
@@ -2080,6 +2170,60 @@ mod tests {
             cfg.effective_capture_mode("cs2"),
             EffectiveCaptureMode::Monitor
         );
+    }
+
+    #[test]
+    fn explicit_wgc_mode_resolves_to_wgc_effective() {
+        // CaptureMode::Wgc is a hard override — it ignores the
+        // allowlist, ignores `use_window_capture`, and always routes to
+        // `EffectiveCaptureMode::Wgc`. The Auto default doesn't pick Wgc
+        // in this commit (a follow-up refactor flips that), so the only
+        // way the WGC source gets exercised today is via explicit opt-in.
+        use crate::config::{CaptureMode, EffectiveCaptureMode, GameConfig};
+        let cfg = GameConfig {
+            use_window_capture: true,
+            capture_mode: CaptureMode::Wgc,
+        };
+        assert_eq!(cfg.effective_capture_mode("cs2"), EffectiveCaptureMode::Wgc);
+        assert_eq!(
+            cfg.effective_capture_mode("abyssus"),
+            EffectiveCaptureMode::Wgc
+        );
+        let cfg = GameConfig {
+            use_window_capture: false,
+            capture_mode: CaptureMode::Wgc,
+        };
+        assert_eq!(
+            cfg.effective_capture_mode("abyssus"),
+            EffectiveCaptureMode::Wgc
+        );
+    }
+
+    #[test]
+    fn wgc_capture_mode_source_id_matches_obs_plugin_registration() {
+        // These strings pin the OBS source-type id and the `capture_mode`
+        // property value the `win-capture` plugin registers in
+        // `obs-plugins/win-capture/winrt-capture.c`. Typos here mean the
+        // runtime gets `NullPointer` from `obs_source_create` because
+        // the source type lookup returns nothing.
+        assert_eq!(WGC_CAPTURE_SOURCE_ID, "wgc_capture");
+        assert_eq!(WGC_CAPTURE_MODE_WINDOW, "window");
+    }
+
+    #[test]
+    fn wgc_capture_never_attaches_wasapi_audio() {
+        // wgc_capture taps audio through its `capture_audio` property
+        // (same pattern as game_capture / window_capture). Attaching
+        // WASAPI desktop/mic on top would produce doubled audio, so
+        // `should_attach_monitor_audio` must refuse on this mode too.
+        assert!(!should_attach_monitor_audio(
+            crate::config::EffectiveCaptureMode::Wgc,
+            true
+        ));
+        assert!(!should_attach_monitor_audio(
+            crate::config::EffectiveCaptureMode::Wgc,
+            false
+        ));
     }
 
     #[test]

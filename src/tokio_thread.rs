@@ -1211,9 +1211,11 @@ impl State {
                         .get(&exe_without_ext)
                         .cloned()
                         .unwrap_or_default();
-                    // Fallback only applies to the hook path. If we're already
-                    // on Monitor capture, the hook-timeout signal isn't even
-                    // relevant. We consult the resolved effective mode so
+                    // Fallback only applies to the hook path. If we're
+                    // already on Monitor or WGC capture, the hook-timeout
+                    // signal isn't even relevant (neither path injects a
+                    // hook, so neither can time out waiting for one). We
+                    // consult the resolved effective mode so
                     // `CaptureMode::Auto` is honored against the allowlist.
                     matches!(
                         game_config.effective_capture_mode(&exe_without_ext),
