@@ -68,12 +68,24 @@ const OWL_MONITOR_CAPTURE_NAME: &str = "owl_monitor_capture";
 /// Microsoft's official Win10 1903+ capture API — no DLL injection,
 /// handles fullscreen-exclusive D3D11/D3D12 cleanly, friendly to HDR.
 const OWL_WGC_CAPTURE_NAME: &str = "owl_wgc_capture";
-/// OBS source-type ID for the WGC capture source. Matches the plugin
-/// registration in `obs-plugins/win-capture/winrt-capture.c`.
-const WGC_CAPTURE_SOURCE_ID: &str = "wgc_capture";
-/// `capture_mode` setting value for `wgc_capture` that tells it to bind
-/// to a specific window (as opposed to a monitor). Matches the enum the
-/// C plugin exposes via its properties UI.
+/// OBS source-type ID for the WGC capture source.
+///
+/// v2.5.14: empirically verified against our bundled `win-capture.dll`
+/// (see nucbox test 2026-04-20): the registered source IDs are
+///   - `game_capture`
+///   - `monitor_capture`
+///   - `window_capture`
+///   - `window_capture_wgc`        ← WGC uses this one, NOT `wgc_capture`
+/// The initial ship used `wgc_capture` which is the name OBS Studio's
+/// UI surfaces and what some docs reference, but the actual plugin
+/// registration string in OBS 32 is `window_capture_wgc`. Recorder
+/// logs showed `ERROR obs: Source ID 'wgc_capture' not found` until
+/// this was corrected.
+const WGC_CAPTURE_SOURCE_ID: &str = "window_capture_wgc";
+
+/// `capture_mode` setting value for `window_capture_wgc` that tells it
+/// to bind to a specific window (as opposed to a monitor). Matches the
+/// enum the C plugin exposes via its properties UI.
 const WGC_CAPTURE_MODE_WINDOW: &str = "window";
 
 // Audio source names and OBS source-type IDs for monitor-capture audio.
@@ -2263,7 +2275,7 @@ mod tests {
         // `obs-plugins/win-capture/winrt-capture.c`. Typos here mean the
         // runtime gets `NullPointer` from `obs_source_create` because
         // the source type lookup returns nothing.
-        assert_eq!(WGC_CAPTURE_SOURCE_ID, "wgc_capture");
+        assert_eq!(WGC_CAPTURE_SOURCE_ID, "window_capture_wgc");
         assert_eq!(WGC_CAPTURE_MODE_WINDOW, "window");
     }
 
