@@ -173,23 +173,95 @@ impl Default for AudioCues {
     }
 }
 
+/// OBS capture strategy for a particular game.
+///
+/// This supersedes the v2.5.8 binary `use_window_capture` flag (kept for
+/// legacy config compatibility — it is only consulted when `capture_mode`
+/// is absent/`Auto` and the game is NOT on the fullscreen-exclusive
+/// allowlist, in which case the historical meaning is preserved).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureMode {
+    /// Decide at start-of-recording based on
+    /// [`constants::KNOWN_FULLSCREEN_EXCLUSIVE_GAMES`].
+    /// - Game on the allowlist (CS2, GTA V, etc.) → GameHook so we still
+    ///   get frames when the game enters exclusive-fullscreen D3D12 and
+    ///   DWM desktop-duplication starts returning black.
+    /// - Any other game → Monitor (current default for compatibility
+    ///   with anti-cheat and DRM; see v2.5.8 release notes).
+    #[default]
+    Auto,
+    /// Force monitor capture regardless of game. Correct choice for games
+    /// that always run windowed / borderless and for users who want the
+    /// absolute-safest anti-cheat footprint.
+    Monitor,
+    /// Force the OBS `game_capture` hook — libobs injects a module into
+    /// the target process to grab frames directly out of the swap chain.
+    /// Required for games that go into fullscreen-exclusive D3D12 (CS2 on
+    /// AMD integrated, some GTA V modes), where monitor capture fails to
+    /// composite and produces black frames.
+    GameHook,
+}
+
 /// Per-game configuration settings
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct GameConfig {
-    /// Use screen/monitor capture instead of game capture for this game.
-    /// When true: captures the entire display (works with all games including anti-cheat)
-    /// When false: uses game capture hook injection (may fail with anti-cheat)
-    /// Default: true — screen capture is the default for maximum compatibility.
-    /// Game capture can be enabled per-game for potentially better performance,
-    /// but it requires hook injection and may fail with anti-cheat software.
+    /// Legacy (v2.5.8) capture selector: `true` = monitor capture,
+    /// `false` = game-capture hook. Retained so existing persisted configs
+    /// continue to Just Work, but new logic should use `capture_mode`
+    /// instead. See [`CaptureMode::Auto`] for the resolution rule.
     pub use_window_capture: bool,
+    /// Modern capture selector. Defaults to `Auto` which uses the
+    /// fullscreen-exclusive allowlist (see `CaptureMode` docs).
+    #[serde(default)]
+    pub capture_mode: CaptureMode,
 }
 
 impl Default for GameConfig {
     fn default() -> Self {
         Self {
             use_window_capture: true, // v2.5.8+: screen capture is the default for compatibility
+            capture_mode: CaptureMode::default(),
+        }
+    }
+}
+
+/// Concrete capture mode after resolving `CaptureMode::Auto`. Used by
+/// the recorder plumbing when actually constructing OBS sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveCaptureMode {
+    /// MonitorCaptureSource attached to the display under the game HWND.
+    Monitor,
+    /// GameCaptureSource hooked into the game process.
+    GameHook,
+}
+
+impl GameConfig {
+    /// Resolve the per-recording capture mode, folding in the allowlist
+    /// check and legacy `use_window_capture` fallback.
+    ///
+    /// `game_exe_stem` is the lowercase filename without extension (e.g.
+    /// `"cs2"`), matching the style used by `constants::GAME_WHITELIST`.
+    pub fn effective_capture_mode(&self, game_exe_stem: &str) -> EffectiveCaptureMode {
+        match self.capture_mode {
+            CaptureMode::Monitor => EffectiveCaptureMode::Monitor,
+            CaptureMode::GameHook => EffectiveCaptureMode::GameHook,
+            CaptureMode::Auto => {
+                if constants::KNOWN_FULLSCREEN_EXCLUSIVE_GAMES
+                    .iter()
+                    .any(|g| *g == game_exe_stem)
+                {
+                    EffectiveCaptureMode::GameHook
+                } else if self.use_window_capture {
+                    EffectiveCaptureMode::Monitor
+                } else {
+                    // Legacy config with explicit `use_window_capture = false`
+                    // translates to GameHook even without the allowlist —
+                    // preserves the v2.5.8 escape hatch for power users.
+                    EffectiveCaptureMode::GameHook
+                }
+            }
         }
     }
 }

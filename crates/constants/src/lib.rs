@@ -258,6 +258,31 @@ pub const GAME_WHITELIST: &[&str] = &[
     "cities2",
 ];
 
+/// Game exe stems (lowercase, no `.exe`) that are known to enter
+/// fullscreen-exclusive D3D12 swap-chain presentation. On these games,
+/// DWM desktop-duplication frequently fails — most visibly on AMD
+/// integrated GPUs, where `duplicator-monitor-capture` returns black
+/// frames while the game is in focus. When `CaptureMode::Auto` resolves
+/// this list, we route recording through the OBS game-capture hook
+/// (`game_capture` source) instead.
+///
+/// Keep entries lowercase and in sync with the foreground-check logic in
+/// `src/tokio_thread.rs::get_foregrounded_game`, which normalises via
+/// `file_stem().to_lowercase()`.
+///
+/// Known-incomplete: this is a deny-list-of-one-issue, not a full
+/// taxonomy. Adding games here is cheap — each one is a single `&str`.
+pub const KNOWN_FULLSCREEN_EXCLUSIVE_GAMES: &[&str] = &[
+    // Counter-Strike 2 — Source 2 engine, exclusive-fullscreen default
+    // since the June 2024 beta. Black frames on AMD 760M via DWM bridge.
+    "cs2",
+    // GTA V Legacy (RAGE engine, exclusive-fullscreen on DX11)
+    "gta5",
+    "gtav",
+    // GTA V Enhanced (DX12 refresh, 2026 re-release)
+    "gta5_enhanced",
+];
+
 pub const FPS: u32 = 30;
 pub const RECORDING_WIDTH: u32 = 1920;
 pub const RECORDING_HEIGHT: u32 = 1080;

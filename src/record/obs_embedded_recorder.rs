@@ -27,8 +27,8 @@ use libobs_simple::sources::{
     ObsObjectUpdater, ObsSourceBuilder,
     windows::{
         GameCaptureSourceBuilder, GameCaptureSourceUpdater, MonitorCaptureSourceBuilder,
-        MonitorCaptureSourceUpdater, ObsGameCaptureMode, WindowCaptureSourceBuilder,
-        WindowCaptureSourceUpdater, WindowInfo,
+        MonitorCaptureSourceUpdater, ObsGameCaptureMode, ObsWindowPriority,
+        WindowCaptureSourceBuilder, WindowCaptureSourceUpdater, WindowInfo,
     },
 };
 use libobs_wrapper::{
@@ -758,10 +758,19 @@ struct RecorderState {
     // This needs to be last as it needs to be dropped last
     obs_context: ObsContext,
 }
-/// State that affects source creation - if any field changes, we must recreate the source
+/// State that affects source creation - if any field changes, we must recreate the source.
+///
+/// `use_window_capture` is the legacy flag from v2.5.8 (`true` = prefer
+/// monitor capture, `false` = prefer game-capture hook). It is kept so
+/// users' persisted configs still influence behavior — but the new
+/// `effective_mode` field is the authoritative selector at
+/// `prepare_source` time. `effective_mode` resolves
+/// `config::CaptureMode::Auto` against the fullscreen-exclusive
+/// allowlist at `Recording::start` time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SourceCreationState {
     use_window_capture: bool,
+    effective_mode: crate::config::EffectiveCaptureMode,
 }
 impl RecorderState {
     fn new(
@@ -879,9 +888,27 @@ impl RecorderState {
         self.obs_context
             .reset_video(video_info(self.adapter_index, request.game_resolution))?;
 
+        // Resolve the effective capture mode again here — `Recording::start`
+        // already computed one for the resolution pick, but recomputing is
+        // cheap and keeps this call site self-contained (no extra IPC field
+        // on RecordingRequest).
+        let game_exe_stem = std::path::Path::new(&request.game_exe)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let effective_mode = request.game_config.effective_capture_mode(&game_exe_stem);
+
         let source_creation_state = SourceCreationState {
             use_window_capture: request.game_config.use_window_capture,
+            effective_mode,
         };
+
+        tracing::info!(
+            game_exe_stem,
+            mode = ?effective_mode,
+            base_resolution = ?request.game_resolution,
+            "Resolved capture mode for recording"
+        );
 
         // Determine whether this recording will genuinely use monitor capture
         // (vs. the window-capture fallback or game-capture). Monitor capture
@@ -893,7 +920,7 @@ impl RecorderState {
             .unwrap_or_default()
             .is_empty();
         let use_monitor_capture_audio =
-            should_attach_monitor_audio(request.game_config.use_window_capture, monitors_available);
+            should_attach_monitor_audio(effective_mode, monitors_available);
 
         let source = prepare_source(
             &mut self.obs_context,
@@ -1060,6 +1087,18 @@ impl RecorderState {
                 object.insert(
                     "window_capture".to_string(),
                     request.game_config.use_window_capture.into(),
+                );
+                // Record the resolved capture mode for post-hoc analysis.
+                // Lets us see "this recording ran the game-capture hook
+                // because CS2 is on the fullscreen-exclusive allowlist" in
+                // recording_metadata.json without cross-referencing logs.
+                object.insert(
+                    "effective_capture_mode".to_string(),
+                    match effective_mode {
+                        crate::config::EffectiveCaptureMode::Monitor => "monitor",
+                        crate::config::EffectiveCaptureMode::GameHook => "game_hook",
+                    }
+                    .into(),
                 );
             }
             tracing::info!("Recording starting with video settings: {encoder_settings_json:?}");
@@ -1483,17 +1522,21 @@ impl RecorderState {
 const DESKTOP_AUDIO_CHANNEL: u32 = 1;
 const MICROPHONE_AUDIO_CHANNEL: u32 = 2;
 
-/// Pure decision function: given the requested capture mode
-/// (`use_window_capture == true` means "prefer monitor capture" in v2.5.2+)
-/// and whether any monitors are currently enumerated, decide whether the
-/// monitor-capture sub-path will actually run.
+/// Pure decision function: given the resolved effective capture mode and
+/// whether any monitors are currently enumerated, decide whether the
+/// monitor-capture sub-path will actually run, and therefore whether we
+/// need to attach WASAPI desktop/mic sources to the scene.
 ///
-/// Only that sub-path is silent by default — the window-capture fallback
-/// (used when no monitors are enumerated) and game-capture both tap audio
-/// via `set_capture_audio`. Extracted as a free function so tests can
-/// exercise the branching logic without a live OBS context.
-fn should_attach_monitor_audio(use_window_capture: bool, monitors_available: bool) -> bool {
-    use_window_capture && monitors_available
+/// Only the monitor-capture sub-path is silent by default — the
+/// window-capture fallback (used when no monitors are enumerated) and
+/// game-capture both tap audio via `set_capture_audio`. Extracted as a
+/// free function so tests can exercise the branching logic without a
+/// live OBS context.
+fn should_attach_monitor_audio(
+    mode: crate::config::EffectiveCaptureMode,
+    monitors_available: bool,
+) -> bool {
+    matches!(mode, crate::config::EffectiveCaptureMode::Monitor) && monitors_available
 }
 
 /// Assign `source` to OBS global audio channel `channel`. Passing `None`
@@ -1654,7 +1697,7 @@ fn prepare_source(
         }
     }
 
-    let result = if state.use_window_capture {
+    let result = if matches!(state.effective_mode, crate::config::EffectiveCaptureMode::Monitor) {
         // Use monitor capture (full screen) — works with all games including
         // fullscreen exclusive, anti-cheat, DRM. Same approach as competing products.
         // This captures the entire display, guaranteeing visible game content.
@@ -1742,6 +1785,14 @@ fn prepare_source(
             }
         }
     } else {
+        // EffectiveCaptureMode::GameHook — inject the libobs game_capture
+        // hook into the target process. Required for fullscreen-exclusive
+        // D3D12 titles (CS2, GTA V) on integrated GPUs where DWM desktop-
+        // duplication bridging fails and monitor capture returns black
+        // frames. The caller (Recording::start) has already overridden
+        // `game_resolution` to the monitor-native size so the hook draws
+        // into a correctly-sized surface instead of the transient 600x286
+        // boot window.
         let window = find_game_capture_window(Some(game_exe), hwnd)?;
 
         if !window.is_game {
@@ -1753,16 +1804,30 @@ fn prepare_source(
         let capture_mode = ObsGameCaptureMode::CaptureSpecificWindow;
 
         if let Some(mut source) = last_source.take() {
-            tracing::info!("Reusing existing game capture source");
+            tracing::info!(
+                game = game_exe,
+                window_id = %window.obs_id,
+                "Reusing existing game-capture hook source"
+            );
             source
                 .create_updater::<GameCaptureSourceUpdater>()?
                 .set_capture_mode(capture_mode)
                 .set_window_raw(window.obs_id.as_str())
+                // Class-priority match ("priority: 1" in raw OBS JSON) —
+                // the game's window class is the most stable identifier;
+                // titles change ("Loading..." -> "Counter-Strike 2") and
+                // exe paths vary across Steam/Epic/Rockstar installs.
+                .set_priority(ObsWindowPriority::Class)
+                .set_capture_cursor(true)
                 .set_capture_audio(capture_audio)?
                 .update()?;
             Ok(source)
         } else {
-            tracing::info!("Creating new game capture source");
+            tracing::info!(
+                game = game_exe,
+                window_id = %window.obs_id,
+                "Creating new game-capture hook source"
+            );
 
             if GameCaptureSourceBuilder::is_window_in_use_by_other_instance(window.pid)? {
                 // We should only check this if we're creating a new source, as "another process" could be us otherwise
@@ -1775,6 +1840,8 @@ fn prepare_source(
                 .source_builder::<GameCaptureSourceBuilder, _>(OWL_GAME_CAPTURE_NAME)?
                 .set_capture_mode(capture_mode)
                 .set_window(&window)
+                .set_priority(ObsWindowPriority::Class)
+                .set_capture_cursor(true)
                 .set_capture_audio(capture_audio)?
                 .add_to_scene(scene)
         }
@@ -1928,10 +1995,13 @@ mod tests {
 
     #[test]
     fn monitor_capture_with_monitors_attaches_audio() {
-        // The primary path: `use_window_capture=true` and at least one
+        // The primary path: effective_mode=Monitor and at least one
         // monitor enumerated -> prepare_source picks MonitorCapture, so
         // we MUST attach WASAPI sources to avoid a silent recording.
-        assert!(should_attach_monitor_audio(true, true));
+        assert!(should_attach_monitor_audio(
+            crate::config::EffectiveCaptureMode::Monitor,
+            true
+        ));
     }
 
     #[test]
@@ -1940,7 +2010,10 @@ mod tests {
         // transparently falls back to WindowCapture, which carries its
         // own `set_capture_audio(true)` tap. Attaching WASAPI on top
         // would double the audio, so we must NOT attach.
-        assert!(!should_attach_monitor_audio(true, false));
+        assert!(!should_attach_monitor_audio(
+            crate::config::EffectiveCaptureMode::Monitor,
+            false
+        ));
     }
 
     #[test]
@@ -1949,8 +2022,79 @@ mod tests {
         // `set_capture_audio(true)`. Attaching WASAPI on top would
         // double desktop audio and is explicitly warned against by the
         // OBS GameCaptureSource docstring.
-        assert!(!should_attach_monitor_audio(false, true));
-        assert!(!should_attach_monitor_audio(false, false));
+        assert!(!should_attach_monitor_audio(
+            crate::config::EffectiveCaptureMode::GameHook,
+            true
+        ));
+        assert!(!should_attach_monitor_audio(
+            crate::config::EffectiveCaptureMode::GameHook,
+            false
+        ));
+    }
+
+    #[test]
+    fn capture_mode_auto_routes_fullscreen_exclusive_games_to_game_hook() {
+        use crate::config::{CaptureMode, EffectiveCaptureMode, GameConfig};
+
+        // CS2 is on KNOWN_FULLSCREEN_EXCLUSIVE_GAMES — Auto must resolve
+        // to GameHook regardless of the legacy `use_window_capture` flag,
+        // because DWM desktop-duplication fails on AMD integrated GPUs
+        // for CS2's fullscreen-exclusive D3D12 swap chain.
+        let cfg = GameConfig {
+            use_window_capture: true,
+            capture_mode: CaptureMode::Auto,
+        };
+        assert_eq!(
+            cfg.effective_capture_mode("cs2"),
+            EffectiveCaptureMode::GameHook
+        );
+
+        // A non-allowlisted game under Auto honours `use_window_capture`
+        // (defaults to monitor capture for maximum compatibility).
+        let cfg = GameConfig {
+            use_window_capture: true,
+            capture_mode: CaptureMode::Auto,
+        };
+        assert_eq!(
+            cfg.effective_capture_mode("abyssus"),
+            EffectiveCaptureMode::Monitor
+        );
+
+        // Explicit override always wins.
+        let cfg = GameConfig {
+            use_window_capture: true,
+            capture_mode: CaptureMode::GameHook,
+        };
+        assert_eq!(
+            cfg.effective_capture_mode("abyssus"),
+            EffectiveCaptureMode::GameHook
+        );
+        let cfg = GameConfig {
+            use_window_capture: false,
+            capture_mode: CaptureMode::Monitor,
+        };
+        assert_eq!(
+            cfg.effective_capture_mode("cs2"),
+            EffectiveCaptureMode::Monitor
+        );
+    }
+
+    #[test]
+    fn capture_mode_auto_preserves_legacy_use_window_capture_false_as_game_hook() {
+        // A v2.5.8 user who explicitly flipped `use_window_capture = false`
+        // in their persisted config expected game-capture. Under Auto,
+        // this legacy preference should still route to GameHook even when
+        // the game isn't on the fullscreen-exclusive allowlist.
+        use crate::config::{CaptureMode, EffectiveCaptureMode, GameConfig};
+
+        let cfg = GameConfig {
+            use_window_capture: false,
+            capture_mode: CaptureMode::Auto,
+        };
+        assert_eq!(
+            cfg.effective_capture_mode("abyssus"),
+            EffectiveCaptureMode::GameHook
+        );
     }
 
     #[test]

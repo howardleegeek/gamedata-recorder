@@ -1194,7 +1194,9 @@ impl State {
                     }
                 };
 
-                // Check if we should attempt fallback (only if window capture is not already enabled)
+                // Check if we should attempt fallback (only when we're currently
+                // using the game-capture hook — monitor capture doesn't need
+                // fallback since it doesn't inject into the game at all).
                 let exe_without_ext = std::path::Path::new(&game_exe)
                     .file_stem()
                     .map(|s| s.to_string_lossy().into_owned())
@@ -1203,8 +1205,20 @@ impl State {
 
                 let should_fallback = {
                     let config = self.app_state.config.read().unwrap();
-                    let game_config = config.preferences.games.get(&exe_without_ext);
-                    game_config.map_or(true, |gc| !gc.use_window_capture)
+                    let game_config = config
+                        .preferences
+                        .games
+                        .get(&exe_without_ext)
+                        .cloned()
+                        .unwrap_or_default();
+                    // Fallback only applies to the hook path. If we're already
+                    // on Monitor capture, the hook-timeout signal isn't even
+                    // relevant. We consult the resolved effective mode so
+                    // `CaptureMode::Auto` is honored against the allowlist.
+                    matches!(
+                        game_config.effective_capture_mode(&exe_without_ext),
+                        crate::config::EffectiveCaptureMode::GameHook
+                    )
                 };
 
                 if !should_fallback {

@@ -78,8 +78,60 @@ impl Recording {
         let start_time = SystemTime::now();
         let start_instant = Instant::now();
 
-        let game_resolution = get_recording_base_resolution(hwnd)?;
-        tracing::info!("Game resolution: {game_resolution:?}");
+        // Resolve the effective capture mode before measuring resolution:
+        // game-capture wants monitor-native dimensions (the hook paints into
+        // a surface the size of the output), while monitor/window capture
+        // wants the client rect (which corresponds to the actual pixels we
+        // are going to composite). Using the game-window client rect for
+        // game-capture is the bug fix-point here — on boot, games like CS2
+        // report a 600x286 loading-screen rect and the 1920x1080 gameplay
+        // would otherwise be downscaled into that pinned size.
+        let game_exe_stem = std::path::Path::new(&game_exe)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let effective_mode = game_config.effective_capture_mode(&game_exe_stem);
+
+        let game_resolution = match effective_mode {
+            crate::config::EffectiveCaptureMode::GameHook => {
+                // Use monitor native resolution, NOT the game-window client
+                // rect. See top-of-block comment for rationale.
+                #[cfg(target_os = "windows")]
+                {
+                    match get_monitor_resolution_for_hwnd(hwnd) {
+                        Ok(wh) => {
+                            tracing::info!(
+                                ?wh,
+                                mode = ?effective_mode,
+                                game_exe_stem,
+                                "Game resolution (monitor-native for game-capture hook)"
+                            );
+                            wh
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = ?e, "Failed to get monitor resolution for HWND, falling back to client rect");
+                            let fallback = get_recording_base_resolution(hwnd)?;
+                            tracing::info!("Game resolution (fallback client rect): {fallback:?}");
+                            fallback
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    get_recording_base_resolution(hwnd)?
+                }
+            }
+            crate::config::EffectiveCaptureMode::Monitor => {
+                let wh = get_recording_base_resolution(hwnd)?;
+                tracing::info!(
+                    ?wh,
+                    mode = ?effective_mode,
+                    game_exe_stem,
+                    "Game resolution (client rect for monitor/window capture)"
+                );
+                wh
+            }
+        };
 
         let video_path = recording_location.join(constants::filename::recording::VIDEO);
         let csv_path = recording_location.join(constants::filename::recording::INPUTS);
@@ -364,5 +416,56 @@ pub fn get_recording_base_resolution(hwnd: HWND) -> Result<(u32, u32)> {
             hardware_specs::get_primary_monitor_resolution()
                 .context("Failed to get primary monitor resolution")
         }
+    }
+}
+
+/// Physical-pixel resolution of the monitor under `hwnd`, falling back to
+/// the primary monitor when `MonitorFromWindow` fails. Used by the
+/// game-capture path (CaptureMode::GameHook) where the tiny boot-window
+/// client rect would be the wrong thing to pin OBS base resolution to —
+/// we want the native monitor resolution so the hook draws into a
+/// correctly-sized surface.
+#[cfg(target_os = "windows")]
+pub fn get_monitor_resolution_for_hwnd(hwnd: HWND) -> Result<(u32, u32)> {
+    use windows::Win32::{
+        Foundation::RECT,
+        Graphics::Gdi::{
+            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+        },
+    };
+
+    // SAFETY: MonitorFromWindow + GetMonitorInfoW are pure read-only Win32
+    // queries. MONITOR_DEFAULTTONEAREST guarantees a non-null HMONITOR even
+    // when `hwnd` sits outside any display. We pass an owned MONITORINFO
+    // struct with `cbSize` set, as required by the documented contract.
+    unsafe {
+        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if hmon.is_invalid() {
+            tracing::warn!(
+                "MonitorFromWindow returned NULL, falling back to primary monitor resolution"
+            );
+            return hardware_specs::get_primary_monitor_resolution()
+                .context("Failed to get primary monitor resolution");
+        }
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT::default(),
+            rcWork: RECT::default(),
+            dwFlags: 0,
+        };
+        GetMonitorInfoW(hmon, &mut info)
+            .ok()
+            .context("GetMonitorInfoW failed for window's monitor")?;
+        let w = (info.rcMonitor.right - info.rcMonitor.left) as u32;
+        let h = (info.rcMonitor.bottom - info.rcMonitor.top) as u32;
+        if w == 0 || h == 0 {
+            tracing::warn!(
+                w, h,
+                "GetMonitorInfoW returned zero-sized rect, falling back to primary"
+            );
+            return hardware_specs::get_primary_monitor_resolution()
+                .context("Failed to get primary monitor resolution");
+        }
+        Ok((w, h))
     }
 }
