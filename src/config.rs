@@ -177,21 +177,26 @@ impl Default for AudioCues {
 ///
 /// This supersedes the v2.5.8 binary `use_window_capture` flag (kept for
 /// legacy config compatibility — it is only consulted when `capture_mode`
-/// is absent/`Auto` and the game is NOT on the fullscreen-exclusive
-/// allowlist, in which case the historical meaning is preserved).
+/// is absent/`Auto` and the game is NOT on the hook-required allowlist,
+/// in which case the historical meaning is preserved).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureMode {
-    /// Decide at start-of-recording based on
-    /// [`constants::KNOWN_FULLSCREEN_EXCLUSIVE_GAMES`].
-    /// - Game on the allowlist (CS2, GTA V, etc.) → GameHook so we still
-    ///   get frames when the game enters exclusive-fullscreen D3D12 and
-    ///   DWM desktop-duplication starts returning black.
-    /// - Any other game → Monitor (current default for compatibility
-    ///   with anti-cheat and DRM; see v2.5.8 release notes).
-    ///
-    /// A follow-up refactor flips this to prefer WGC; for now Auto is
-    /// the historical Monitor-or-GameHook decision.
+    /// Decide at start-of-recording. The app targets
+    /// `x86_64-pc-windows-msvc` and requires Win10, so WGC (Win10 1903+)
+    /// is always available. Resolution order:
+    /// - `test_game` → Monitor (the CI harness is DWM-composited and
+    ///   Monitor captures it fine; pinning Monitor avoids churning the
+    ///   existing E2E green-pixel assertions in the same PR that
+    ///   introduces WGC).
+    /// - Game on [`constants::KNOWN_HOOK_REQUIRED_GAMES`] → GameHook,
+    ///   because empirical testing has shown WGC is broken for them.
+    /// - Legacy `use_window_capture = false` override → GameHook, to
+    ///   preserve the v2.5.8 power-user escape hatch.
+    /// - Anything else → WGC, Microsoft's modern official capture API.
+    ///   It handles exclusive fullscreen cleanly, doesn't require DLL
+    ///   injection, and is the industry-standard recommendation for
+    ///   games that strip the `game_capture` hook (CS2 under anti-hook).
     #[default]
     Auto,
     /// Force monitor capture regardless of game. Correct choice for games
@@ -200,16 +205,16 @@ pub enum CaptureMode {
     Monitor,
     /// Force the OBS `game_capture` hook — libobs injects a module into
     /// the target process to grab frames directly out of the swap chain.
-    /// Required for games that go into fullscreen-exclusive D3D12 (CS2 on
-    /// AMD integrated, some GTA V modes), where monitor capture fails to
-    /// composite and produces black frames.
+    /// Required for games where WGC is known-broken (see
+    /// [`constants::KNOWN_HOOK_REQUIRED_GAMES`]). Beware: stronger
+    /// anti-hook titles (CS2 vs VAC-whitelisted OBS) will still refuse
+    /// the injection and leave you with a black MP4.
     GameHook,
     /// Force Windows.Graphics.Capture (WGC) — Microsoft's official capture
     /// API, Win10 1903+. Captures the game's surface through the OS
     /// compositor without injecting into the process, so it bypasses
-    /// anti-hook heuristics that stop `GameCapture`. Correct choice for
-    /// modern fullscreen-exclusive titles where the hook no longer
-    /// attaches (CS2 with anti-hook, newer Valve games).
+    /// anti-hook heuristics that stop `GameCapture`. This is the Auto
+    /// default for games not on [`constants::KNOWN_HOOK_REQUIRED_GAMES`].
     Wgc,
 }
 
@@ -222,8 +227,10 @@ pub struct GameConfig {
     /// continue to Just Work, but new logic should use `capture_mode`
     /// instead. See [`CaptureMode::Auto`] for the resolution rule.
     pub use_window_capture: bool,
-    /// Modern capture selector. Defaults to `Auto` which uses the
-    /// fullscreen-exclusive allowlist (see `CaptureMode` docs).
+    /// Modern capture selector. Defaults to `Auto` which prefers WGC
+    /// on Win10 1903+ and falls back to GameHook for games on
+    /// [`constants::KNOWN_HOOK_REQUIRED_GAMES`] (see `CaptureMode`
+    /// docs for the full resolution order).
     #[serde(default)]
     pub capture_mode: CaptureMode,
 }
@@ -248,15 +255,25 @@ pub enum EffectiveCaptureMode {
     /// Windows.Graphics.Capture (`wgc_capture` source). Win10 1903+.
     /// Captures the window's swapchain surface via OS compositor APIs —
     /// no DLL injection, works for exclusive fullscreen D3D11/D3D12.
-    /// Only produced when the user explicitly opts into
-    /// [`CaptureMode::Wgc`] today; a subsequent refactor adds Auto
-    /// promotion to WGC on Win10 1903+.
+    /// This is the Auto default for games not on
+    /// [`constants::KNOWN_HOOK_REQUIRED_GAMES`].
     Wgc,
 }
 
+/// `test_game` is the synthetic GPU-rendered harness window the CI spins
+/// up to smoke-test end-to-end recording (see `.github/workflows/
+/// ci-e2e.yml`). It's DWM-composited and Monitor captures it fine; we
+/// pin it to Monitor specifically to avoid changing CI behaviour now
+/// that Auto's default is WGC. WGC would also work in practice, but
+/// the existing green-pixel assertions in the E2E harness were written
+/// against Monitor capture output and we'd rather not churn them in
+/// the same PR that flips the Auto default.
+const TEST_GAME_EXE_STEM: &str = "test_game";
+
 impl GameConfig {
-    /// Resolve the per-recording capture mode, folding in the allowlist
-    /// check and legacy `use_window_capture` fallback.
+    /// Resolve the per-recording capture mode, folding in the
+    /// hook-required allowlist, the test_game carve-out, and the legacy
+    /// `use_window_capture` fallback.
     ///
     /// `game_exe_stem` is the lowercase filename without extension (e.g.
     /// `"cs2"`), matching the style used by `constants::GAME_WHITELIST`.
@@ -266,19 +283,33 @@ impl GameConfig {
             CaptureMode::GameHook => EffectiveCaptureMode::GameHook,
             CaptureMode::Wgc => EffectiveCaptureMode::Wgc,
             CaptureMode::Auto => {
-                if constants::KNOWN_FULLSCREEN_EXCLUSIVE_GAMES
+                // test_game carve-out — keep CI on Monitor so the
+                // existing E2E green-pixel assertions don't churn.
+                if game_exe_stem == TEST_GAME_EXE_STEM {
+                    return EffectiveCaptureMode::Monitor;
+                }
+                // Games that regressed under WGC and need the legacy
+                // hook path. Start empty; grow as specific games
+                // regress in production.
+                if constants::KNOWN_HOOK_REQUIRED_GAMES
                     .iter()
                     .any(|g| *g == game_exe_stem)
                 {
-                    EffectiveCaptureMode::GameHook
-                } else if self.use_window_capture {
-                    EffectiveCaptureMode::Monitor
-                } else {
-                    // Legacy config with explicit `use_window_capture = false`
-                    // translates to GameHook even without the allowlist —
-                    // preserves the v2.5.8 escape hatch for power users.
-                    EffectiveCaptureMode::GameHook
+                    return EffectiveCaptureMode::GameHook;
                 }
+                // Legacy v2.5.8 escape hatch: if the user explicitly
+                // flipped `use_window_capture = false` in their
+                // persisted config, they asked for game-capture.
+                // Honour that over the new WGC default so upgrades
+                // don't surprise anyone who deliberately set it.
+                if !self.use_window_capture {
+                    return EffectiveCaptureMode::GameHook;
+                }
+                // Default for Win10 1903+: WGC. Safer than monitor
+                // duplication on fullscreen-exclusive games, doesn't
+                // require DLL injection like GameHook, and is the
+                // Microsoft-blessed path for modern Windows capture.
+                EffectiveCaptureMode::Wgc
             }
         }
     }

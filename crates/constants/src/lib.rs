@@ -258,29 +258,33 @@ pub const GAME_WHITELIST: &[&str] = &[
     "cities2",
 ];
 
-/// Game exe stems (lowercase, no `.exe`) that are known to enter
-/// fullscreen-exclusive D3D12 swap-chain presentation. On these games,
-/// DWM desktop-duplication frequently fails — most visibly on AMD
-/// integrated GPUs, where `duplicator-monitor-capture` returns black
-/// frames while the game is in focus. When `CaptureMode::Auto` resolves
-/// this list, we route recording through the OBS game-capture hook
-/// (`game_capture` source) instead.
+/// Game exe stems (lowercase, no `.exe`) where the default WGC path is
+/// known-broken and we must fall back to the `game_capture` hook. The
+/// expected failure modes for WGC on these titles include: black frame
+/// on swapchain mismatch, yellow WGC border bleed-through, Windows
+/// refusing to hand out a CaptureItem for the window class.
 ///
-/// Keep entries lowercase and in sync with the foreground-check logic in
-/// `src/tokio_thread.rs::get_foregrounded_game`, which normalises via
-/// `file_stem().to_lowercase()`.
+/// Start this list EMPTY — we only add entries as specific games
+/// regress in production. The historical (pre-WGC) allowlist of
+/// exclusive-fullscreen games was `cs2`, `gta5`/`gtav`,
+/// `gta5_enhanced`; empirical testing on nucbox (AMD 760M) has since
+/// shown:
+///   - GTA V worked fine under GameHook and continues to work fine
+///     under WGC on Win10 1903+, so it doesn't need to be pinned here.
+///   - CS2 via GameHook FAILS (Valve's anti-hook refuses even the
+///     VAC-whitelisted OBS hook, MP4 is black after 30s of "hook not
+///     loaded yet, retrying"). WGC is the right answer there too.
 ///
-/// Known-incomplete: this is a deny-list-of-one-issue, not a full
-/// taxonomy. Adding games here is cheap — each one is a single `&str`.
-pub const KNOWN_FULLSCREEN_EXCLUSIVE_GAMES: &[&str] = &[
-    // Counter-Strike 2 — Source 2 engine, exclusive-fullscreen default
-    // since the June 2024 beta. Black frames on AMD 760M via DWM bridge.
-    "cs2",
-    // GTA V Legacy (RAGE engine, exclusive-fullscreen on DX11)
-    "gta5",
-    "gtav",
-    // GTA V Enhanced (DX12 refresh, 2026 re-release)
-    "gta5_enhanced",
+/// When (not if) a specific game needs the hook path, add its exe
+/// stem here with a `//` comment noting the OS build, GPU, and symptom.
+///
+/// Keep entries lowercase and in sync with the foreground-check logic
+/// in `src/tokio_thread.rs::get_foregrounded_game`, which normalises
+/// via `file_stem().to_lowercase()`.
+pub const KNOWN_HOOK_REQUIRED_GAMES: &[&str] = &[
+    // Intentionally empty. Add games here only when empirical testing
+    // shows WGC fails for them on supported hardware; include the
+    // symptom + GPU in the comment so future triage knows why.
 ];
 
 pub const FPS: u32 = 30;

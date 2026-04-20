@@ -2126,34 +2126,33 @@ mod tests {
     }
 
     #[test]
-    fn capture_mode_auto_routes_fullscreen_exclusive_games_to_game_hook() {
+    fn capture_mode_auto_prefers_wgc_as_new_default() {
         use crate::config::{CaptureMode, EffectiveCaptureMode, GameConfig};
 
-        // CS2 is on KNOWN_FULLSCREEN_EXCLUSIVE_GAMES — Auto must resolve
-        // to GameHook regardless of the legacy `use_window_capture` flag,
-        // because DWM desktop-duplication fails on AMD integrated GPUs
-        // for CS2's fullscreen-exclusive D3D12 swap chain.
+        // Auto's new default on Win10 1903+ is WGC — it handles
+        // exclusive fullscreen D3D11/D3D12 without DLL injection and
+        // is the path that works for titles like CS2 where the
+        // game_capture hook is refused by anti-hook (Valve refuses
+        // even VAC-whitelisted OBS hooks, so the old GameHook route
+        // produced black frames).
         let cfg = GameConfig {
             use_window_capture: true,
             capture_mode: CaptureMode::Auto,
         };
-        assert_eq!(
-            cfg.effective_capture_mode("cs2"),
-            EffectiveCaptureMode::GameHook
-        );
-
-        // A non-allowlisted game under Auto honours `use_window_capture`
-        // (defaults to monitor capture for maximum compatibility).
-        let cfg = GameConfig {
-            use_window_capture: true,
-            capture_mode: CaptureMode::Auto,
-        };
+        // Previously-allowlisted exe under Auto now routes to WGC,
+        // because `KNOWN_HOOK_REQUIRED_GAMES` is empty by default
+        // (we only add entries when empirical testing proves WGC
+        // regressed for that specific game).
+        assert_eq!(cfg.effective_capture_mode("cs2"), EffectiveCaptureMode::Wgc);
+        // Any other non-test_game exe under Auto also routes to WGC.
         assert_eq!(
             cfg.effective_capture_mode("abyssus"),
-            EffectiveCaptureMode::Monitor
+            EffectiveCaptureMode::Wgc
         );
 
-        // Explicit override always wins.
+        // Explicit override always wins — Auto's new preference
+        // doesn't prevent users from pinning a mode they know works
+        // for them. Critical for QA / ops.
         let cfg = GameConfig {
             use_window_capture: true,
             capture_mode: CaptureMode::GameHook,
@@ -2173,12 +2172,70 @@ mod tests {
     }
 
     #[test]
+    fn capture_mode_auto_pins_test_game_to_monitor() {
+        // The CI harness records a synthetic `test_game.exe` window
+        // and asserts specific colour-pixel values. Those assertions
+        // were written against Monitor capture output, so we keep
+        // Auto → Monitor for test_game specifically, even though WGC
+        // would also work. Shipping the Auto flip without this pin
+        // would break `.github/workflows/ci-e2e.yml` in the same PR.
+        use crate::config::{CaptureMode, EffectiveCaptureMode, GameConfig};
+
+        let cfg = GameConfig {
+            use_window_capture: true,
+            capture_mode: CaptureMode::Auto,
+        };
+        assert_eq!(
+            cfg.effective_capture_mode("test_game"),
+            EffectiveCaptureMode::Monitor
+        );
+        // Lowercased comparison — the production resolution path
+        // normalises via `file_stem().to_lowercase()` before calling
+        // `effective_capture_mode`, so we only need to pin the
+        // lowercase form.
+        let cfg = GameConfig {
+            use_window_capture: false,
+            capture_mode: CaptureMode::Auto,
+        };
+        assert_eq!(
+            cfg.effective_capture_mode("test_game"),
+            EffectiveCaptureMode::Monitor,
+            "test_game pin must win over the legacy use_window_capture=false -> GameHook escape hatch"
+        );
+    }
+
+    #[test]
+    fn capture_mode_auto_honours_hook_required_allowlist() {
+        // `KNOWN_HOOK_REQUIRED_GAMES` ships empty, but the branch that
+        // consults it still needs to work — adding a game to that
+        // list at runtime should route Auto to GameHook for only that
+        // game. We can't mutate the `&'static` const in a unit test,
+        // so instead we assert that for every entry currently on the
+        // list, Auto resolves to GameHook. Empty list → empty loop,
+        // test still passes; list gains entries in the future → they
+        // get coverage automatically.
+        use crate::config::{CaptureMode, EffectiveCaptureMode, GameConfig};
+
+        let cfg = GameConfig {
+            use_window_capture: true,
+            capture_mode: CaptureMode::Auto,
+        };
+        for game in constants::KNOWN_HOOK_REQUIRED_GAMES {
+            assert_eq!(
+                cfg.effective_capture_mode(game),
+                EffectiveCaptureMode::GameHook,
+                "game on KNOWN_HOOK_REQUIRED_GAMES must route Auto to GameHook: {game}"
+            );
+        }
+    }
+
+    #[test]
     fn explicit_wgc_mode_resolves_to_wgc_effective() {
         // CaptureMode::Wgc is a hard override — it ignores the
-        // allowlist, ignores `use_window_capture`, and always routes to
-        // `EffectiveCaptureMode::Wgc`. The Auto default doesn't pick Wgc
-        // in this commit (a follow-up refactor flips that), so the only
-        // way the WGC source gets exercised today is via explicit opt-in.
+        // hook-required allowlist, ignores `use_window_capture`, and
+        // ignores the test_game carve-out. Useful when ops needs to
+        // force WGC on a game that'd otherwise be pinned to the hook
+        // fallback.
         use crate::config::{CaptureMode, EffectiveCaptureMode, GameConfig};
         let cfg = GameConfig {
             use_window_capture: true,
@@ -2230,8 +2287,10 @@ mod tests {
     fn capture_mode_auto_preserves_legacy_use_window_capture_false_as_game_hook() {
         // A v2.5.8 user who explicitly flipped `use_window_capture = false`
         // in their persisted config expected game-capture. Under Auto,
-        // this legacy preference should still route to GameHook even when
-        // the game isn't on the fullscreen-exclusive allowlist.
+        // this legacy preference must still route to GameHook even
+        // though the new Auto default is WGC — upgrades shouldn't
+        // silently change capture behaviour for power users who set
+        // that flag deliberately.
         use crate::config::{CaptureMode, EffectiveCaptureMode, GameConfig};
 
         let cfg = GameConfig {

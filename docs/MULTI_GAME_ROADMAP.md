@@ -1,10 +1,10 @@
 # Multi-Game Capture — Architecture Roadmap
 
-**Context:** The v2.5.11 capture path is a single mode (OBS `duplicator-monitor-capture`) that works for windowed/borderless games (test_game, most indie D3D11 titles) but fails silently on fullscreen-exclusive D3D12 games (CS2 on AMD integrated, many AAA titles). The in-flight PR adds a second mode (game-capture hook via `win-capture.dll`) driven by a static list of known fullscreen-exclusive titles.
+**Context:** The v2.5.11 capture path started as a single mode (OBS `duplicator-monitor-capture`) that worked for windowed/borderless games (test_game, most indie D3D11 titles) but failed silently on fullscreen-exclusive D3D12 games. v2.5.12 added a second mode (game-capture hook via `win-capture.dll`) driven by a static list. v2.5.13 then added WGC (Windows.Graphics.Capture) and flipped the Auto default to WGC → GameHook → Monitor, covering CS2 (where the hook was refused by anti-hook) and GTA V (where monitor duplication went black).
 
 **Howard's direction (2026-04-20):** "我们以后要支持很多类型的游戏的" — we'll support many types of games. The static hardcoded list is a temporary crutch; the real architecture must grow.
 
-This document is the plan for getting from "two hardcoded modes" to a system that handles any game the client throws at us.
+This document is the plan for getting from "three hardcoded modes" to a system that handles any game the client throws at us.
 
 ---
 
@@ -24,13 +24,13 @@ For 2026: **Monitor + GameHook + WGC** covers ~99% of the games we care about. F
 
 ## The decision engine
 
-Instead of a static `KNOWN_FULLSCREEN_EXCLUSIVE_GAMES` list, we want a **decision engine** that picks the mode dynamically. Rough order of signals:
+Instead of a static `KNOWN_HOOK_REQUIRED_GAMES` list, we want a **decision engine** that picks the mode dynamically. Rough order of signals:
 
 1. **Per-game config override** (highest priority) — `config.json` has `preferences.games["<exe_stem>"].capture_mode: "monitor" | "game_hook" | "wgc" | "auto"`. If set to anything other than `auto`, use that. This is how QA / ops can pin a game's mode when Auto misdetects.
 
 2. **Learned cache from last successful run** — after the first successful recording of a given game, persist the winning mode in the config. Next run: start with that mode. This converges on the right answer after one try.
 
-3. **Static hint list** (seed) — for the first-ever run of a game, seed Auto's initial guess from `KNOWN_FULLSCREEN_EXCLUSIVE_GAMES` if present, else default to Monitor.
+3. **Static hint list** (seed) — for the first-ever run of a game, seed Auto's initial guess from `KNOWN_HOOK_REQUIRED_GAMES` if present, else default to WGC. The list is empty at ship time — we only add games here when WGC empirically fails for them.
 
 4. **Runtime fallback detection** — after ~5s of recording, probe the output:
    - Sample mean brightness of the last 3 frames via `obs_get_video_frame` or a staging texture read
@@ -76,11 +76,18 @@ pub struct GameConfig {
 
 ## Migration from current design
 
-The in-flight PR (`feat(capture): game-capture hook fallback`) ships:
-- `CaptureMode { Monitor, GameHook, Auto }` enum (3 modes, not 4 — WGC comes later)
-- `GameConfig::capture_mode` field defaulting to `Auto`
-- `KNOWN_FULLSCREEN_EXCLUSIVE_GAMES` static list for Auto's initial guess
-- No runtime fallback detection (ships in a later PR)
+Shipped:
+- v2.5.11: `CaptureMode { Monitor, GameHook, Auto }` with
+  `KNOWN_FULLSCREEN_EXCLUSIVE_GAMES` seeding Auto's GameHook fallback
+  (fixed black frames on CS2/GTA V via DWM bridge on AMD 760M).
+- v2.5.13: Added `CaptureMode::Wgc` and `EffectiveCaptureMode::Wgc` via
+  raw `ObsSourceRef::new("wgc_capture", ...)` (libobs-wrapper has no
+  typed builder for WGC). Flipped Auto's default to WGC → GameHook →
+  Monitor, renamed the seed list to `KNOWN_HOOK_REQUIRED_GAMES` and
+  emptied it (CS2's anti-hook refuses game_capture even when OBS is
+  VAC-whitelisted, so WGC is the correct default; GTA V also works
+  fine under WGC). test_game remains pinned to Monitor so CI's
+  green-pixel assertions don't churn.
 
 Next PRs (in order):
 
@@ -93,10 +100,10 @@ Next PRs (in order):
    - Config-on-disk now carries `last_successful_mode`
    - Auto mode reads that first, then falls back to static hint list, then to Monitor default
 
-3. **WGC source** (`feat(capture): windows.graphics.capture mode for HDR + exclusive`)
-   - Add `wgc_capture` via libobs-wrapper (or raw `ObsSourceRef::new` if no builder)
-   - Update Auto logic: try WGC first on Win10 1903+, fall back to Monitor/GameHook
-   - Test matrix: HDR titles, DX12 games, integrated-GPU edge cases
+3. ~~**WGC source** (`feat(capture): windows.graphics.capture mode for HDR + exclusive`)~~ — **DONE in v2.5.13**
+   - Added `wgc_capture` via raw `ObsSourceRef::new` (libobs-wrapper has no WGC builder)
+   - Auto logic now prefers WGC on Win10 1903+, falls back to GameHook for `KNOWN_HOOK_REQUIRED_GAMES`, then Monitor for explicit user overrides
+   - Follow-up work: test matrix for HDR titles and integrated-GPU edge cases is still outstanding — add entries to `KNOWN_HOOK_REQUIRED_GAMES` if anything regresses.
 
 4. **UI mode override** (`feat(ui): per-game capture mode picker in settings`)
    - egui settings panel lists supported games, per-game dropdown for mode
@@ -138,4 +145,4 @@ Candidate test matrix (top 10 games our client wants):
 
 ---
 
-*Last updated: v2.5.11, 2026-04-20*
+*Last updated: v2.5.13, 2026-04-20 — WGC landed, Auto now prefers WGC > GameHook > Monitor.*
