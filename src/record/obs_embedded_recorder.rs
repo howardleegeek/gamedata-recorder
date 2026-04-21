@@ -1748,6 +1748,51 @@ fn prepare_source(
         }
     }
 
+    // v2.5.13: on recording-restart (last_source still Some from the prior
+    // session), force a full source teardown for capture modes whose OBS
+    // plugin spawns a window-bound WASAPI process-loopback audio companion
+    // — specifically `wgc_capture` and `game_capture`. The in-place
+    // `reset_and_update_raw` / `GameCaptureSourceUpdater` reuse paths only
+    // retarget the video side; the child audio source created by
+    // `obs-plugins/win-capture/{winrt-capture,game-capture}.c` keeps its
+    // binding to the previous window/PID. When the game tears down and
+    // re-creates its HWND mid-session (e.g. a resolution change in GTA V
+    // Enhanced), that child then logs
+    //     [WASAPISource::ProcessCaptureData] window disappeared
+    // followed by an infinite
+    //     Device '[VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK]' invalidated.
+    //     Retrying (source: owl_wgc_capture (Audio))
+    // loop every ~3s, starving the output of audio so no MP4 is ever
+    // finalized and the app appears frozen. Removing the parent source
+    // from the scene drops the last refcount, OBS runs the plugin's
+    // `destroy` callback, which releases the audio child — the fresh
+    // source we build below then gets a fresh companion bound to the
+    // current window. Monitor capture is untouched: its audio is the
+    // scene-level WASAPI sources we already force-recreate every
+    // recording in `attach_monitor_capture_audio`.
+    //
+    // The `last_source.is_some()` gate means fresh starts (first
+    // recording of a session) pay no extra cost — they already flow
+    // through the `None` branch of each arm.
+    if last_source.is_some()
+        && matches!(
+            state.effective_mode,
+            crate::config::EffectiveCaptureMode::Wgc
+                | crate::config::EffectiveCaptureMode::GameHook
+        )
+    {
+        if let Some(source) = last_source.take() {
+            tracing::info!(
+                mode = ?state.effective_mode,
+                "Recording restart detected — force-recreating capture source to \
+                 drop the stale WASAPI process-loopback audio companion bound \
+                 to the previous game window"
+            );
+            scene.remove_source(&source)?;
+            tracing::debug!("Old capture source removed for restart");
+        }
+    }
+
     let result = match state.effective_mode {
         crate::config::EffectiveCaptureMode::Monitor => {
             // Use monitor capture (full screen) — works with all games including
