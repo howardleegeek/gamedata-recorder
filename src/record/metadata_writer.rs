@@ -24,7 +24,7 @@
 //!     `Option<f32>` with skip-serialize-when-None so downstream never sees
 //!     a fabricated value.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use color_eyre::{Result, eyre::eyre};
 use egui_wgpu::wgpu;
@@ -111,10 +111,17 @@ impl GpuInfo {
         Some(Self {
             name: primary.name.clone(),
             vendor: GpuSpecs::from_name(&primary.name).vendor,
-            // wgpu::AdapterInfo doesn't expose VRAM in a stable way across
-            // versions; leave None for now. The field is optional so this
-            // is forward-compatible if we later plumb through DXGI
-            // `DXGI_ADAPTER_DESC::DedicatedVideoMemory`.
+            // F15 (2026-04-20): we'd ideally query DXGI's
+            // `IDXGIAdapter3::QueryVideoMemoryInfo` or at minimum
+            // `IDXGIAdapter::GetDesc`.`DedicatedVideoMemory` here, but the
+            // main workspace `Cargo.toml` does not enable the
+            // `Win32_Graphics_Dxgi` / `Win32_Graphics_Dxgi_Common` features
+            // on the `windows` crate (check with `grep Win32_Graphics_Dxgi
+            // Cargo.toml`). The audit constraint forbids adding deps, so
+            // we fall back to `None` and let the serializer skip the
+            // field. `Option<u64>` is schema-forward-compatible: a later
+            // PR that opts into the DXGI features can start populating
+            // this without touching the LEM schema or downstream readers.
             vram_mb: None,
         })
     }
@@ -308,21 +315,30 @@ impl MetadataWriter {
         Ok(())
     }
 
-    /// Write game metadata
+    /// Write game metadata.
+    ///
+    /// F15 fix (2026-04-20): we no longer emit hardcoded stubs for
+    /// `quality`, `mouse_sensitivity`, `invert_y`, or `keybindings`. The
+    /// previous values (`"medium"`, `1.0`, `false`, a WASD dict) were
+    /// fabricated — the recorder has no generic way to read a game's
+    /// graphics preset, mouse sensitivity, Y-axis inversion, or keybind
+    /// map. Downstream AI-training consumers were treating those stubs as
+    /// ground truth, poisoning the training set.
+    ///
+    /// The schema changed the four fields to `Option<T>` with
+    /// `skip_serializing_if = "Option::is_none"`, so emitting `None` here
+    /// causes the JSON to omit the field entirely — downstream reads
+    /// "unknown" rather than a plausible-looking lie. `motion_blur` and
+    /// `ray_tracing` are left as bool for now (they're also questionable,
+    /// but outside this fix's scope and not flagged as poison).
     async fn write_game_metadata(&self, game_exe: &str, resolution: (u32, u32)) -> Result<()> {
-        let mut keybindings = HashMap::new();
-        keybindings.insert("forward".to_string(), "W".to_string());
-        keybindings.insert("back".to_string(), "S".to_string());
-        keybindings.insert("left".to_string(), "A".to_string());
-        keybindings.insert("right".to_string(), "D".to_string());
-        keybindings.insert("shoot".to_string(), "mouse_left".to_string());
-
         let metadata = GameMetadata {
             game: game_exe.to_string(),
             version: "unknown".to_string(),
             graphics_settings: GraphicsSettings {
                 resolution: [resolution.0, resolution.1],
-                quality: "medium".to_string(),
+                // Unknown preset — skipped during serialization (F15).
+                quality: None,
                 // FOV detection requires per-game process-memory inspection
                 // which we don't have. Emit None rather than fabricating 90.
                 fov: None,
@@ -330,9 +346,10 @@ impl MetadataWriter {
                 ray_tracing: false,
             },
             control_settings: ControlSettings {
-                mouse_sensitivity: 1.0,
-                invert_y: false,
-                keybindings,
+                // Unknown — skipped during serialization (F15).
+                mouse_sensitivity: None,
+                invert_y: None,
+                keybindings: None,
             },
         };
 

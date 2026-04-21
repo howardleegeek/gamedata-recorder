@@ -101,10 +101,23 @@ pub struct HardwareMetadata {
 /// inspection we don't have; the previous `"Unknown"` / `90` defaults were
 /// being ignored by downstream analysts anyway. Emitting `None` (skipped
 /// during serialization) is more honest than a fabricated number.
+///
+/// F15 fix (2026-04-20): `quality` became `Option<String>` for the same
+/// reason. The recorder has no cross-game way to read the in-game graphics
+/// preset (each engine stores this differently and usually inside process
+/// memory), so the prior hardcoded `"medium"` was AI-training poison —
+/// downstream consumers treated the field as authoritative. `None` is
+/// skipped during serialization so legacy readers see a missing field
+/// rather than a fabricated preset.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GraphicsSettings {
     pub resolution: [u32; 2],
-    pub quality: String,
+    /// In-game graphics preset (`"low"`/`"medium"`/`"high"`/engine-specific),
+    /// if we can detect it. `None` when the recorder has no way to read the
+    /// game's quality setting — the field is skipped during serialization so
+    /// downstream sees absence instead of a fabricated value.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub quality: Option<String>,
     /// Field-of-view in degrees, if we can detect it. `None` when the
     /// recorder has no way to read the game's FOV setting — serialization
     /// skips the field entirely so legacy consumers don't see a phony value.
@@ -114,12 +127,29 @@ pub struct GraphicsSettings {
     pub ray_tracing: bool,
 }
 
-/// Control settings
+/// Control settings.
+///
+/// F15 fix (2026-04-20): `mouse_sensitivity`, `invert_y`, and `keybindings`
+/// all became `Option<T>`. The recorder doesn't read game config files or
+/// probe process memory, so the prior hardcoded `1.0` / `false` / WASD dict
+/// were fabricated stubs. Downstream AI-training consumers trained on those
+/// stubs as if they were ground truth. Emitting `None` (skipped during
+/// serialization) signals "unknown" without corrupting the training set.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ControlSettings {
-    pub mouse_sensitivity: f64,
-    pub invert_y: bool,
-    pub keybindings: HashMap<String, String>,
+    /// Mouse sensitivity multiplier (engine-specific scale), if detected.
+    /// `None` when unknown — skipped during serialization.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mouse_sensitivity: Option<f64>,
+    /// Whether the game's vertical mouse axis is inverted, if detected.
+    /// `None` when unknown — skipped during serialization.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub invert_y: Option<bool>,
+    /// Game-specific action -> key mapping (e.g. `forward -> W`), if
+    /// detected. `None` when unknown — skipped during serialization so
+    /// downstream doesn't train on a fabricated WASD default.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub keybindings: Option<HashMap<String, String>>,
 }
 
 /// Game metadata
@@ -342,7 +372,7 @@ mod tests {
     fn graphics_settings_fov_none_is_skipped() {
         let gs = GraphicsSettings {
             resolution: [1920, 1080],
-            quality: "high".to_string(),
+            quality: Some("high".to_string()),
             fov: None,
             motion_blur: false,
             ray_tracing: false,
@@ -360,7 +390,7 @@ mod tests {
     fn graphics_settings_fov_some_is_emitted() {
         let gs = GraphicsSettings {
             resolution: [1920, 1080],
-            quality: "high".to_string(),
+            quality: Some("high".to_string()),
             fov: Some(103.5),
             motion_blur: false,
             ray_tracing: false,
@@ -370,5 +400,73 @@ mod tests {
             json.contains("\"fov\":103.5"),
             "expected fov:103.5, got: {json}"
         );
+    }
+
+    /// F15 regression: quality=None must not serialize a `quality` field.
+    /// The pre-fix writer emitted `"quality":"medium"` unconditionally,
+    /// which downstream trained on as if it were ground truth.
+    #[test]
+    fn graphics_settings_quality_none_is_skipped() {
+        let gs = GraphicsSettings {
+            resolution: [1920, 1080],
+            quality: None,
+            fov: None,
+            motion_blur: false,
+            ray_tracing: false,
+        };
+        let json = serde_json::to_string(&gs).unwrap();
+        assert!(
+            !json.contains("quality"),
+            "quality should be absent when None, got: {json}"
+        );
+    }
+
+    /// F15 regression: mouse_sensitivity=None, invert_y=None, and
+    /// keybindings=None must all be omitted from the serialized JSON.
+    /// The pre-fix writer hardcoded `1.0` / `false` / a WASD dict, all
+    /// fabricated — downstream training pipelines were ingesting them
+    /// as ground truth and poisoning the dataset.
+    #[test]
+    fn control_settings_all_none_fields_are_skipped() {
+        let cs = ControlSettings {
+            mouse_sensitivity: None,
+            invert_y: None,
+            keybindings: None,
+        };
+        let json = serde_json::to_string(&cs).unwrap();
+        assert!(
+            !json.contains("mouse_sensitivity"),
+            "mouse_sensitivity should be absent when None, got: {json}"
+        );
+        assert!(
+            !json.contains("invert_y"),
+            "invert_y should be absent when None, got: {json}"
+        );
+        assert!(
+            !json.contains("keybindings"),
+            "keybindings should be absent when None, got: {json}"
+        );
+        // The whole object should serialize as `{}` since every field is
+        // None — this is what downstream sees when we have no game-config
+        // detection. Explicit check so we catch future additions that
+        // sneak poison defaults back in.
+        assert_eq!(json, "{}");
+    }
+
+    /// F15: when detection lands in the future, the Some(...) branches
+    /// must still serialize correctly.
+    #[test]
+    fn control_settings_some_fields_are_emitted() {
+        let mut kb = HashMap::new();
+        kb.insert("forward".to_string(), "W".to_string());
+        let cs = ControlSettings {
+            mouse_sensitivity: Some(2.5),
+            invert_y: Some(true),
+            keybindings: Some(kb),
+        };
+        let json = serde_json::to_string(&cs).unwrap();
+        assert!(json.contains("\"mouse_sensitivity\":2.5"));
+        assert!(json.contains("\"invert_y\":true"));
+        assert!(json.contains("\"forward\":\"W\""));
     }
 }
