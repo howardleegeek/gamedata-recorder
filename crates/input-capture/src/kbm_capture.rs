@@ -44,7 +44,8 @@ use windows::{
                 self, GetRawInputData, HRAWINPUT,
                 KeyboardAndMouse::{VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2},
                 MOUSE_MOVE_ABSOLUTE, MOUSE_VIRTUAL_DESKTOP, RAWINPUT, RAWINPUTDEVICE,
-                RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RegisterRawInputDevices,
+                RAWINPUTDEVICE_FLAGS, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK,
+                RegisterRawInputDevices,
             },
             WindowsAndMessaging::{
                 self, CreateWindowExA, DefWindowProcA, DestroyWindow, DispatchMessageA,
@@ -222,36 +223,151 @@ impl KbmCapture {
 
             tracing::debug!("RawInput window created: {hwnd:?}");
 
-            let raw_input_devices = [
-                0x02, // Mouse
-                0x06, // Keyboard
-            ]
-            .map(|usage| RAWINPUTDEVICE {
-                usUsagePage: 0x01, // Generic Desktop Controls
-                usUsage: usage,
-                dwFlags: RIDEV_INPUTSINK, // Receive input even when not in foreground
-                // For message-only windows (HWND_MESSAGE parent), hwndTarget should be NULL
-                hwndTarget: HWND::default(),
-            });
+            // v2.5.13 — Win11 26100 ERROR_INVALID_PARAMETER (0x80070057) fix.
+            //
+            // Background: on Windows 11 build 26100 (and some earlier 24H2
+            // cumulative updates), `RegisterRawInputDevices` strictly enforces
+            // the documented contract that when `RIDEV_INPUTSINK` is set,
+            // `hwndTarget` MUST be a valid HWND (not NULL). Older builds
+            // silently accepted NULL here; 26100 rejects it with
+            // ERROR_INVALID_PARAMETER, killing keyboard+mouse capture for the
+            // whole session. A user's debug log on RTX 4060 / Win11 26100
+            // showed 5 consecutive failures and 0 successes, producing MP4s
+            // with empty input streams — poison for training data.
+            //
+            // The previous code passed `HWND::default()` here and commented
+            // that message-only windows want NULL; that comment was wrong per
+            // the MSDN `RAWINPUTDEVICE` docs. We always have a valid message-
+            // only `hwnd` from `CreateWindowExA` above, so we pass it.
+            //
+            // Fallback cascade — we try progressively less-demanding
+            // registrations so that at least *some* kbm input flows even if
+            // the preferred path is rejected by the OS or a third-party
+            // filter driver:
+            //
+            //   1. RIDEV_INPUTSINK + valid hwnd, both devices in one call
+            //      (preferred: global capture regardless of foreground state)
+            //   2. RIDEV_INPUTSINK + valid hwnd, registered ONE DEVICE AT A
+            //      TIME (works around batch-rejection quirks on some driver
+            //      stacks)
+            //   3. dwFlags = 0 + valid hwnd, one device at a time
+            //      (foreground-only fallback: only delivers input when our
+            //      window owns focus, but never NULL-target and never INPUTSINK
+            //      — this is the maximally-compatible shape accepted by every
+            //      Windows build we care about)
+            let preferred_flags = RIDEV_INPUTSINK;
+            let foreground_flags = RAWINPUTDEVICE_FLAGS(0);
+            let make_devices = |flags: RAWINPUTDEVICE_FLAGS| {
+                [
+                    0x02, // Mouse
+                    0x06, // Keyboard
+                ]
+                .map(|usage| RAWINPUTDEVICE {
+                    usUsagePage: 0x01, // Generic Desktop Controls
+                    usUsage: usage,
+                    dwFlags: flags,
+                    // Per MSDN: when RIDEV_INPUTSINK is set, hwndTarget MUST be
+                    // a valid HWND. Win11 26100 enforces this strictly. We use
+                    // our message-only window so we receive WM_INPUT even when
+                    // not in foreground. For the dwFlags=0 fallback, a valid
+                    // HWND is also accepted (and is what Windows wants for
+                    // foreground capture).
+                    hwndTarget: hwnd,
+                })
+            };
 
-            let device_count = raw_input_devices.len() as u32;
-            // v2.5.2: don't panic if RegisterRawInputDevices fails — this is
-            // known to return 0x80070057 (ERROR_INVALID_PARAMETER) on certain
-            // Windows sessions (session 0 / headless / SSH-launched processes).
-            // Session logs from nucbox showed zero keyboard/mouse events for
-            // 302 seconds because the whole pipeline died on this call.
-            // Log a warning and proceed without Raw Input — the capture thread
-            // will still pump window messages and gamepad input will continue
-            // to work via XInput. A future fix can wire up SetWindowsHookEx
-            // as a proper fallback.
-            if let Err(e) = RegisterRawInputDevices(&raw_input_devices, device_count)
-                .wrap_err("failed to register raw input devices")
-            {
-                tracing::warn!(
+            // Tier 1: preferred path. Batch register both devices with
+            // RIDEV_INPUTSINK and the valid message-only hwnd.
+            let tier1 = make_devices(preferred_flags);
+            let tier1_result = RegisterRawInputDevices(&tier1, tier1.len() as u32)
+                .wrap_err("tier 1: RIDEV_INPUTSINK batch with valid hwnd");
+            let registered = if let Err(ref e) = tier1_result {
+                tracing::info!(
                     error = ?e,
-                    "RegisterRawInputDevices failed — continuing without \
-                     keyboard/mouse Raw Input. Video recording and gamepad \
-                     input are unaffected."
+                    "RegisterRawInputDevices tier 1 (INPUTSINK batch) failed, trying tier 2"
+                );
+                // Tier 2: same flags, but register devices one at a time.
+                // Some filter drivers reject the whole batch if they dislike a
+                // single entry; sequential registration lets us succeed for
+                // at least one device (the mouse often goes through even when
+                // the keyboard does not, or vice versa).
+                let mut any_ok = false;
+                for dev in &tier1 {
+                    let single = [*dev];
+                    match RegisterRawInputDevices(&single, 1)
+                        .wrap_err("tier 2: RIDEV_INPUTSINK per-device with valid hwnd")
+                    {
+                        Ok(()) => {
+                            tracing::debug!(
+                                usage = format!("0x{:02X}", dev.usUsage),
+                                "tier 2 succeeded for device"
+                            );
+                            any_ok = true;
+                        }
+                        Err(e) => {
+                            tracing::info!(
+                                error = ?e,
+                                usage = format!("0x{:02X}", dev.usUsage),
+                                "tier 2 failed for device, will try tier 3"
+                            );
+                        }
+                    }
+                }
+
+                if !any_ok {
+                    // Tier 3: dwFlags = 0 (foreground-only), one device at a
+                    // time. No INPUTSINK means we only receive input when our
+                    // hidden message window owns the foreground — which it
+                    // normally does not — so coverage will be partial. This
+                    // is still strictly better than zero input: the game
+                    // overlay and any injected focus windows will pass through
+                    // real WM_INPUT events instead of the silent empty stream
+                    // we ship today.
+                    let tier3 = make_devices(foreground_flags);
+                    let mut any_tier3_ok = false;
+                    for dev in &tier3 {
+                        let single = [*dev];
+                        match RegisterRawInputDevices(&single, 1)
+                            .wrap_err("tier 3: dwFlags=0 per-device foreground-only")
+                        {
+                            Ok(()) => {
+                                tracing::debug!(
+                                    usage = format!("0x{:02X}", dev.usUsage),
+                                    "tier 3 succeeded for device (foreground-only)"
+                                );
+                                any_tier3_ok = true;
+                            }
+                            Err(e) => {
+                                tracing::debug!(
+                                    error = ?e,
+                                    usage = format!("0x{:02X}", dev.usUsage),
+                                    "tier 3 failed for device"
+                                );
+                            }
+                        }
+                    }
+                    any_tier3_ok
+                } else {
+                    true
+                }
+            } else {
+                tracing::debug!("RegisterRawInputDevices tier 1 (INPUTSINK batch) succeeded");
+                true
+            };
+
+            if !registered {
+                // All three tiers failed. This is very rare (e.g. session 0 /
+                // headless / certain kernel-mode anti-cheat filters). Log and
+                // proceed — the capture thread still pumps window messages so
+                // the rest of the pipeline (gamepad via XInput, video via OBS)
+                // is unaffected. Downstream validators will flag the empty
+                // input stream.
+                tracing::warn!(
+                    "RegisterRawInputDevices failed at all fallback tiers \
+                     (preferred INPUTSINK batch, per-device INPUTSINK, and \
+                     foreground-only) — continuing without keyboard/mouse \
+                     Raw Input. Video recording and gamepad input are \
+                     unaffected."
                 );
             }
 
