@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use color_eyre::{
@@ -40,10 +41,44 @@ const INPUT_CHANNEL_CAPACITY: usize = 16_384;
 /// Shared across all input event streams to track total drops.
 static DROPPED_EVENTS: AtomicU64 = AtomicU64::new(0);
 
+/// Per-recording dropped event counter.
+/// Tracks events dropped during this specific recording session.
+#[derive(Debug, Clone)]
+pub(crate) struct DroppedEventCounter {
+    inner: Arc<AtomicU64>,
+}
+
+impl DroppedEventCounter {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Increment the dropped event counter
+    fn increment(&self) {
+        self.inner.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get the current count of dropped events
+    pub fn get(&self) -> u64 {
+        self.inner.load(Ordering::Relaxed)
+    }
+
+    /// Create a clone that shares the same counter
+    fn clone_shared(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
 /// Stream for sending timestamped input events to the writer
 #[derive(Clone)]
 pub(crate) struct InputEventStream {
     tx: mpsc::Sender<InputEvent>,
+    /// Per-recording dropped event counter
+    dropped_counter: Option<DroppedEventCounter>,
 }
 
 impl InputEventStream {
@@ -51,35 +86,48 @@ impl InputEventStream {
     /// since now that we rely on the rx queue to flush outputs to file, we also want this
     /// queue to be populated in chronological order, so arbitrary timestamp writing
     /// shouldn't be supported anyway.
-    pub(crate) fn send(&self, event: InputEventType) -> Result<()> {
+    ///
+    /// Returns `Ok(true)` if the event was sent successfully, `Ok(false)` if the event
+    /// was dropped due to a full channel, or `Err` if the receiver was closed.
+    pub(crate) fn send(&self, event: InputEventType) -> Result<bool> {
         // Use try_send to avoid blocking the input capture thread.
         // If the channel is full, we drop the event — better to lose an input event
         // than to grow memory unboundedly and crash the game.
         match self.tx.try_send(InputEvent::new_at_now(event)) {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(true),
             Err(mpsc::error::TrySendError::Full(_)) => {
-                // Channel full — drop event to prevent OOM. This is acceptable:
-                // a few lost input events won't meaningfully degrade the recording.
-                // Track dropped events and log periodically if significant.
-                let count = DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
+                // Channel full — drop event to prevent OOM.
+                // Track dropped events globally and per-recording.
+                DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
+                if let Some(counter) = &self.dropped_counter {
+                    counter.increment();
+                }
+                let count = DROPPED_EVENTS.load(Ordering::Relaxed);
                 if count > 0 && count % 100 == 0 {
                     tracing::warn!(
                         "Dropped {} input events due to channel full (system under heavy input load)",
-                        count + 1
+                        count
                     );
                 }
-                Ok(())
+                Ok(false) // Indicate drop to caller
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 Err(eyre!("input event stream receiver was closed"))
             }
         }
     }
+
+    /// Get the dropped event counter for this stream, if available.
+    pub(crate) fn dropped_counter(&self) -> Option<&DroppedEventCounter> {
+        self.dropped_counter.as_ref()
+    }
 }
 
 pub(crate) struct InputEventWriter {
     file: File,
     rx: mpsc::Receiver<InputEvent>,
+    /// Counter for dropped events during this recording
+    dropped_counter: DroppedEventCounter,
 }
 
 impl InputEventWriter {
@@ -92,10 +140,19 @@ impl InputEventWriter {
             .wrap_err_with(|| eyre!("failed to create and open {path:?}"))?;
 
         let (tx, rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
-        let stream = InputEventStream { tx };
-        let mut writer = Self { file, rx };
+        let dropped_counter = DroppedEventCounter::new();
+        let stream = InputEventStream {
+            tx,
+            dropped_counter: Some(dropped_counter.clone_shared()),
+        };
+        let writer = Self {
+            file,
+            rx,
+            dropped_counter,
+        };
 
         // No header needed for JSON Lines format — each line is self-describing
+        let mut writer = writer;
         writer
             .write_entry(InputEvent::new_at_now(InputEventType::Start {
                 inputs: input_capture.active_input(),
@@ -113,7 +170,7 @@ impl InputEventWriter {
         Ok(())
     }
 
-    pub(crate) async fn stop(mut self, input_capture: &InputCapture) -> Result<()> {
+    pub(crate) async fn stop(mut self, input_capture: &InputCapture) -> Result<u64> {
         // Most accurate possible timestamp of exactly when the stop input recording was called
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -133,7 +190,15 @@ impl InputEventWriter {
                 inputs: input_capture.active_input(),
             },
         ))
-        .await
+        .await?;
+
+        // Return the count of dropped events
+        Ok(self.dropped_counter.get())
+    }
+
+    /// Get the current count of dropped events
+    pub(crate) fn dropped_count(&self) -> u64 {
+        self.dropped_counter.get()
     }
 
     async fn write_entry(&mut self, event: InputEvent) -> Result<()> {

@@ -273,11 +273,29 @@ impl Recording {
 
         // Don't propagate input_writer errors — treat like recorder errors
         // (write INVALID marker instead of returning Err which skips metadata)
-        if let Err(e) = self.input_writer.stop(input_capture).await {
-            tracing::error!("Failed to stop input writer: {e}");
-            if result.is_ok() {
-                result = Err(e);
+        let dropped_input_events = match self.input_writer.stop(input_capture).await {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::error!("Failed to stop input writer: {e}");
+                if result.is_ok() {
+                    result = Err(e);
+                }
+                0 // Default to 0 if error occurred
             }
+        };
+
+        // Log if any input events were dropped
+        if dropped_input_events > 0 {
+            let percentage = if self.fps_sample_count > 0 {
+                (dropped_input_events as f64 / self.fps_sample_count as f64) * 100.0
+            } else {
+                0.0
+            };
+            tracing::warn!(
+                "Recording had {} dropped input events ({:.2}%)",
+                dropped_input_events,
+                percentage
+            );
         }
 
         // Save per-second FPS log + per-frame frames.jsonl (buyer spec requirement).
@@ -300,6 +318,30 @@ impl Recording {
                     "Average FPS {average_fps:.1} is below required minimum of {:.1}",
                     constants::MIN_AVERAGE_FPS
                 ));
+            }
+
+            // Validate dropped input events rate
+            // Threshold: 1% of frames or at least 100 events (whichever is higher)
+            // This prevents data integrity issues while avoiding false positives on short recordings
+            if dropped_input_events > 0 {
+                let dropped_threshold = frame_count
+                    .map(|fc| fc as f64 * 0.01) // 1% of frames
+                    .unwrap_or(100.0)
+                    .max(100.0) // At least 100 events
+                    as u64;
+
+                if dropped_input_events > dropped_threshold {
+                    result = Err(color_eyre::eyre::eyre!(
+                        "Dropped {} input events exceeds threshold of {} ({}%), recording data may be incomplete",
+                        dropped_input_events,
+                        dropped_threshold,
+                        if let Some(fc) = frame_count {
+                            (dropped_input_events as f64 / fc as f64) * 100.0
+                        } else {
+                            0.0
+                        }
+                    ));
+                }
             }
         }
 
@@ -397,6 +439,7 @@ impl Recording {
             recorder.id(),
             result.as_ref().ok().cloned(),
             frame_count,
+            dropped_input_events,
         )
         .await?;
 

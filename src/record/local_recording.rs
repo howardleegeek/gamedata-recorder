@@ -616,6 +616,7 @@ impl LocalRecording {
         recorder_id: &str,
         recorder_extra: Option<serde_json::Value>,
         frame_count: Option<u64>,
+        dropped_input_events: u64,
     ) -> Result<()> {
         // Resolve metadata path from recording location
         let metadata_path = recording_location.join(constants::filename::recording::METADATA);
@@ -695,6 +696,11 @@ impl LocalRecording {
             end_timestamp,
             duration,
             input_stats: None,
+            dropped_input_events: if dropped_input_events > 0 {
+                Some(dropped_input_events)
+            } else {
+                None
+            },
             recorder: Some(recorder_id.to_string()),
             recorder_extra,
             window_name,

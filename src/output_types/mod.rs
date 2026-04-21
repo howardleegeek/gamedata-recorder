@@ -15,6 +15,10 @@ pub struct Metadata {
     // that the uploader will not fail to upload older recordings.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub window_name: Option<String>,
+    /// Number of input events dropped during recording due to channel overflow.
+    /// None for older recordings that didn't track this.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub dropped_input_events: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub game_resolution: Option<(u32, u32)>,
     #[serde(
@@ -125,6 +129,10 @@ pub enum InputEventType {
     VideoStart,
     /// VIDEO_END: end of video recording
     VideoEnd,
+    /// VIDEO_PAUSED: video recording paused (e.g., due to DXGI_ERROR_ACCESS_LOST during workstation lock)
+    VideoPaused,
+    /// VIDEO_RESUMED: video recording resumed after being paused
+    VideoResumed,
     /// HOOK_START: when the application was successfully hooked (e.g. when the recording is non-black)
     HookStart,
     /// UNFOCUS
@@ -178,6 +186,8 @@ impl InputEventType {
             InputEventType::End { .. } => "END",
             InputEventType::VideoStart => "VIDEO_START",
             InputEventType::VideoEnd => "VIDEO_END",
+            InputEventType::VideoPaused => "VIDEO_PAUSED",
+            InputEventType::VideoResumed => "VIDEO_RESUMED",
             InputEventType::HookStart => "HOOK_START",
             InputEventType::Unfocus => "UNFOCUS",
             InputEventType::Focus => "FOCUS",
@@ -212,6 +222,8 @@ impl InputEventType {
             }),
             InputEventType::VideoStart => json!([]),
             InputEventType::VideoEnd => json!([]),
+            InputEventType::VideoPaused => json!([]),
+            InputEventType::VideoResumed => json!([]),
             InputEventType::HookStart => json!([]),
             InputEventType::Unfocus => json!([]),
             InputEventType::Focus => json!([]),
@@ -333,6 +345,8 @@ impl InputEventType {
             }),
             "VIDEO_START" => Ok(InputEventType::VideoStart),
             "VIDEO_END" => Ok(InputEventType::VideoEnd),
+            "VIDEO_PAUSED" => Ok(InputEventType::VideoPaused),
+            "VIDEO_RESUMED" => Ok(InputEventType::VideoResumed),
             "HOOK_START" => Ok(InputEventType::HookStart),
             "UNFOCUS" => Ok(InputEventType::Unfocus),
             "FOCUS" => Ok(InputEventType::Focus),

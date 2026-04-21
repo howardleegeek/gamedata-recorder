@@ -753,6 +753,9 @@ struct RecorderState {
     /// `session_is_interactive()`. Starts `Active` every time a new
     /// recording begins — we do not carry pause state across recordings.
     access_lost_state: AccessLostState,
+    /// Event stream for sending VIDEO_PAUSED and VIDEO_RESUMED events
+    /// when DXGI access is lost/regained during recording.
+    event_stream: Option<InputEventStream>,
     output: ObsOutputRef,
     source: Option<ObsSourceRef>,
     /// WASAPI desktop (output) audio source, attached only when running in
@@ -876,6 +879,7 @@ impl RecorderState {
                 skipped_frames,
                 access_lost_flag,
                 access_lost_state: AccessLostState::Active,
+                event_stream: None,
                 output,
                 source: None,
                 desktop_audio_source: None,
@@ -1024,6 +1028,9 @@ impl RecorderState {
             .set_audio_encoder(self.audio_encoder.clone(), 0)?;
 
         self.last_video_encoder_type = Some(encoder_type);
+
+        // Store event stream for sending VIDEO_PAUSED/VIDEO_RESUMED events during DXGI access lost
+        self.event_stream = Some(request.event_stream.clone());
 
         // Listen for signals to pass onto the event stream
         self.was_hooked.store(false, Ordering::Relaxed);
@@ -1214,6 +1221,9 @@ impl RecorderState {
         // clear-then-drop in the correct order.
         self.detach_monitor_capture_audio();
 
+        // Clear event stream when recording stops
+        self.event_stream = None;
+
         let settings = self.last_encoder_settings.take().unwrap_or_default();
 
         // Send shutdown signal BEFORE checking hook status, to ensure the signal thread
@@ -1343,6 +1353,11 @@ impl RecorderState {
                     );
                     match self.output.pause(true) {
                         Ok(()) => {
+                            // Send VIDEO_PAUSED event to input log so data consumers
+                            // know there's a gap in video continuity
+                            if let Some(stream) = &self.event_stream {
+                                let _ = stream.send(InputEventType::VideoPaused);
+                            }
                             self.access_lost_state = AccessLostState::Paused(Instant::now());
                             // Clear so a fresh access-lost burst after
                             // unpause can re-trigger the pause path.
@@ -1383,6 +1398,11 @@ impl RecorderState {
                     );
                     match self.output.pause(false) {
                         Ok(()) => {
+                            // Send VIDEO_RESUMED event to input log so data consumers
+                            // know video capture has resumed after the gap
+                            if let Some(stream) = &self.event_stream {
+                                let _ = stream.send(InputEventType::VideoResumed);
+                            }
                             self.access_lost_state = AccessLostState::Active;
                             // If duplication is still broken, the logger
                             // will latch the flag again on the very next
