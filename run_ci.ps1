@@ -7,19 +7,22 @@
 #   4. Launch gamedata-recorder and wait for it to start recording
 #   5. Let it record for a few seconds
 #   6. Stop recording and close processes
-#   7. Check the output video (brightness, fps, duration)
-#   8. If all checks pass, git commit + push
+#   7. Check the output video (brightness, fps, duration, audio)
+#   8. Check input log (mouse, keyboard, sync)
+#   9. If all checks pass, git commit + push
 #
 # Usage:
 #   .\run_ci.ps1
 #   .\run_ci.ps1 -SkipBuild        # skip cargo build steps (faster iteration)
 #   .\run_ci.ps1 -SkipCommit       # check only, don't commit
 #   .\run_ci.ps1 -RecordSeconds 8  # record for 8 seconds instead of default 5
+#   .\run_ci.ps1 -WithInput        # simulate input events for testing
 
 param(
     [switch]$SkipBuild   = $false,
     [switch]$SkipCommit  = $false,
-    [int]$RecordSeconds  = 5
+    [int]$RecordSeconds  = 5,
+    [switch]$WithInput   = $false
 )
 
 Set-StrictMode -Version Latest
@@ -76,6 +79,7 @@ function Resolve-TestGameExe {
 }
 $VideoOutputDir    = "$RepoRoot\ci_output"
 $CheckVideoScript  = "$RepoRoot\check_video.py"
+$CheckInputLogScript = "$RepoRoot\check_input_log.py"
 
 $TestGameTitle     = "D3D Test Game"      # must match window title in Rust code
 $TestGameProcess   = "test_game"
@@ -139,6 +143,62 @@ function Stop-ProcessSafe([string]$name) {
     if ($p) {
         $p | Stop-Process -Force
         Write-OK "Stopped $name"
+    }
+}
+
+# PowerShell: Windows API to simulate input
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class InputSimulator {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint SendInput(uint nInputs, IntPtr pInputs, int cbSize);
+
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint cButtons, uint dwExtraInfo);
+
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, uint dwExtraInfo);
+
+    public const uint INPUT_MOUSE = 0;
+    public const uint INPUT_KEYBOARD = 1;
+    public const uint MOUSEEVENTF_MOVE = 0x0001;
+    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+    public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
+    public const uint KEYEVENTF_KEYUP = 0x0002;
+}
+"@
+
+function Send-MouseClick {
+    param([int]$Count = 1, [bool]$Right = $false)
+    for ($i = 0; $i -lt $Count; $i++) {
+        $down = if ($Right) { [InputSimulator]::MOUSEEVENTF_RIGHTDOWN } else { [InputSimulator]::MOUSEEVENTF_LEFTDOWN }
+        $up = if ($Right) { [InputSimulator]::MOUSEEVENTF_RIGHTUP } else { [InputSimulator]::MOUSEEVENTF_LEFTUP }
+        [InputSimulator]::mouse_event($down, 0, 0, 0, 0)
+        Start-Sleep -Milliseconds 50
+        [InputSimulator]::mouse_event($up, 0, 0, 0, 0)
+        Start-Sleep -Milliseconds 100
+    }
+}
+
+function Send-MouseMove {
+    param([int]$DeltaX = 10, [int]$DeltaY = 10, [int]$Count = 5)
+    for ($i = 0; $i -lt $Count; $i++) {
+        [InputSimulator]::mouse_event([InputSimulator]::MOUSEEVENTF_MOVE, $DeltaX, $DeltaY, 0, 0)
+        Start-Sleep -Milliseconds 100
+        [InputSimulator]::mouse_event([InputSimulator]::MOUSEEVENTF_MOVE, -$DeltaX, -$DeltaY, 0, 0)
+        Start-Sleep -Milliseconds 100
+    }
+}
+
+function Send-KeyStroke {
+    param([byte]$KeyCode, [bool]$Release = $true)
+    [InputSimulator]::keybd_event($KeyCode, 0, 0, 0)
+    Start-Sleep -Milliseconds 50
+    if ($Release) {
+        [InputSimulator]::keybd_event($KeyCode, 0, [InputSimulator]::KEYEVENTF_KEYUP, 0)
     }
 }
 
@@ -266,7 +326,74 @@ Start-Sleep -Seconds 3
 
 Write-Step "Recording for $RecordSeconds seconds"
 
-Start-Sleep -Seconds $RecordSeconds
+if ($WithInput) {
+    Write-Host "  Simulating input events for testing..." -ForegroundColor Gray
+
+    # Simulate input in a background job so it doesn't block the recording
+    $inputJob = Start-ThreadJob -ScriptBlock {
+        param($DurationSeconds)
+        $endTime = (Get-Date).AddSeconds($DurationSeconds)
+        $iteration = 0
+
+        while ((Get-Date) -lt $endTime) {
+            $iteration++
+
+            # Every 2 seconds, simulate a burst of input
+            if ($iteration % 20 -eq 0) {
+                # Mouse movement
+                for ($j = 0; $j -lt 5; $j++) {
+                    [InputSimulator]::mouse_event([InputSimulator]::MOUSEEVENTF_MOVE, 10, 10, 0, 0)
+                    Start-Sleep -Milliseconds 50
+                    [InputSimulator]::mouse_event([InputSimulator]::MOUSEEVENTF_MOVE, -10, -10, 0, 0)
+                    Start-Sleep -Milliseconds 50
+                }
+
+                # Left clicks
+                [InputSimulator]::mouse_event([InputSimulator]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                Start-Sleep -Milliseconds 50
+                [InputSimulator]::mouse_event([InputSimulator]::MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                Start-Sleep -Milliseconds 100
+
+                # Right click
+                [InputSimulator]::mouse_event([InputSimulator]::MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+                Start-Sleep -Milliseconds 50
+                [InputSimulator]::mouse_event([InputSimulator]::MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+                Start-Sleep -Milliseconds 100
+
+                # Keyboard events - A-Z key sequence
+                $keyCodes = @(0x41, 0x42, 0x43)  # A, B, C
+                foreach ($k in $keyCodes) {
+                    [InputSimulator]::keybd_event($k, 0, 0, 0)
+                    Start-Sleep -Milliseconds 50
+                    [InputSimulator]::keybd_event($k, 0, [InputSimulator]::KEYEVENTF_KEYUP, 0)
+                    Start-Sleep -Milliseconds 50
+                }
+
+                # Ctrl+C combination
+                [InputSimulator]::keybd_event(0x11, 0, 0, 0)  # Ctrl down
+                Start-Sleep -Milliseconds 20
+                [InputSimulator]::keybd_event(0x43, 0, 0, 0)  # C down
+                Start-Sleep -Milliseconds 50
+                [InputSimulator]::keybd_event(0x43, 0, [InputSimulator]::KEYEVENTF_KEYUP, 0)  # C up
+                Start-Sleep -Milliseconds 20
+                [InputSimulator]::keybd_event(0x11, 0, [InputSimulator]::KEYEVENTF_KEYUP, 0)  # Ctrl up
+            }
+
+            Start-Sleep -Milliseconds 100
+        }
+    } -ArgumentList $RecordSeconds
+
+    # Wait for recording to complete
+    Start-Sleep -Seconds $RecordSeconds
+
+    # Wait for input simulation to complete
+    $inputJob | Wait-Job | Out-Null
+    $inputJob | Remove-Job
+    Write-OK "Input simulation completed"
+} else {
+    Start-Sleep -Seconds $RecordSeconds
+}
+
 Write-OK "Recording window elapsed"
 
 # ─── Step 7: Stop everything ──────────────────────────────────────────────────
@@ -318,6 +445,36 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 Write-OK "Video validation passed"
+
+# ─── Step 10: Check input log (if input was simulated) ────────────────────────
+
+if ($WithInput) {
+    Write-Step "Validate input log"
+
+    # Find the input.csv file in the recording session folder
+    $recordingFolder = $video.Directory
+    $inputLog = Get-ChildItem -Path $recordingFolder.FullName -Filter "input.csv" -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+
+    if ($inputLog) {
+        Write-Host "  Found input log: $($inputLog.FullName)" -ForegroundColor Gray
+
+        python $CheckInputLogScript $inputLog.FullName `
+            --require-mouse `
+            --require-keyboard
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "Input log validation failed — blocking commit"
+            exit 1
+        }
+        Write-OK "Input log validation passed"
+    } else {
+        Write-Fail "Input log not found in recording folder"
+        exit 1
+    }
+} else {
+    Write-Host "  Skipping input log validation (use -WithInput to enable)" -ForegroundColor Gray
+}
 
 
 Write-Host "`n=== CI PASSED ===" -ForegroundColor Green

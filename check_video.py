@@ -5,9 +5,11 @@ Checks:
   1. Not black screen (mean brightness > threshold)
   2. FPS >= 27
   3. Duration >= minimum seconds
+  4. Audio stream exists
+  5. Audio is not silent (mean volume > threshold)
 
 Usage:
-  python check_video.py <video_file> [--min-brightness 10] [--min-fps 27] [--min-duration 3]
+  python check_video.py <video_file> [--min-brightness 10] [--min-fps 27] [--min-duration 3] [--min-audio-volume 0.01]
 
 Exit codes:
   0 = all checks passed
@@ -116,6 +118,43 @@ def parse_fps(fps_str: str) -> float:
     return float(fps_str)
 
 
+def get_mean_audio_volume(video_path: str) -> float:
+    """Use ffmpeg to get mean volume of the audio stream."""
+    cmd = [
+        "ffmpeg", "-i", video_path,
+        "-af", "volumedetect",
+        "-vn", "-sn", "-dn", "-f", "null", "-",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        print("ERROR: ffmpeg not found. Install ffmpeg and add it to PATH.")
+        sys.exit(2)
+    except subprocess.TimeoutExpired:
+        print("ERROR: ffmpeg audio check timed out.")
+        return 0.0
+
+    # Parse mean_volume from stderr
+    for line in result.stderr.splitlines():
+        if "mean_volume:" in line:
+            try:
+                # Format: "mean_volume: -15.4 dB"
+                value_str = line.split("mean_volume:")[1].strip().split()[0]
+                return float(value_str)
+            except (IndexError, ValueError):
+                continue
+
+    return 0.0
+
+
+def has_audio_stream(probe: dict) -> bool:
+    """Check if the video has an audio stream."""
+    return any(
+        s.get("codec_type") == "audio"
+        for s in probe.get("streams", [])
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="CI video validation")
     parser.add_argument("video", help="Path to the video file to check")
@@ -125,6 +164,10 @@ def main():
                         help="Minimum FPS, default 27")
     parser.add_argument("--min-duration", type=float, default=3.0,
                         help="Minimum duration in seconds, default 3")
+    parser.add_argument("--min-audio-volume", type=float, default=-50.0,
+                        help="Minimum audio mean volume in dB, default -50")
+    parser.add_argument("--require-audio", action="store_true",
+                        help="Require audio stream to be present")
     args = parser.parse_args()
 
     print(f"\n=== Checking video: {args.video} ===\n")
@@ -163,6 +206,23 @@ def main():
     print(f"{brightness:.2f}  (min: {args.min_brightness})  {'✓' if brightness_ok else '✗ FAIL (black screen?)'}")
     if not brightness_ok:
         failures.append(f"Mean brightness {brightness:.2f} is below {args.min_brightness} — possible black screen")
+
+    # --- Check audio ---
+    has_audio = has_audio_stream(probe)
+    if args.require_audio or has_audio:
+        print(f"Audio:      {'stream present' if has_audio else '✗ FAIL (no audio stream)'}", end=" ", flush=True)
+        if has_audio:
+            volume = get_mean_audio_volume(args.video)
+            volume_ok = volume >= args.min_audio_volume
+            print(f"  volume: {volume:.1f}dB  (min: {args.min_audio_volume}dB)  {'✓' if volume_ok else '✗ FAIL (silent?)'}")
+            if not volume_ok:
+                failures.append(f"Mean audio volume {volume:.1f}dB is below {args.min_audio_volume}dB — possible silent audio")
+        else:
+            print()
+            if args.require_audio:
+                failures.append("No audio stream found in video")
+    else:
+        print(f"Audio:      (not required, skipping)")
 
     # --- Result ---
     print()
