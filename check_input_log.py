@@ -1,14 +1,23 @@
 """
 check_input_log.py — CI input log validation for gamedata-recorder
 
+Accepts both formats declared in `crates/constants/src/lib.rs`:
+  * inputs.jsonl  — current production format (one JSON object per line)
+  * inputs.csv    — legacy format (timestamp,event_type,json_args per line)
+
+Format is detected per-line: a line starting with '{' is parsed as JSON,
+anything else is parsed as CSV. This lets the script validate both fresh
+recordings and older archived ones without a CLI flag.
+
 Checks:
   1. Mouse events recorded (movement and clicks)
   2. Keyboard events recorded
   3. Event timestamps are present and monotonic
-  4. Event count sanity checks
+  4. Metadata markers (START, END, VIDEO_START, VIDEO_END)
 
 Usage:
-  python check_input_log.py <input_log.csv>
+  python check_input_log.py <input_log>           # auto-detect format
+  python check_input_log.py <input_log> --require-mouse --require-keyboard
 
 Exit codes:
   0 = all checks passed
@@ -19,39 +28,78 @@ Exit codes:
 import argparse
 import json
 import sys
-from pathlib import Path
-from collections import defaultdict
+
+
+def _parse_jsonl_line(line: str):
+    """Parse a single JSONL line. Returns a dict or None on failure."""
+    obj = json.loads(line)  # may raise
+    if not isinstance(obj, dict):
+        return None
+    try:
+        return {
+            "timestamp": float(obj["timestamp"]),
+            "event_type": str(obj["event_type"]),
+            # event_args is already a Python value (list/dict/scalar) after json.loads
+            "event_args": obj.get("event_args"),
+        }
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def _parse_csv_line(line: str):
+    """Parse a single legacy CSV line. Returns a dict or None on failure."""
+    # Format: timestamp,event_type,json_args   (json_args may itself contain commas)
+    parts = line.split(",", 2)
+    if len(parts) != 3:
+        return None
+    try:
+        timestamp = float(parts[0])
+        event_type = parts[1]
+        # json_args is a JSON-encoded string (optionally double-quote-wrapped
+        # because of CSV escaping); try to decode it, fall back to raw string.
+        raw = parts[2].strip()
+        if raw.startswith('"') and raw.endswith('"'):
+            raw = raw[1:-1].replace('""', '"')
+        try:
+            event_args = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            event_args = raw
+        return {
+            "timestamp": timestamp,
+            "event_type": event_type,
+            "event_args": event_args,
+        }
+    except (ValueError, IndexError):
+        return None
 
 
 def read_input_log(log_path: str):
-    """Read and parse input log CSV file."""
+    """Read and parse an input log in JSONL or legacy CSV format."""
     events = []
+    n_malformed = 0
     try:
-        with open(log_path, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f, 1):
-                line = line.strip()
+        with open(log_path, "r", encoding="utf-8") as f:
+            for line_num, raw_line in enumerate(f, 1):
+                line = raw_line.strip()
                 if not line:
                     continue
-                try:
-                    # Parse: timestamp,event_type,json_args
-                    parts = line.split(',', 2)
-                    if len(parts) != 3:
-                        print(f"  WARNING: Line {line_num}: malformed, skipping")
-                        continue
+                # Format detection: JSONL lines start with '{', legacy CSV does not.
+                if line.startswith("{"):
+                    try:
+                        parsed = _parse_jsonl_line(line)
+                    except json.JSONDecodeError as e:
+                        print(f"  WARNING: Line {line_num}: invalid JSON: {e}")
+                        parsed = None
+                else:
+                    parsed = _parse_csv_line(line)
 
-                    timestamp = float(parts[0])
-                    event_type = parts[1]
-                    json_args = parts[2].strip('"')
-
-                    events.append({
-                        'timestamp': timestamp,
-                        'event_type': event_type,
-                        'json_args': json_args,
-                        'line_num': line_num,
-                    })
-                except (ValueError, IndexError) as e:
-                    print(f"  WARNING: Line {line_num}: parse error: {e}")
+                if parsed is None:
+                    print(f"  WARNING: Line {line_num}: malformed, skipping")
+                    n_malformed += 1
                     continue
+
+                parsed["line_num"] = line_num
+                events.append(parsed)
     except FileNotFoundError:
         print(f"ERROR: Input log file not found: {log_path}")
         sys.exit(2)
@@ -59,34 +107,35 @@ def read_input_log(log_path: str):
         print(f"ERROR: Failed to read input log: {e}")
         sys.exit(2)
 
+    if n_malformed > 0:
+        print(f"  ({n_malformed} malformed lines skipped)")
     return events
 
 
 def validate_mouse_events(events):
     """Validate mouse movement and click events."""
     failures = []
-    mouse_moves = [e for e in events if e['event_type'] == 'MOUSE_MOVE']
-    mouse_buttons = [e for e in events if e['event_type'] == 'MOUSE_BUTTON']
+    mouse_moves = [e for e in events if e["event_type"] == "MOUSE_MOVE"]
+    mouse_buttons = [e for e in events if e["event_type"] == "MOUSE_BUTTON"]
 
-    # Check mouse movement
+    # Check mouse movement — look for at least one non-(0,0) delta
     if mouse_moves:
-        # Verify coordinates change (movement is recorded)
         coords_changed = False
         for e in mouse_moves:
-            try:
-                args = json.loads(e['json_args'])
-                if isinstance(args, list) and len(args) >= 2:
+            args = e.get("event_args")
+            if isinstance(args, list) and len(args) >= 2:
+                try:
                     dx, dy = args[0], args[1]
                     if dx != 0 or dy != 0:
                         coords_changed = True
                         break
-            except (json.JSONDecodeError, ValueError, TypeError):
-                continue
+                except (ValueError, TypeError):
+                    continue
 
         if coords_changed:
             print(f"  ✓ Mouse movement: {len(mouse_moves)} events with coordinate changes")
         else:
-            msg = f"Mouse movement events exist but all deltas are (0, 0)"
+            msg = "Mouse movement events exist but all deltas are (0, 0)"
             print(f"  ✗ {msg}")
             failures.append(msg)
     else:
@@ -99,9 +148,9 @@ def validate_mouse_events(events):
         left_clicks = 0
         right_clicks = 0
         for e in mouse_buttons:
-            try:
-                args = json.loads(e['json_args'])
-                if isinstance(args, list) and len(args) >= 2:
+            args = e.get("event_args")
+            if isinstance(args, list) and len(args) >= 2:
+                try:
                     button = args[0]
                     pressed = args[1]
                     # Standard Windows virtual key codes: 1=left, 2=right, 4=middle
@@ -109,8 +158,8 @@ def validate_mouse_events(events):
                         left_clicks += 1
                     elif button == 2 and pressed:
                         right_clicks += 1
-            except (json.JSONDecodeError, ValueError, TypeError):
-                continue
+                except (ValueError, TypeError):
+                    continue
 
         if left_clicks > 0:
             print(f"  ✓ Left button clicks: {left_clicks} events")
@@ -136,18 +185,17 @@ def validate_mouse_events(events):
 def validate_keyboard_events(events):
     """Validate keyboard events."""
     failures = []
-    keyboard_events = [e for e in events if e['event_type'] == 'KEYBOARD']
+    keyboard_events = [e for e in events if e["event_type"] == "KEYBOARD"]
 
     if keyboard_events:
-        # Check for both keydown and keyup
         keydown_count = 0
         keyup_count = 0
         keycodes_seen = set()
 
         for e in keyboard_events:
-            try:
-                args = json.loads(e['json_args'])
-                if isinstance(args, list) and len(args) >= 2:
+            args = e.get("event_args")
+            if isinstance(args, list) and len(args) >= 2:
+                try:
                     keycode = args[0]
                     pressed = args[1]
                     keycodes_seen.add(keycode)
@@ -155,17 +203,16 @@ def validate_keyboard_events(events):
                         keydown_count += 1
                     else:
                         keyup_count += 1
-            except (json.JSONDecodeError, ValueError, TypeError):
-                continue
+                except (ValueError, TypeError):
+                    continue
 
         print(f"  ✓ Keyboard events: {len(keyboard_events)} total")
         print(f"    - Key down: {keydown_count}")
         print(f"    - Key up: {keyup_count}")
         print(f"    - Unique keys: {len(keycodes_seen)}")
 
-        # Basic sanity check: should have both down and up for complete typing
         if keydown_count > 0 and keyup_count > 0:
-            print(f"  ✓ Both keydown and keyup events present")
+            print("  ✓ Both keydown and keyup events present")
         else:
             msg = f"Missing keydown ({keydown_count}) or keyup ({keyup_count}) events"
             print(f"  ⚠ {msg} (may be intentional if keys are still held)")
@@ -187,8 +234,7 @@ def validate_timestamps(events):
         failures.append(msg)
         return failures
 
-    # Check timestamps are present and monotonic
-    timestamps = [e['timestamp'] for e in events]
+    timestamps = [e["timestamp"] for e in events]
     sorted_timestamps = sorted(timestamps)
 
     if timestamps != sorted_timestamps:
@@ -198,12 +244,10 @@ def validate_timestamps(events):
     else:
         print(f"  ✓ Timestamps are monotonic ({len(events)} events)")
 
-    # Check time span
     if len(timestamps) >= 2:
         time_span = timestamps[-1] - timestamps[0]
         print(f"  ✓ Event time span: {time_span:.2f} seconds")
 
-        # Check for reasonable event density (not too sparse)
         if time_span > 0:
             events_per_second = len(events) / time_span
             print(f"  ✓ Event density: {events_per_second:.1f} events/second")
@@ -215,49 +259,34 @@ def validate_metadata_markers(events):
     """Validate that required metadata markers exist."""
     failures = []
 
-    event_types = {e['event_type'] for e in events}
+    event_types = {e["event_type"] for e in events}
 
-    # Check for START and END markers
-    if 'START' in event_types:
-        print(f"  ✓ START marker present")
-    else:
-        msg = "Missing START marker"
-        print(f"  ⚠ {msg}")
-
-    if 'END' in event_types:
-        print(f"  ✓ END marker present")
-    else:
-        msg = "Missing END marker"
-        print(f"  ⚠ {msg}")
-
-    # Check for video markers
-    if 'VIDEO_START' in event_types:
-        print(f"  ✓ VIDEO_START marker present")
-    else:
-        msg = "Missing VIDEO_START marker"
-        print(f"  ⚠ {msg}")
-
-    if 'VIDEO_END' in event_types:
-        print(f"  ✓ VIDEO_END marker present")
-    else:
-        msg = "Missing VIDEO_END marker"
-        print(f"  ⚠ {msg}")
+    for marker in ("START", "END", "VIDEO_START", "VIDEO_END"):
+        if marker in event_types:
+            print(f"  ✓ {marker} marker present")
+        else:
+            print(f"  ⚠ Missing {marker} marker")
 
     return failures
 
 
 def main():
     parser = argparse.ArgumentParser(description="CI input log validation")
-    parser.add_argument("input_log", help="Path to the input log CSV file")
-    parser.add_argument("--require-mouse", action="store_true",
-                        help="Require mouse events to be present")
-    parser.add_argument("--require-keyboard", action="store_true",
-                        help="Require keyboard events to be present")
+    parser.add_argument("input_log", help="Path to the input log (inputs.jsonl or inputs.csv)")
+    parser.add_argument(
+        "--require-mouse",
+        action="store_true",
+        help="Require mouse events to be present",
+    )
+    parser.add_argument(
+        "--require-keyboard",
+        action="store_true",
+        help="Require keyboard events to be present",
+    )
     args = parser.parse_args()
 
     print(f"\n=== Checking input log: {args.input_log} ===\n")
 
-    # Read input log
     events = read_input_log(args.input_log)
 
     if not events:
@@ -268,37 +297,28 @@ def main():
 
     all_failures = []
 
-    # Validate metadata markers
     print("Metadata markers:")
-    marker_failures = validate_metadata_markers(events)
-    all_failures.extend(marker_failures)
+    all_failures.extend(validate_metadata_markers(events))
     print()
 
-    # Validate timestamps
     print("Timestamp validation:")
-    timestamp_failures = validate_timestamps(events)
-    all_failures.extend(timestamp_failures)
+    all_failures.extend(validate_timestamps(events))
     print()
 
-    # Validate mouse events
     print("Mouse event validation:")
-    if args.require_mouse or any(e['event_type'].startswith('MOUSE') for e in events):
-        mouse_failures = validate_mouse_events(events)
-        all_failures.extend(mouse_failures)
+    if args.require_mouse or any(e["event_type"].startswith("MOUSE") for e in events):
+        all_failures.extend(validate_mouse_events(events))
     else:
         print("  (skipped -- no mouse events and not required)")
     print()
 
-    # Validate keyboard events
     print("Keyboard event validation:")
-    if args.require_keyboard or any(e['event_type'] == 'KEYBOARD' for e in events):
-        keyboard_failures = validate_keyboard_events(events)
-        all_failures.extend(keyboard_failures)
+    if args.require_keyboard or any(e["event_type"] == "KEYBOARD" for e in events):
+        all_failures.extend(validate_keyboard_events(events))
     else:
         print("  (skipped -- no keyboard events and not required)")
     print()
 
-    # Result
     if all_failures:
         print("=== FAILED ===")
         for f in all_failures:
