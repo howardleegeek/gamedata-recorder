@@ -78,6 +78,27 @@ and automated linting tools to ensure code quality:
 cargo clippy
 ```
 
+### Git Hooks
+
+We use a pre-commit hook to ensure code quality before commits. To set it up:
+
+```powershell
+# One-time setup to enable git hooks
+git config core.hooksPath githooks
+```
+
+The pre-commit hook runs the following checks before allowing a commit:
+
+- **Build check** - verifies code compiles (`cargo check`)
+- **Formatting check** - verifies code follows Rust formatting (`cargo fmt --check`)
+
+If either check fails, the commit will be blocked. Fix the issues and try again.
+
+**To bypass the hook** (not recommended):
+```powershell
+git commit --no-verify -m "your message"
+```
+
 ## Updating the Games List
 
 Before updating the games list, please check with the data team to ensure that the changes are valid. In this phase, we are primarily pruning games and not adding new ones.
