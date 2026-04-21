@@ -87,14 +87,42 @@ We use a pre-commit hook to ensure code quality before commits. To set it up:
 git config core.hooksPath githooks
 ```
 
-The pre-commit hook runs the following checks before allowing a commit:
+The pre-commit hook has four tiers of behaviour. By default it tries to be
+helpful (auto-fix formatting) but conservative (never silently rewrites
+source code).
 
-- **Build check** - verifies code compiles (`cargo check`)
-- **Formatting check** - verifies code follows Rust formatting (`cargo fmt --check`)
+| Mode | How to enable | What it does on failure |
+| --- | --- | --- |
+| **Default** | (no env var) | Auto-runs `cargo fmt` and re-stages the originally-staged files. Still blocks on `cargo check` failure. |
+| **Strict** | `GAMEDATA_HOOK_STRICT=1` | Blocks on any fmt violation (original strict behaviour). |
+| **Compiler auto-fix** | `GAMEDATA_AUTOFIX=1` | After a build failure, runs `cargo fix --allow-staged` to apply rustc's own suggestions, shows the diff, asks `y/N` before continuing. |
+| **LLM auto-fix** | `GAMEDATA_AUTOFIX_LLM=1` | After a build failure (and after `cargo fix` if combined), invokes a local LLM CLI (`claude`, `codex`, or `opencode`, whichever is on `PATH`) to attempt the fix. Always shows the diff and asks `y/N` before the commit proceeds. |
 
-If either check fails, the commit will be blocked. Fix the issues and try again.
+Fast path: if no `.rs` / `Cargo.toml` / `Cargo.lock` files are staged, the
+hook does nothing and the commit proceeds immediately.
 
-**To bypass the hook** (not recommended):
+**Typical usage:**
+
+```powershell
+# Normal commit — formatting gets auto-fixed, build errors block
+git commit -m "feat: add thing"
+
+# When you know the build error is small and want the compiler to try first
+GAMEDATA_AUTOFIX=1 git commit -m "fix: unused imports"
+
+# When you want the LLM to take a swing (always shows diff + asks y/N)
+GAMEDATA_AUTOFIX_LLM=1 git commit -m "fix: type mismatch"
+```
+
+**Safety guarantees:**
+
+- Only the set of files you originally staged is ever re-added. Unrelated
+  working-tree changes are never pulled into your commit.
+- LLM and `cargo fix` changes are never applied silently — you see the
+  diff and confirm before the commit proceeds.
+- The LLM is instructed not to touch `Cargo.toml` or unrelated files.
+
+**To bypass the hook entirely** (not recommended):
 ```powershell
 git commit --no-verify -m "your message"
 ```

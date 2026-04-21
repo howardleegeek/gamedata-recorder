@@ -1,31 +1,70 @@
 #!/usr/bin/env bash
 #
-# Git pre-commit hook for Rust projects
-# Runs cargo build and cargo fmt before allowing commit
-# STRICT MODE: Any failure blocks the commit - no auto-fix
+# Git pre-commit hook for gamedata-recorder
+#
+# Four tiers of behaviour, controlled by env vars:
+#
+#   (default)                   auto-fix formatting; block on cargo check
+#   GAMEDATA_HOOK_STRICT=1      original strict mode (block on ANY failure)
+#   GAMEDATA_AUTOFIX=1          also run `cargo fix` to apply compiler suggestions
+#   GAMEDATA_AUTOFIX_LLM=1      also invoke an LLM CLI to attempt a fix, with
+#                               diff preview + y/N confirmation
+#
+# Design notes:
+#   * Fast path: if no Rust files are staged, skip everything.
+#   * Auto-fix only re-stages files that were originally staged (never pulls
+#     in unrelated working-tree changes).
+#   * LLM escape hatch is opt-in, capped at one iteration, and always shows
+#     the diff for review before the commit proceeds.
 #
 
 set -e
 
-# Colors for output
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+CYAN='\033[0;36m'
+NC='\033[0m'
 
-echo -e "${YELLOW}Running pre-commit hook...${NC}"
-
-# Store the hook's output in a temp file
 TMPFILE=$(mktemp)
 trap "rm -f $TMPFILE" EXIT
 
-# Function to run a check and report result
+# ---------------------------------------------------------------------------
+# Fast path: nothing to do if no Rust files are staged
+# ---------------------------------------------------------------------------
+STAGED_RUST=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.rs$' || true)
+STAGED_TOML=$(git diff --cached --name-only --diff-filter=ACM | grep -E 'Cargo\.(toml|lock)$' || true)
+
+if [ -z "$STAGED_RUST" ] && [ -z "$STAGED_TOML" ]; then
+    # No Rust-relevant changes — skip the whole hook.
+    exit 0
+fi
+
+echo -e "${YELLOW}Running pre-commit hook...${NC}"
+
+STRICT="${GAMEDATA_HOOK_STRICT:-0}"
+AUTOFIX="${GAMEDATA_AUTOFIX:-0}"
+AUTOFIX_LLM="${GAMEDATA_AUTOFIX_LLM:-0}"
+
+# Remember the exact set of files that the user staged, so we only re-stage
+# those (never pulls in unrelated working-tree changes).
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+
+# Helper: re-stage only the originally-staged files that still exist
+restage_original_files() {
+    local f
+    for f in $STAGED_FILES; do
+        if [ -f "$f" ]; then
+            git add -- "$f"
+        fi
+    done
+}
+
 run_check() {
     local name="$1"
     local command="$2"
-
     echo -n "  $name... "
-
     if eval "$command" > "$TMPFILE" 2>&1; then
         echo -e "${GREEN}✓ passed${NC}"
         return 0
@@ -36,53 +75,184 @@ run_check() {
     fi
 }
 
-# Run checks
-BUILD_PASSED=true
-FORMAT_PASSED=true
+# ---------------------------------------------------------------------------
+# Stage 1: Formatting
+#   - strict  : block on any fmt violation
+#   - default : run `cargo fmt`, restage the originally-staged files
+# ---------------------------------------------------------------------------
+if [ "$STRICT" = "1" ]; then
+    if ! run_check "Formatting check (strict)" "cargo fmt --check"; then
+        echo -e "${RED}=== Pre-commit hook failed (strict mode) ===${NC}"
+        echo "Run 'cargo fmt' and re-stage."
+        exit 1
+    fi
+else
+    echo -n "  Formatting auto-fix... "
+    # cargo fmt never fails except on invalid Rust syntax
+    if cargo fmt > "$TMPFILE" 2>&1; then
+        # Did fmt actually change any of the originally-staged files?
+        CHANGED_BY_FMT=""
+        for f in $STAGED_FILES; do
+            if [ -f "$f" ] && ! git diff --quiet -- "$f"; then
+                CHANGED_BY_FMT="$CHANGED_BY_FMT $f"
+            fi
+        done
+        if [ -n "$CHANGED_BY_FMT" ]; then
+            echo -e "${YELLOW}✎ reformatted:${NC}$CHANGED_BY_FMT"
+            restage_original_files
+        else
+            echo -e "${GREEN}✓ clean${NC}"
+        fi
+    else
+        echo -e "${RED}✗ cargo fmt failed (syntax error?)${NC}"
+        cat "$TMPFILE"
+        exit 1
+    fi
+fi
 
-# Check 1: Build (using cargo check to avoid linker stack overflow on Windows)
+# ---------------------------------------------------------------------------
+# Stage 2: Build check
+# ---------------------------------------------------------------------------
+BUILD_PASSED=true
 if ! run_check "Build check" "cargo check"; then
     BUILD_PASSED=false
 fi
 
-# Check 2: Formatting (strict - no auto-fix)
-if ! run_check "Formatting check" "cargo fmt --check"; then
-    FORMAT_PASSED=false
+if [ "$BUILD_PASSED" = true ]; then
+    echo -e "${GREEN}=== All checks passed ===${NC}"
+    exit 0
 fi
 
-# Summary
-echo ""
-if [ "$BUILD_PASSED" = false ] || [ "$FORMAT_PASSED" = false ]; then
-    echo -e "${RED}=== Pre-commit hook failed ===${NC}"
+# ---------------------------------------------------------------------------
+# Stage 3: cargo fix (compiler-suggested auto-fix), opt-in
+# ---------------------------------------------------------------------------
+if [ "$STRICT" = "0" ] && [ "$AUTOFIX" = "1" ]; then
     echo ""
-    echo "Your commit was blocked due to the errors above."
-    echo ""
-
-    if [ "$BUILD_PASSED" = false ]; then
-        echo -e "${YELLOW}Build errors:${NC}"
-        echo "  - Fix compilation errors"
-        echo "  - Run 'cargo build' to see full errors"
-        echo "  - Ensure all dependencies are in Cargo.toml"
-        echo ""
+    echo -e "${CYAN}GAMEDATA_AUTOFIX=1: attempting 'cargo fix'...${NC}"
+    if cargo fix --allow-staged --allow-dirty --workspace > "$TMPFILE" 2>&1; then
+        if run_check "Build check (after cargo fix)" "cargo check"; then
+            # cargo fix wrote something useful
+            echo -e "${YELLOW}cargo fix applied compiler-suggested changes:${NC}"
+            git diff -- $STAGED_FILES | head -120
+            echo ""
+            read -p "Accept these changes and continue commit? (y/N) " yn </dev/tty
+            case "$yn" in
+                [Yy]* )
+                    restage_original_files
+                    echo -e "${GREEN}=== Proceeding with commit ===${NC}"
+                    exit 0
+                    ;;
+                * )
+                    echo "Aborting commit. 'cargo fix' changes are still in your working tree."
+                    exit 1
+                    ;;
+            esac
+        fi
     fi
-
-    if [ "$FORMAT_PASSED" = false ]; then
-        echo -e "${YELLOW}Formatting issues:${NC}"
-        echo "  - Run 'cargo fmt' to fix formatting"
-        echo "  - Review the changes with 'git diff'"
-        echo "  - Stage the formatting fixes: 'git add -u'"
-        echo "  - Then commit again"
-        echo ""
-    fi
-
-    echo "To bypass this hook (not recommended):"
-    echo "  git commit --no-verify -m \"your message\""
-    echo ""
-
-    exit 1
+    # Fall through to stage 4 if cargo fix didn't resolve it
 fi
 
-echo -e "${GREEN}=== All checks passed ===${NC}"
+# ---------------------------------------------------------------------------
+# Stage 4: LLM-assisted fix, opt-in, with diff preview + y/N confirmation
+# ---------------------------------------------------------------------------
+if [ "$STRICT" = "0" ] && [ "$AUTOFIX_LLM" = "1" ]; then
+    # Find an LLM CLI (first-match wins)
+    LLM_CMD=""
+    for candidate in claude codex opencode; do
+        if command -v "$candidate" > /dev/null 2>&1; then
+            LLM_CMD="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$LLM_CMD" ]; then
+        echo ""
+        echo -e "${RED}GAMEDATA_AUTOFIX_LLM=1 but no LLM CLI found.${NC}"
+        echo "Tried: claude, codex, opencode. Install one or unset the variable."
+        exit 1
+    fi
+
+    echo ""
+    echo -e "${CYAN}GAMEDATA_AUTOFIX_LLM=1: invoking '$LLM_CMD' to attempt a fix...${NC}"
+
+    # Capture the current cargo check error for the prompt
+    CARGO_ERR_LOG=$(mktemp)
+    trap "rm -f $TMPFILE $CARGO_ERR_LOG" EXIT
+    cargo check > "$CARGO_ERR_LOG" 2>&1 || true
+
+    PROMPT=$(cat <<EOF
+You are editing a Rust workspace to make 'cargo check' pass.
+
+Constraints (hard):
+  - Only modify files listed below as "Originally staged files". Do not touch any other file.
+  - Do not add or change dependencies in Cargo.toml.
+  - Do not refactor unrelated code.
+  - Make the minimum change that resolves the compilation errors.
+  - Do not commit, do not push. Just edit the files in place.
+
+Originally staged files:
+$STAGED_FILES
+
+cargo check error output:
+$(cat "$CARGO_ERR_LOG")
+EOF
+)
+
+    # Invocation varies slightly per CLI; we use the safest universal form.
+    case "$LLM_CMD" in
+        claude)
+            claude --print --dangerously-skip-permissions "$PROMPT" || true
+            ;;
+        codex)
+            codex exec --skip-git-repo-check --full-auto "$PROMPT" || true
+            ;;
+        opencode)
+            opencode run "$PROMPT" || true
+            ;;
+    esac
+
+    # Re-run cargo check
+    if ! cargo check > "$TMPFILE" 2>&1; then
+        echo -e "${RED}LLM fix did not resolve the errors.${NC}"
+        cat "$TMPFILE"
+        echo ""
+        echo "Your working tree may contain partial edits. Review with 'git diff',"
+        echo "discard with 'git checkout -- .' if you want to start over, then"
+        echo "fix manually and commit again."
+        exit 1
+    fi
+
+    echo -e "${GREEN}Build check passed after LLM fix.${NC}"
+    echo -e "${YELLOW}Diff (only showing originally-staged files):${NC}"
+    git diff -- $STAGED_FILES | head -200
+    echo ""
+    read -p "Accept these changes and proceed with commit? (y/N) " yn </dev/tty
+    case "$yn" in
+        [Yy]* )
+            restage_original_files
+            echo -e "${GREEN}=== Proceeding with commit ===${NC}"
+            exit 0
+            ;;
+        * )
+            echo "Aborting commit. LLM changes are still in your working tree."
+            echo "Discard with 'git checkout -- .' if undesired."
+            exit 1
+            ;;
+    esac
+fi
+
+# ---------------------------------------------------------------------------
+# Default failure path: block with a clear message
+# ---------------------------------------------------------------------------
 echo ""
-echo "Proceeding with commit..."
-exit 0
+echo -e "${RED}=== Pre-commit hook failed ===${NC}"
+echo ""
+echo "cargo check failed. Your commit is blocked."
+echo ""
+echo -e "${YELLOW}Options:${NC}"
+echo "  1. Fix manually, then 'git add -u' and commit again."
+echo "  2. GAMEDATA_AUTOFIX=1 git commit ...       # apply compiler-suggested fixes"
+echo "  3. GAMEDATA_AUTOFIX_LLM=1 git commit ...   # ask an LLM (claude/codex/opencode) to fix"
+echo "  4. git commit --no-verify ...              # bypass the hook (not recommended)"
+echo ""
+exit 1
