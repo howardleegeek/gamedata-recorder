@@ -49,14 +49,14 @@ use windows::{
             },
             WindowsAndMessaging::{
                 self, CreateWindowExA, DefWindowProcA, DestroyWindow, DispatchMessageA,
-                GetMessageA, GetSystemMetrics, HWND_MESSAGE, MSG, PostQuitMessage, RI_KEY_BREAK,
+                GetMessageA, GetSystemMetrics, MSG, PostQuitMessage, RI_KEY_BREAK,
                 RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
                 RI_MOUSE_BUTTON_5_UP, RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP,
                 RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN,
                 RI_MOUSE_RIGHT_BUTTON_UP, RI_MOUSE_WHEEL, RegisterClassA, SM_CXSCREEN,
                 SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-                SM_YVIRTUALSCREEN, TranslateMessage, UnregisterClassA, WINDOW_EX_STYLE,
-                WINDOW_STYLE, WNDCLASSA,
+                SM_YVIRTUALSCREEN, SW_HIDE, ShowWindow, TranslateMessage, UnregisterClassA,
+                WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSA, WS_EX_TOOLWINDOW,
             },
         },
     },
@@ -206,7 +206,7 @@ impl KbmCapture {
             }
 
             let hwnd = CreateWindowExA(
-                WINDOW_EX_STYLE(0),
+                WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0),
                 class_name,
                 PCSTR::null(),
                 WINDOW_STYLE(0),
@@ -214,12 +214,15 @@ impl KbmCapture {
                 0,
                 0,
                 0,
-                Some(HWND_MESSAGE),
+                None,
                 None,
                 Some(h_instance),
                 None,
             )
             .wrap_err("failed to create window")?;
+
+            // Immediately hide the window - we only need it for Raw Input, not display
+            let _ = ShowWindow(hwnd, SW_HIDE);
 
             tracing::debug!("RawInput window created: {hwnd:?}");
 
