@@ -1733,6 +1733,34 @@ fn prepare_source(
 ) -> Result<ObsSourceRef> {
     let capture_audio = true;
 
+    // Force recreate WGC and GameHook sources to fix the second recording crash.
+    // These capture modes spawn a WASAPI process-loopback audio companion that
+    // binds to the game window handle. When the window changes (e.g., resolution
+    // change in GTA V), the old audio companion enters an infinite retry loop
+    // ("window disappeared" → "Device invalidated. Retrying" every ~3s), which
+    // starves the OBS output and causes the app to appear frozen.
+    //
+    // By always recreating these sources, we ensure a fresh audio companion is
+    // bound to the current window. This is a simpler and more reliable fix than
+    // trying to detect when the window has changed.
+    if matches!(
+        state.effective_mode,
+        crate::config::EffectiveCaptureMode::Wgc | crate::config::EffectiveCaptureMode::GameHook
+    ) {
+        if let Some(source) = last_source.take() {
+            tracing::info!(
+                mode = ?state.effective_mode,
+                "Force recreating source (fixes second recording crash with stale WASAPI audio companion)"
+            );
+            // Ignore removal errors - we're about to create a new source anyway
+            let _ = scene.remove_source(&source);
+            tracing::debug!(
+                mode = ?state.effective_mode,
+                "Old source removed for recreation"
+            );
+        }
+    }
+
     // Check if source creation state changed - if so, we can't reuse the old source
     if let Some(last) = last_state
         && last != state
@@ -1745,51 +1773,6 @@ fn prepare_source(
             tracing::info!("Removing old source");
             scene.remove_source(&source)?;
             tracing::info!("Old source removed");
-        }
-    }
-
-    // v2.5.13: on recording-restart (last_source still Some from the prior
-    // session), force a full source teardown for capture modes whose OBS
-    // plugin spawns a window-bound WASAPI process-loopback audio companion
-    // — specifically `wgc_capture` and `game_capture`. The in-place
-    // `reset_and_update_raw` / `GameCaptureSourceUpdater` reuse paths only
-    // retarget the video side; the child audio source created by
-    // `obs-plugins/win-capture/{winrt-capture,game-capture}.c` keeps its
-    // binding to the previous window/PID. When the game tears down and
-    // re-creates its HWND mid-session (e.g. a resolution change in GTA V
-    // Enhanced), that child then logs
-    //     [WASAPISource::ProcessCaptureData] window disappeared
-    // followed by an infinite
-    //     Device '[VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK]' invalidated.
-    //     Retrying (source: owl_wgc_capture (Audio))
-    // loop every ~3s, starving the output of audio so no MP4 is ever
-    // finalized and the app appears frozen. Removing the parent source
-    // from the scene drops the last refcount, OBS runs the plugin's
-    // `destroy` callback, which releases the audio child — the fresh
-    // source we build below then gets a fresh companion bound to the
-    // current window. Monitor capture is untouched: its audio is the
-    // scene-level WASAPI sources we already force-recreate every
-    // recording in `attach_monitor_capture_audio`.
-    //
-    // The `last_source.is_some()` gate means fresh starts (first
-    // recording of a session) pay no extra cost — they already flow
-    // through the `None` branch of each arm.
-    if last_source.is_some()
-        && matches!(
-            state.effective_mode,
-            crate::config::EffectiveCaptureMode::Wgc
-                | crate::config::EffectiveCaptureMode::GameHook
-        )
-    {
-        if let Some(source) = last_source.take() {
-            tracing::info!(
-                mode = ?state.effective_mode,
-                "Recording restart detected — force-recreating capture source to \
-                 drop the stale WASAPI process-loopback audio companion bound \
-                 to the previous game window"
-            );
-            scene.remove_source(&source)?;
-            tracing::debug!("Old capture source removed for restart");
         }
     }
 
