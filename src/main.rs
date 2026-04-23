@@ -18,6 +18,7 @@ mod upload;
 mod util;
 mod validation;
 
+use crate::app_state::RwLockExt as _;
 use crate::util::log_rotation::RotatingFileWriter;
 use color_eyre::Result;
 use egui_wgpu::wgpu;
@@ -154,7 +155,10 @@ fn main() -> Result<()> {
                 "CI mode: failed to create GAMEDATA_OUTPUT_DIR; recordings may fail"
             );
         }
-        let mut config = app_state.config.write().unwrap();
+        let mut config = app_state
+            .config
+            .write_safe()
+            .unwrap_or_else(|e| e.into_inner());
         tracing::info!(
             old = %config.preferences.recording_location.display(),
             new = %ci_dir.display(),

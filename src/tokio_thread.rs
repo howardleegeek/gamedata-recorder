@@ -2,7 +2,7 @@ use crate::{
     api::ApiClient,
     app_state::{
         AppState, AsyncRequest, ForegroundedGame, GitHubRelease, ListeningForNewHotkey,
-        RecordingStatus, UiUpdate,
+        RecordingStatus, RwLockExt as _, UiUpdate,
     },
     assets::load_cue_bytes,
     play_time::PlayTimeTransition,
@@ -104,7 +104,10 @@ async fn main(
         let encoders = recorder.available_video_encoders();
 
         {
-            let mut config = app_state.config.write().unwrap();
+            let mut config = app_state
+                .config
+                .write_safe()
+                .unwrap_or_else(|e| e.into_inner());
             if !encoders.contains(&config.preferences.encoder.encoder) {
                 tracing::warn!("Currently-set encoder is no longer available, resetting to x264");
                 config.preferences.encoder.encoder = constants::encoding::VideoEncoderType::X264;
@@ -344,7 +347,8 @@ async fn main(
                         opener::open(&path).ok();
                     }
                     AsyncRequest::UpdateUnsupportedGames(new_games) => {
-                        let mut unsupported_games = app_state.unsupported_games.write().unwrap();
+                        let mut unsupported_games = app_state.unsupported_games.write_safe()
+                            .unwrap_or_else(|e| e.into_inner());
                         let old_game_count = unsupported_games.games.len();
                         *unsupported_games = new_games;
                         tracing::info!(
@@ -358,7 +362,8 @@ async fn main(
                         } else {
                             match valid_api_key_and_user_id.clone() {
                                 Some((api_key, user_id)) => {
-                                    let filters = app_state.upload_filters.read().unwrap();
+                                    let filters = app_state.upload_filters.read_safe()
+                                        .unwrap_or_else(|e| e.into_inner());
                                     let start_date = filters.start_date;
                                     let end_date = filters.end_date;
                                     drop(filters);
@@ -390,7 +395,8 @@ async fn main(
                         } else {
                             match valid_api_key_and_user_id.clone() {
                                 Some((api_key, user_id)) => {
-                                    let filters = app_state.upload_filters.read().unwrap();
+                                    let filters = app_state.upload_filters.read_safe()
+                                        .unwrap_or_else(|e| e.into_inner());
                                     let start_date = filters.start_date;
                                     let end_date = filters.end_date;
                                     drop(filters);
@@ -681,7 +687,8 @@ async fn main(
                             },
                             (false, _) => {
                                 tracing::info!("Offline mode disabled, going online");
-                                let api_key = app_state.config.read().unwrap().credentials.api_key.clone();
+                                let api_key = app_state.config.read_safe()
+                                    .unwrap_or_else(|e| e.into_inner()).credentials.api_key.clone();
                                 app_state.ui_update_tx.send(UiUpdate::UpdateUserId(Ok("Authenticating...".to_string()))).ok();
                                 app_state.async_request_tx.send(AsyncRequest::CancelOfflineBackoff).await.ok();
                                 app_state.async_request_tx.send(AsyncRequest::ValidateApiKey { api_key }).await.ok();
@@ -762,7 +769,8 @@ async fn main(
                             (true, true) => {
                                 let retry_count = app_state.offline.retry_count.load(Ordering::SeqCst);
                                 tracing::info!("Offline backoff retry #{} - attempting API validation", retry_count + 1);
-                                let api_key = app_state.config.read().unwrap().credentials.api_key.clone();
+                                let api_key = app_state.config.read_safe()
+                                    .unwrap_or_else(|e| e.into_inner()).credentials.api_key.clone();
                                 // Attempt validation
                                 let response = api_client.validate_api_key(&api_key).await;
                                 match response {
@@ -875,9 +883,11 @@ async fn main(
                     && fg.is_recordable()
                     && fg.exe_name.is_some()
                 {
-                    *app_state.last_recordable_game.write().unwrap() = fg.exe_name.clone();
+                    *app_state.last_recordable_game.write_safe()
+                        .unwrap_or_else(|e| e.into_inner()) = fg.exe_name.clone();
                 }
-                *app_state.last_foregrounded_game.write().unwrap() = foregrounded;
+                *app_state.last_foregrounded_game.write_safe()
+                    .unwrap_or_else(|e| e.into_inner()) = foregrounded;
                 // Tick state machine
                 if let Some((to_state, task)) = state.tick().await {
                     if let Err(e) = state.handle_transition(to_state).await {
@@ -909,7 +919,10 @@ fn enable_window_capture_for_game(app_state: &AppState, game_exe: &str) -> Resul
         .unwrap_or_else(|| game_exe.to_string())
         .to_lowercase();
 
-    let mut config = app_state.config.write().unwrap();
+    let mut config = app_state
+        .config
+        .write_safe()
+        .unwrap_or_else(|e| e.into_inner());
     let game_config = config
         .preferences
         .games
@@ -1204,7 +1217,11 @@ impl State {
                     .to_lowercase();
 
                 let should_fallback = {
-                    let config = self.app_state.config.read().unwrap();
+                    let config = self
+                        .app_state
+                        .config
+                        .read_safe()
+                        .unwrap_or_else(|e| e.into_inner());
                     let game_config = config
                         .preferences
                         .games
@@ -1432,7 +1449,13 @@ impl State {
             }
             (RecordingState::Recording, RecordingState::Idle) => {
                 // Stop recording and return to Idle
-                let honk = self.app_state.config.read().unwrap().preferences.honk;
+                let honk = self
+                    .app_state
+                    .config
+                    .read_safe()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .preferences
+                    .honk;
                 let session_path = stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
@@ -1457,7 +1480,13 @@ impl State {
                 // Pause recording (due to idle or unfocused window)
                 // Check if this was due to idle timeout before we stop
                 let due_to_idle = self.last_active.elapsed() > MAX_IDLE_DURATION;
-                let honk = self.app_state.config.read().unwrap().preferences.honk;
+                let honk = self
+                    .app_state
+                    .config
+                    .read_safe()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .preferences
+                    .honk;
                 let session_path = stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
@@ -1465,7 +1494,11 @@ impl State {
                     &mut self.cue_cache,
                 )
                 .await?;
-                *self.app_state.state.write().unwrap() = RecordingStatus::Paused;
+                *self
+                    .app_state
+                    .state
+                    .write_safe()
+                    .unwrap_or_else(|e| e.into_inner()) = RecordingStatus::Paused;
                 // Notify play time tracker of pause (with idle buffer cancellation if due to idle)
                 self.app_state
                     .play_time_state
@@ -1480,9 +1513,19 @@ impl State {
                 RecordingState::Paused { pid }
             }
             (RecordingState::Paused { .. }, RecordingState::Idle) => {
-                let honk = self.app_state.config.read().unwrap().preferences.honk;
+                let honk = self
+                    .app_state
+                    .config
+                    .read_safe()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .preferences
+                    .honk;
                 // When user stop keys recording while paused, or when the paused app closes
-                *self.app_state.state.write().unwrap() = RecordingStatus::Stopped;
+                *self
+                    .app_state
+                    .state
+                    .write_safe()
+                    .unwrap_or_else(|e| e.into_inner()) = RecordingStatus::Stopped;
                 // Play a mild version of the stop recording cue to signal we're done
                 let stop_recording_cue = self
                     .app_state
@@ -1521,7 +1564,12 @@ impl State {
                 // Restart the currently active recording
                 // Here we intentionally set honk to false, we don't want audio cue to occur
                 // on an intended recording restart and confuse the user
-                let unsupported_games = self.app_state.unsupported_games.read().unwrap().clone();
+                let unsupported_games = self
+                    .app_state
+                    .unsupported_games
+                    .read_safe()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 let _ = stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
@@ -1862,7 +1910,10 @@ fn notify_of_recording_state_change(
     if should_play_sound {
         // Get selected cue filenames
         let cue_filename = {
-            let cfg = app_state.config.read().unwrap();
+            let cfg = app_state
+                .config
+                .read_safe()
+                .unwrap_or_else(|e| e.into_inner());
             if is_recording {
                 cfg.preferences.audio_cues.start_recording.clone()
             } else {
@@ -1883,8 +1934,14 @@ fn play_cue(
     ) -> Box<dyn Source + Send + 'static>,
 ) {
     // Apply configured honk volume (0-255 -> 0.0-1.0)
-    let volume =
-        (app_state.config.read().unwrap().preferences.honk_volume as f32 / 255.0).clamp(0.0, 1.0);
+    let volume = (app_state
+        .config
+        .read_safe()
+        .unwrap_or_else(|e| e.into_inner())
+        .preferences
+        .honk_volume as f32
+        / 255.0)
+        .clamp(0.0, 1.0);
 
     sink.set_volume(volume);
 
@@ -2281,7 +2338,10 @@ async fn wait_for_consent(
 
     loop {
         let guard = {
-            let config = app_state.config.read().unwrap();
+            let config = app_state
+                .config
+                .read_safe()
+                .unwrap_or_else(|e| e.into_inner());
             crate::config::consent_guard_from_config(&config)
         };
         if guard.is_granted() {

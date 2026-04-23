@@ -13,7 +13,7 @@ use input_capture::{ConsentGuard, InputCapture};
 use windows::Win32::Foundation::HWND;
 
 use crate::{
-    app_state::{AppState, RecordingStatus},
+    app_state::{AppState, RecordingStatus, RwLockExt as _},
     config::{EncoderSettings, GameConfig, RecordingBackend, consent_guard_from_config},
     output_types::InputEventType,
     record::{
@@ -95,8 +95,8 @@ impl Recorder {
         tracing::debug!("Recorder::new() called");
         let backend = app_state
             .config
-            .read()
-            .unwrap()
+            .read_safe()
+            .unwrap_or_else(|e| e.into_inner())
             .preferences
             .recording_backend;
         tracing::debug!("Recording backend: {:?}", backend);
@@ -159,7 +159,11 @@ impl Recorder {
         // we create any directory, query free space, probe the foreground
         // window, or instantiate any capture object — consent is the gate.
         {
-            let config = self.app_state.config.read().unwrap();
+            let config = self
+                .app_state
+                .config
+                .read_safe()
+                .unwrap_or_else(|e| e.into_inner());
             consent_guard_from_config(&config).require_granted()?;
         }
 
@@ -237,7 +241,11 @@ impl Recorder {
         );
 
         let (params, consent) = {
-            let config = self.app_state.config.read().unwrap();
+            let config = self
+                .app_state
+                .config
+                .read_safe()
+                .unwrap_or_else(|e| e.into_inner());
             let params = RecordingParams {
                 recording_location: recording_location.clone(),
                 game_exe: game_exe.clone(),
@@ -272,7 +280,11 @@ impl Recorder {
         delete_recording_on_exit.disarm();
 
         self.recording = Some(recording);
-        *self.app_state.state.write().unwrap() = RecordingStatus::Recording {
+        *self
+            .app_state
+            .state
+            .write_safe()
+            .unwrap_or_else(|e| e.into_inner()) = RecordingStatus::Recording {
             start_time: Instant::now(),
             game_exe,
             current_fps: None,
@@ -315,7 +327,11 @@ impl Recorder {
                 input_capture,
             )
             .await?;
-        *self.app_state.state.write().unwrap() = RecordingStatus::Stopped;
+        *self
+            .app_state
+            .state
+            .write_safe()
+            .unwrap_or_else(|e| e.into_inner()) = RecordingStatus::Stopped;
 
         tracing::info!("Recording stopped");
         Ok(Some(session_path))
@@ -324,7 +340,11 @@ impl Recorder {
     pub async fn poll(&mut self, input_capture: &InputCapture) {
         let update = self.video_recorder.poll().await;
         if let Some(fps) = update.active_fps {
-            let mut state = self.app_state.state.write().unwrap();
+            let mut state = self
+                .app_state
+                .state
+                .write_safe()
+                .unwrap_or_else(|e| e.into_inner());
             if let RecordingStatus::Recording { current_fps, .. } = &mut *state {
                 *current_fps = Some(fps);
             }

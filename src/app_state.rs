@@ -76,6 +76,42 @@ impl Default for OfflineState {
         }
     }
 }
+
+/// Extension trait to safely read/write from RwLock, recovering from poisoned locks.
+/// A poisoned lock occurs when a thread panics while holding the lock write access.
+/// Instead of crashing, we recover the value and continue.
+pub trait RwLockExt<T> {
+    /// Read from the lock, returning the value even if the lock is poisoned.
+    /// Logs a warning when recovering from a poisoned lock.
+    fn read_safe(&self) -> std::sync::LockResult<std::sync::RwLockReadGuard<'_, T>>;
+
+    /// Write from the lock, returning the value even if the lock is poisoned.
+    /// Logs a warning when recovering from a poisoned lock.
+    fn write_safe(&self) -> std::sync::LockResult<std::sync::RwLockWriteGuard<'_, T>>;
+}
+
+impl<T> RwLockExt<T> for RwLock<T> {
+    fn read_safe(&self) -> std::sync::LockResult<std::sync::RwLockReadGuard<'_, T>> {
+        self.read().map_err(|e| {
+            tracing::warn!(
+                "RwLock read encountered poisoned lock (likely from a thread panic). \
+                 Recovering guard - this may return stale or inconsistent data."
+            );
+            e
+        })
+    }
+
+    fn write_safe(&self) -> std::sync::LockResult<std::sync::RwLockWriteGuard<'_, T>> {
+        self.write().map_err(|e| {
+            tracing::warn!(
+                "RwLock write encountered poisoned lock (likely from a thread panic). \
+                 Recovering guard - this may return stale or inconsistent data."
+            );
+            e
+        })
+    }
+}
+
 impl AppState {
     pub fn new(
         async_request_tx: mpsc::Sender<AsyncRequest>,

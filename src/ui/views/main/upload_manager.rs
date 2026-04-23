@@ -6,7 +6,7 @@ use egui::{
 
 use crate::{
     api::{UserUpload, UserUploadStatistics},
-    app_state::{AppState, AsyncRequest},
+    app_state::{AppState, AsyncRequest, RwLockExt as _},
     config::Preferences,
     output_types::Metadata,
     record::{LocalRecording, LocalRecordingInfo, LocalRecordingPaused},
@@ -183,7 +183,10 @@ impl Recordings {
 
         // Sync to app_state so the API requests include the date filter
         {
-            let mut filters = app_state.upload_filters.write().unwrap();
+            let mut filters = app_state
+                .upload_filters
+                .write_safe()
+                .unwrap_or_else(|e| e.into_inner());
             filters.start_date = start;
             filters.end_date = end;
         }

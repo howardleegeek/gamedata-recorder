@@ -7,7 +7,7 @@ use std::{
 use crate::{
     app_state::{
         AppState, AsyncRequest, ForegroundedGame, GitHubRelease, HotkeyRebindTarget,
-        RecordingStatus,
+        RecordingStatus, RwLockExt as _,
     },
     config::{
         EncoderSettings, FfmpegNvencSettings, ObsAmfSettings, ObsQsvSettings, ObsX264Settings,
@@ -110,8 +110,8 @@ impl App {
                     let foregrounded_game = self
                         .app_state
                         .last_foregrounded_game
-                        .read()
-                        .unwrap()
+                        .read_safe()
+                        .unwrap_or_else(|e| e.into_inner())
                         .clone();
                     overlay_settings_section(
                         ui,
@@ -202,11 +202,20 @@ impl App {
 
         // Games Window
         {
-            let last_recordable = self.app_state.last_recordable_game.read().unwrap().clone();
+            let last_recordable = self
+                .app_state
+                .last_recordable_game
+                .read_safe()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             windows::games::window(
                 ctx,
                 &mut self.main_view_state.games_window,
-                &self.app_state.unsupported_games.read().unwrap(),
+                &self
+                    .app_state
+                    .unsupported_games
+                    .read_safe()
+                    .unwrap_or_else(|e| e.into_inner()),
                 &mut self.local_preferences,
                 last_recordable.as_deref(),
             );
@@ -744,7 +753,11 @@ fn obs_running_warning(ui: &mut Ui) {
 }
 
 fn recording_notice(ui: &mut Ui, app_state: &AppState) {
-    let recording_status = app_state.state.read().unwrap().clone();
+    let recording_status = app_state
+        .state
+        .read_safe()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     Frame::default()
         .fill(Color32::from_rgb(147, 51, 234))
         .inner_margin(Margin::same(10))

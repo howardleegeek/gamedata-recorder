@@ -13,8 +13,8 @@ use winit::{event::WindowEvent, event_loop::ActiveEventLoop};
 
 use crate::{
     app_state::{
-        AppState, AsyncRequest, GitHubRelease, HotkeyRebindTarget, ListeningForNewHotkey, UiUpdate,
-        UiUpdateUnreliable,
+        AppState, AsyncRequest, GitHubRelease, HotkeyRebindTarget, ListeningForNewHotkey,
+        RwLockExt as _, UiUpdate, UiUpdateUnreliable,
     },
     config::{Credentials, Preferences, validate_recording_location},
     system::keycode::virtual_keycode_to_name,
@@ -81,7 +81,10 @@ impl App {
         tracing::debug!("views::App::new() called");
         tracing::debug!("Loading credentials and preferences");
         let (local_credentials, local_preferences) = {
-            let configs = app_state.config.read().unwrap();
+            let configs = app_state
+                .config
+                .read_safe()
+                .unwrap_or_else(|e| e.into_inner());
             (configs.credentials.clone(), configs.preferences.clone())
         };
 
@@ -303,7 +306,11 @@ impl App {
     }
 
     pub fn copy_in_app_config(&mut self) {
-        let config = self.app_state.config.read().unwrap();
+        let config = self
+            .app_state
+            .config
+            .read_safe()
+            .unwrap_or_else(|e| e.into_inner());
         if config.credentials != self.local_credentials {
             self.local_credentials = config.credentials.clone();
         }
@@ -315,7 +322,11 @@ impl App {
     pub fn copy_out_local_config(&mut self) {
         // Queue up a save if any state has changed
         {
-            let mut config = self.app_state.config.write().unwrap();
+            let mut config = self
+                .app_state
+                .config
+                .write_safe()
+                .unwrap_or_else(|e| e.into_inner());
             let mut requires_save = false;
             if config.credentials != self.local_credentials {
                 config.credentials = self.local_credentials.clone();
@@ -334,7 +345,12 @@ impl App {
             .config_last_edit
             .is_some_and(|t| t.elapsed() > Duration::from_millis(250))
         {
-            let _ = self.app_state.config.read().unwrap().save();
+            let _ = self
+                .app_state
+                .config
+                .read_safe()
+                .unwrap_or_else(|e| e.into_inner())
+                .save();
             self.config_last_edit = None;
         }
     }
