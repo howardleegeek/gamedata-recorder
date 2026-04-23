@@ -180,6 +180,7 @@ async fn main(
         last_active: Instant::now(),
         actively_recording_window: None,
         last_auto_record_attempt: None,
+        last_hotkey_transition_instant: None,
         user_stopped_game_exe: None,
         #[cfg(windows)]
         stability_tracker: None,
@@ -975,6 +976,9 @@ struct State {
     actively_recording_window: Option<HWND>,
     /// Cooldown for auto-record: prevents rapid start/stop churn on unhookable games
     last_auto_record_attempt: Option<Instant>,
+    /// Tracks when the last hotkey-triggered state transition occurred to
+    /// prevent race conditions from rapid F9 presses (P0-1 fix).
+    last_hotkey_transition_instant: Option<Instant>,
     /// Suppresses auto-record for this game after user manually stopped it.
     /// Cleared when the foreground game changes.
     user_stopped_game_exe: Option<String>,
@@ -1042,6 +1046,12 @@ const AUTO_RECORD_PROCESS_ALIVE_SECS: u64 = 20;
 /// record to fire within seconds of launch.
 #[cfg(windows)]
 const AUTO_RECORD_TEST_GAME_STEM: &str = "test_game";
+
+/// Minimum time between hotkey-triggered state transitions to prevent
+/// race conditions from rapid F9 presses. This ensures the async
+/// transition completes before another one can start.
+const HOTKEY_TRANSITION_THROTTLE_MS: u64 = 200;
+
 impl State {
     async fn on_input(&mut self, e: Event) {
         let (start_key, stop_key) = match self.app_state.config.read() {
@@ -1060,6 +1070,21 @@ impl State {
         self.last_active = Instant::now();
         if let Err(e) = match (&self.recording_state, e.key_press_keycode()) {
             (RecordingState::Idle, key) if key == start_key => {
+                // P0-1: Throttle hotkey transitions to prevent race conditions
+                // from rapid F9 presses. Ensure at least HOTKEY_TRANSITION_THROTTLE_MS
+                // has passed since the last hotkey-triggered transition.
+                if let Some(last) = self.last_hotkey_transition_instant {
+                    let elapsed = last.elapsed().as_millis() as u64;
+                    if elapsed < HOTKEY_TRANSITION_THROTTLE_MS {
+                        tracing::debug!(
+                            elapsed_ms = elapsed,
+                            throttle_ms = HOTKEY_TRANSITION_THROTTLE_MS,
+                            "Ignoring start hotkey press: throttled (too soon since last transition)"
+                        );
+                        return;
+                    }
+                }
+
                 if self.app_state.is_out_of_date.load(Ordering::SeqCst) {
                     // Don't block recording with a modal dialog — it steals game focus
                     // and causes the user to be kicked back to desktop.
@@ -1072,6 +1097,19 @@ impl State {
                 self.handle_transition(RecordingState::Recording).await
             }
             (RecordingState::Recording | RecordingState::Paused { .. }, key) if key == stop_key => {
+                // P0-1: Throttle stop hotkey as well
+                if let Some(last) = self.last_hotkey_transition_instant {
+                    let elapsed = last.elapsed().as_millis() as u64;
+                    if elapsed < HOTKEY_TRANSITION_THROTTLE_MS {
+                        tracing::debug!(
+                            elapsed_ms = elapsed,
+                            throttle_ms = HOTKEY_TRANSITION_THROTTLE_MS,
+                            "Ignoring stop hotkey press: throttled (too soon since last transition)"
+                        );
+                        return;
+                    }
+                }
+
                 // Remember which game the user manually stopped so auto-record
                 // won't immediately restart it (cleared when foreground game changes)
                 let fg = self
@@ -1595,6 +1633,8 @@ impl State {
                 ));
             }
         };
+        // P0-1: Update the hotkey transition timestamp after successful transition
+        self.last_hotkey_transition_instant = Some(Instant::now());
         Ok(())
     }
 
