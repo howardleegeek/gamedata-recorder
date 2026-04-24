@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/constants", "crates/game-process", "crates/input-capture"]
+members = [
+    "crates/constants",
+    "crates/game-process",
+    "crates/input-capture",
+    "crates/depth-hook",
+]
 exclude = ["tools/vm", "test_game"]
 default-members = ["."]
 
