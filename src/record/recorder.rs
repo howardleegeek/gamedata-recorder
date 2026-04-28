@@ -259,6 +259,7 @@ impl Recorder {
                     .cloned()
                     .unwrap_or_default(),
                 record_microphone: config.preferences.record_microphone,
+                disable_action_camera_output: config.preferences.disable_action_camera_output,
             };
             // Compute the guard again under the same lock snapshot so we
             // don't race with the user revoking consent between the top-of-

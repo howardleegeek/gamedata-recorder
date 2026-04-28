@@ -374,6 +374,15 @@ pub mod filename {
         /// Per-frame timestamp log — one `{idx, t_ns}` JSON object per line.
         /// Enables precise frame-to-input alignment downstream.
         pub const FRAMES_JSONL: &str = "frames.jsonl";
+        /// Per-frame mouse / keyboard / camera state — buyer plugin wire
+        /// contract. A single JSON array of per-frame records, each with
+        /// normalized `mouseX`/`mouseY`, per-frame `mouse_dx`/`mouse_dy`
+        /// pixel deltas, the held-key VK set, and (downstream) camera pose.
+        /// Mirrors the post-hoc Python adapter at
+        /// `oyster-enrichment/bin/convert_to_action_camera.py` so both
+        /// implementations produce byte-for-byte equivalent shapes for the
+        /// same source data.
+        pub const ACTION_CAMERA_JSON: &str = "action_camera.json";
     }
 
     pub mod persistent {

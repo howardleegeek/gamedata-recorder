@@ -37,6 +37,9 @@ pub(crate) struct RecordingParams {
     /// input source. Default is `false` at the config layer; see
     /// `crate::config::Preferences::record_microphone`.
     pub record_microphone: bool,
+    /// Suppress the additive `action_camera.json` sink. Default `false`
+    /// (sink enabled). See `crate::config::Preferences::disable_action_camera_output`.
+    pub disable_action_camera_output: bool,
 }
 
 pub(crate) struct Recording {
@@ -51,6 +54,9 @@ pub(crate) struct Recording {
     start_instant: Instant,
     average_fps: Option<f64>,
     fps_sample_count: u64,
+    /// Mirrors `RecordingParams::disable_action_camera_output` — read at
+    /// session-stop time to decide whether to emit the additive sink.
+    disable_action_camera_output: bool,
 
     pid: Pid,
     hwnd: HWND,
@@ -76,6 +82,7 @@ impl Recording {
             video_settings,
             game_config,
             record_microphone,
+            disable_action_camera_output,
         } = params;
 
         let start_time = SystemTime::now();
@@ -174,6 +181,7 @@ impl Recording {
             start_instant,
             average_fps: None,
             fps_sample_count: 0,
+            disable_action_camera_output,
 
             pid,
             hwnd,
@@ -307,6 +315,39 @@ impl Recording {
                 None
             }
         };
+
+        // action_camera.json — additive sink for the buyer plugin's wire
+        // contract. Reads inputs.jsonl + frames.jsonl back from disk (both
+        // already durably written above) and produces the per-frame array
+        // mirroring oyster-enrichment/bin/convert_to_action_camera.py.
+        //
+        // Failures here are logged and swallowed: the file is purely
+        // additive, and we never want to invalidate an otherwise-good
+        // recording over a sink that downstream tooling can rebuild.
+        if !self.disable_action_camera_output {
+            let (w, h) = self.game_resolution;
+            match super::action_camera_writer::write_action_camera_json(
+                &self.recording_location,
+                w,
+                h,
+            )
+            .await
+            {
+                Ok(n) => {
+                    tracing::info!("action_camera.json: wrote {n} frame records");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to write action_camera.json (recording NOT invalidated, \
+                         downstream can rebuild from inputs.jsonl + frames.jsonl): {e}"
+                    );
+                }
+            }
+        } else {
+            tracing::debug!(
+                "action_camera.json sink disabled via Preferences::disable_action_camera_output"
+            );
+        }
 
         #[allow(clippy::collapsible_if)]
         if result.is_ok() {

@@ -78,6 +78,19 @@ pub struct Preferences {
     /// OBS hook and does not consult this flag.
     #[serde(default)]
     pub record_microphone: bool,
+    /// Suppress writing `action_camera.json` next to each session's other
+    /// artifacts. Default: `false` — the file is written by default because
+    /// the buyer's training plugin treats it as a wire contract. Power
+    /// users who don't ship to the buyer pipeline can opt out to save
+    /// ~7-15 MB per 30-minute 30 fps session.
+    ///
+    /// When `true`, the recorder still writes `inputs.jsonl`, `frames.jsonl`,
+    /// and `metadata.json` exactly as before — `action_camera.json` is the
+    /// ONLY file affected by this flag. The post-hoc Python adapter at
+    /// `oyster-enrichment/bin/convert_to_action_camera.py` can rebuild the
+    /// file from the other artifacts at any time.
+    #[serde(default)]
+    pub disable_action_camera_output: bool,
     #[serde(default)]
     pub recording_backend: RecordingBackend,
     #[serde(default)]
@@ -103,6 +116,7 @@ impl Default for Preferences {
             honk_volume: default_honk_volume(),
             audio_cues: Default::default(),
             record_microphone: false,
+            disable_action_camera_output: false,
             recording_backend: Default::default(),
             encoder: Default::default(),
             recording_location: default_recording_location(),
