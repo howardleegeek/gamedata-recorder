@@ -5,6 +5,7 @@ members = [
     "crates/game-process",
     "crates/input-capture",
     "crates/depth-hook",
+    "crates/action-camera-tests",
 ]
 exclude = ["tools/vm", "test_game"]
 default-members = ["."]
