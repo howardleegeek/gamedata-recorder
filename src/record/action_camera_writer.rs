@@ -1,20 +1,21 @@
 //! `action_camera.json` sink — buyer plugin wire contract.
 //!
 //! The buyer's training plugin requires per-frame records joining mouse,
-//! keyboard, and (downstream-filled) camera state into a single JSON array.
-//! The format is fixed; this module is the on-recorder implementation of
-//! the same contract that the post-hoc Python adapter at
+//! keyboard, gamepad, and (downstream-filled) camera state into a single
+//! JSON array. The format is fixed; this module is the on-recorder
+//! implementation of the same contract that the post-hoc Python adapter at
 //! `oyster-enrichment/bin/convert_to_action_camera.py` implements.
 //!
 //! ## Why a separate sink (and not modify inputs.jsonl)
 //!
 //! `inputs.jsonl` is the lossless event stream — sub-frame mouse motion,
 //! discrete keyboard up/down events, scrolls, gamepad samples. The buyer's
-//! plugin wants per-frame snapshots, with cursor position accumulated and
-//! held-keys reduced to a sorted list. Computing that on the recorder side
-//! avoids every consumer re-implementing the replay logic, and avoids
-//! bundle adapters (the Python script) being a hard dependency on the
-//! ingest pipeline.
+//! plugin wants per-frame snapshots, with cursor position accumulated,
+//! held-keys reduced to a sorted list, gamepad sticks/triggers reduced to
+//! the latest seen sample, and gamepad buttons remapped to an XInput-shape
+//! u16 bitmask. Computing that on the recorder side avoids every consumer
+//! re-implementing the replay logic, and avoids bundle adapters (the
+//! Python script) being a hard dependency on the ingest pipeline.
 //!
 //! ## Data flow
 //!
@@ -29,17 +30,39 @@
 //! and makes it byte-for-byte equivalent to the Python adapter for the
 //! same source data — the two implementations can be cross-validated.
 //!
+//! ## Input modality
+//!
+//! Each session is one of three modalities:
+//!
+//! - `keyboard_mouse` — only keyboard / mouse events. The mouse + key
+//!   fields are populated; the gamepad fields are emitted as `null`.
+//! - `gamepad` — only gamepad events. The gamepad fields are populated;
+//!   the mouse + key fields are emitted as `null`.
+//! - `mixed` — both kinds of events. All fields populated.
+//!
+//! Modality is auto-detected from the event-type distribution in
+//! `inputs.jsonl` and reported on every per-frame record under
+//! `input_modality`.
+//!
 //! ## Schema (per record, in array order)
 //!
 //! ```json
 //! {
 //!   "frame_index": <u64>,
 //!   "timestamp": <f64 seconds>,
-//!   "mouseX": <f64 in [0, 1]>,
-//!   "mouseY": <f64 in [0, 1]>,
-//!   "mouse_dx": <f64 pixels, per-frame delta>,
-//!   "mouse_dy": <f64 pixels, per-frame delta>,
-//!   "keyCode": <sorted ascending list of held VK codes at this frame>,
+//!   "input_modality": "keyboard_mouse" | "gamepad" | "mixed",
+//!   "mouseX": <f64 in [0, 1]> | null,
+//!   "mouseY": <f64 in [0, 1]> | null,
+//!   "mouse_dx": <f64 pixels, per-frame delta> | null,
+//!   "mouse_dy": <f64 pixels, per-frame delta> | null,
+//!   "keyCode": <sorted ascending list of held VK codes at this frame> | null,
+//!   "gamepad_left_stick_x":  <f64 in [-1, 1]> | null,
+//!   "gamepad_left_stick_y":  <f64 in [-1, 1]> | null,
+//!   "gamepad_right_stick_x": <f64 in [-1, 1]> | null,
+//!   "gamepad_right_stick_y": <f64 in [-1, 1]> | null,
+//!   "gamepad_left_trigger":  <f64 in [0, 1]>  | null,
+//!   "gamepad_right_trigger": <f64 in [0, 1]>  | null,
+//!   "gamepad_buttons": <u16 XInput bitmask> | null,
 //!   "camera_position": null,
 //!   "camera_rotation_quaternion": null
 //! }
@@ -59,31 +82,132 @@ use serde::Serialize;
 
 use crate::util::durable_write;
 
+/// Detected input modality for a recording session.
+///
+/// Stored on every per-frame record under `input_modality` so the buyer's
+/// plugin can branch on it without inferring from null patterns.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InputModality {
+    KeyboardMouse,
+    Gamepad,
+    Mixed,
+}
+
+impl InputModality {
+    fn has_kbm(self) -> bool {
+        matches!(self, Self::KeyboardMouse | Self::Mixed)
+    }
+    fn has_pad(self) -> bool {
+        matches!(self, Self::Gamepad | Self::Mixed)
+    }
+}
+
 /// Per-frame record matching the buyer plugin's wire contract.
 ///
 /// Field naming intentionally uses camelCase for `mouseX`/`mouseY`/`keyCode`
-/// (the buyer's spec) and snake_case for `mouse_dx`/`mouse_dy`/`camera_*`
-/// (also the buyer's spec). serde tags pin each field name explicitly so
-/// the serialized output is identical to the Python adapter regardless of
-/// future struct refactors.
+/// (the buyer's spec) and snake_case for everything else (also the buyer's
+/// spec). serde tags pin each field name explicitly so the serialized
+/// output is identical to the Python adapter regardless of future struct
+/// refactors.
+///
+/// The mouse / keyboard fields are `Option`s rather than always-populated:
+/// a gamepad-only session emits them as JSON `null` (and the gamepad
+/// fields likewise null on a keyboard-mouse-only session). The modality
+/// flag tells consumers which subset is meaningful for any given record.
 #[derive(Debug, Serialize, PartialEq)]
 pub struct ActionCameraRecord {
     pub frame_index: u64,
     pub timestamp: f64,
+    pub input_modality: InputModality,
     #[serde(rename = "mouseX")]
-    pub mouse_x: f64,
+    pub mouse_x: Option<f64>,
     #[serde(rename = "mouseY")]
-    pub mouse_y: f64,
-    pub mouse_dx: f64,
-    pub mouse_dy: f64,
+    pub mouse_y: Option<f64>,
+    pub mouse_dx: Option<f64>,
+    pub mouse_dy: Option<f64>,
     #[serde(rename = "keyCode")]
-    pub key_code: Vec<u16>,
+    pub key_code: Option<Vec<u16>>,
+    /// Left stick X axis, `[-1.0, 1.0]`. `None` on keyboard_mouse sessions.
+    pub gamepad_left_stick_x: Option<f64>,
+    /// Left stick Y axis, `[-1.0, 1.0]`. `None` on keyboard_mouse sessions.
+    pub gamepad_left_stick_y: Option<f64>,
+    /// Right stick X axis, `[-1.0, 1.0]`. `None` on keyboard_mouse sessions.
+    pub gamepad_right_stick_x: Option<f64>,
+    /// Right stick Y axis, `[-1.0, 1.0]`. `None` on keyboard_mouse sessions.
+    pub gamepad_right_stick_y: Option<f64>,
+    /// Left trigger, `[0.0, 1.0]`. `None` on keyboard_mouse sessions.
+    pub gamepad_left_trigger: Option<f64>,
+    /// Right trigger, `[0.0, 1.0]`. `None` on keyboard_mouse sessions.
+    pub gamepad_right_trigger: Option<f64>,
+    /// XInput-shaped u16 bitmask of currently-held buttons. `None` on
+    /// keyboard_mouse sessions; `Some(0)` means "gamepad active, no
+    /// buttons held this frame" — distinct from `None`.
+    pub gamepad_buttons: Option<u16>,
     /// Always `None` at the recorder layer. Schema preserved so downstream
     /// enrichment can fill it without changing the JSON shape.
     pub camera_position: Option<[f64; 3]>,
     /// Always `None` at the recorder layer. Quaternion convention when
     /// filled: `[w, x, y, z]` (scalar first).
     pub camera_rotation_quaternion: Option<[f64; 4]>,
+}
+
+/// gilrs button index → XInput u16 bitmask. Mirrors the Python adapter.
+/// gilrs indices not in this map contribute nothing to the bitmask.
+fn gilrs_button_to_xinput_bit(idx: u16) -> u16 {
+    match idx {
+        16 => 0x0001, // DPAD_UP
+        17 => 0x0002, // DPAD_DOWN
+        18 => 0x0004, // DPAD_LEFT
+        19 => 0x0008, // DPAD_RIGHT
+        12 => 0x0010, // START
+        11 => 0x0020, // BACK / SELECT
+        14 => 0x0040, // LSTICK / LTHUMB
+        15 => 0x0080, // RSTICK / RTHUMB
+        7 => 0x0100,  // LB / LT
+        8 => 0x0200,  // RB / RT
+        1 => 0x1000,  // A / SOUTH
+        2 => 0x2000,  // B / EAST
+        5 => 0x4000,  // X / WEST
+        4 => 0x8000,  // Y / NORTH
+        _ => 0x0000,
+    }
+}
+
+// gilrs axis indices, mirrored from
+// crates/input-capture/src/gamepad_capture.rs.
+const AXIS_LSTICKX: u16 = 1;
+const AXIS_LSTICKY: u16 = 2;
+const AXIS_LEFTZ: u16 = 3; // left trigger
+const AXIS_RSTICKX: u16 = 4;
+const AXIS_RSTICKY: u16 = 5;
+const AXIS_RIGHTZ: u16 = 6; // right trigger
+
+/// Detect the input modality of a recording from the event-type histogram
+/// of `inputs.jsonl`. Mirrors the Python adapter's `_detect_input_modality`.
+fn detect_input_modality(inputs: &[InputRow]) -> InputModality {
+    let mut keyboard_or_mouse = 0usize;
+    let mut gamepad = 0usize;
+    for row in inputs {
+        match row.event_type.as_str() {
+            "MOUSE_MOVE" | "MOUSE_BUTTON" | "SCROLL" | "KEYBOARD" => {
+                keyboard_or_mouse += 1;
+            }
+            "GAMEPAD_BUTTON" | "GAMEPAD_BUTTON_VALUE" | "GAMEPAD_AXIS" => {
+                gamepad += 1;
+            }
+            _ => {}
+        }
+    }
+    if gamepad > 0 && keyboard_or_mouse == 0 {
+        InputModality::Gamepad
+    } else if gamepad > 0 && keyboard_or_mouse > 0 {
+        InputModality::Mixed
+    } else {
+        // Empty bundles, START-only bundles, etc. fall back to legacy KBM
+        // schema so old recordings continue to lint cleanly.
+        InputModality::KeyboardMouse
+    }
 }
 
 /// One row from `inputs.jsonl`. Only fields we use here.
@@ -114,6 +238,7 @@ struct FrameRow {
 /// position into [0, 1]. These should be the recorder's `game_resolution`.
 ///
 /// The replay logic mirrors `convert_to_action_camera.py`:
+///   - Modality is auto-detected from the event-type distribution.
 ///   - Cursor starts at `(screen_w/2, screen_h/2)` (screen center).
 ///   - `MOUSE_MOVE` events accumulate as `(dx, dy)` deltas, clamped to the
 ///     screen rect. The recorder's MOUSE_MOVE arg is `[dx, dy]` (signed
@@ -125,6 +250,14 @@ struct FrameRow {
 ///     cursor_at_previous_frame` (matches the Python adapter — NOT raw
 ///     summed event deltas; this is the visually-meaningful per-frame
 ///     motion).
+///   - `GAMEPAD_AXIS [axis_idx, value]` rolls the latest seen value per axis
+///     forward; sticks clamp to `[-1, 1]`, triggers to `[0, 1]`.
+///   - `GAMEPAD_BUTTON [idx, pressed]` toggles a held-button set; the
+///     bitmask is `OR(GILRS_TO_XINPUT_BIT[idx])`. Indices outside the
+///     XInput map are dropped.
+///   - For `keyboard_mouse` modality, the gamepad fields are emitted as
+///     `null`. For `gamepad`, the mouse + key fields are emitted as `null`.
+///     For `mixed`, all fields populated.
 ///
 /// Inputs are expected to already be in chronological order (which the
 /// recorder produces by construction — InputEventStream uses an ordered
@@ -138,6 +271,10 @@ fn build_records(
 ) -> Vec<ActionCameraRecord> {
     let mut records: Vec<ActionCameraRecord> = Vec::with_capacity(frames.len());
 
+    let modality = detect_input_modality(inputs);
+    let has_kbm = modality.has_kbm();
+    let has_pad = modality.has_pad();
+
     let screen_w_f = (screen_w.max(1)) as f64;
     let screen_h_f = (screen_h.max(1)) as f64;
 
@@ -150,6 +287,19 @@ fn build_records(
     let mut prev_x: f64 = cursor_x;
     let mut prev_y: f64 = cursor_y;
     let mut held: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
+
+    // Gamepad state. We carry the rolling latest-value per axis and a
+    // held-set of gilrs button indices, mapped to the XInput bitmask at
+    // emit time. Axis defaults are 0.0 (resting position) so a gamepad
+    // session that hasn't yet emitted a deflection event still produces
+    // reasonable values.
+    let mut axis_lstick_x: f64 = 0.0;
+    let mut axis_lstick_y: f64 = 0.0;
+    let mut axis_rstick_x: f64 = 0.0;
+    let mut axis_rstick_y: f64 = 0.0;
+    let mut axis_left_trigger: f64 = 0.0;
+    let mut axis_right_trigger: f64 = 0.0;
+    let mut held_pad_buttons: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
 
     let mut input_idx = 0usize;
 
@@ -209,9 +359,45 @@ fn build_records(
                         }
                     }
                 }
+                "GAMEPAD_AXIS" => {
+                    if let Some(args) = row.event_args.as_array()
+                        && args.len() >= 2
+                        && let (Some(axis_idx_u), Some(value)) =
+                            (args[0].as_u64(), args[1].as_f64())
+                    {
+                        let axis_idx = axis_idx_u as u16;
+                        match axis_idx {
+                            AXIS_LSTICKX => axis_lstick_x = value.clamp(-1.0, 1.0),
+                            AXIS_LSTICKY => axis_lstick_y = value.clamp(-1.0, 1.0),
+                            AXIS_RSTICKX => axis_rstick_x = value.clamp(-1.0, 1.0),
+                            AXIS_RSTICKY => axis_rstick_y = value.clamp(-1.0, 1.0),
+                            AXIS_LEFTZ => axis_left_trigger = value.clamp(0.0, 1.0),
+                            AXIS_RIGHTZ => axis_right_trigger = value.clamp(0.0, 1.0),
+                            _ => {
+                                // DPAD-as-axis or unknown axis — ignored;
+                                // DPAD also fires as button events.
+                            }
+                        }
+                    }
+                }
+                "GAMEPAD_BUTTON" => {
+                    if let Some(args) = row.event_args.as_array()
+                        && args.len() >= 2
+                        && let (Some(btn_idx_u), Some(pressed)) =
+                            (args[0].as_u64(), args[1].as_bool())
+                    {
+                        let btn_idx = btn_idx_u as u16;
+                        if pressed {
+                            held_pad_buttons.insert(btn_idx);
+                        } else {
+                            held_pad_buttons.remove(&btn_idx);
+                        }
+                    }
+                }
                 _ => {
-                    // START / END / VIDEO_* / MOUSE_BUTTON / SCROLL / GAMEPAD_*
-                    // are not used to compute mouseX/mouseY/keyCode and are
+                    // START / END / VIDEO_* / MOUSE_BUTTON / SCROLL /
+                    // GAMEPAD_BUTTON_VALUE / HOOK_START / FOCUS / UNFOCUS
+                    // are not used to compute the per-frame state and are
                     // intentionally ignored here. They remain available in
                     // inputs.jsonl for any consumer that wants the lossless
                     // event stream.
@@ -221,14 +407,55 @@ fn build_records(
             input_idx += 1;
         }
 
+        let mut bitmask: u16 = 0;
+        for btn in held_pad_buttons.iter() {
+            bitmask |= gilrs_button_to_xinput_bit(*btn);
+        }
+
         records.push(ActionCameraRecord {
             frame_index: frame.idx,
             timestamp: frame_t_session_sec,
-            mouse_x: cursor_x / screen_w_f,
-            mouse_y: cursor_y / screen_h_f,
-            mouse_dx: cursor_x - prev_x,
-            mouse_dy: cursor_y - prev_y,
-            key_code: held.iter().copied().collect(),
+            input_modality: modality,
+            mouse_x: if has_kbm {
+                Some(cursor_x / screen_w_f)
+            } else {
+                None
+            },
+            mouse_y: if has_kbm {
+                Some(cursor_y / screen_h_f)
+            } else {
+                None
+            },
+            mouse_dx: if has_kbm {
+                Some(cursor_x - prev_x)
+            } else {
+                None
+            },
+            mouse_dy: if has_kbm {
+                Some(cursor_y - prev_y)
+            } else {
+                None
+            },
+            key_code: if has_kbm {
+                Some(held.iter().copied().collect())
+            } else {
+                None
+            },
+            gamepad_left_stick_x: if has_pad { Some(axis_lstick_x) } else { None },
+            gamepad_left_stick_y: if has_pad { Some(axis_lstick_y) } else { None },
+            gamepad_right_stick_x: if has_pad { Some(axis_rstick_x) } else { None },
+            gamepad_right_stick_y: if has_pad { Some(axis_rstick_y) } else { None },
+            gamepad_left_trigger: if has_pad {
+                Some(axis_left_trigger)
+            } else {
+                None
+            },
+            gamepad_right_trigger: if has_pad {
+                Some(axis_right_trigger)
+            } else {
+                None
+            },
+            gamepad_buttons: if has_pad { Some(bitmask) } else { None },
             camera_position: None,
             camera_rotation_quaternion: None,
         });
@@ -349,15 +576,20 @@ mod tests {
     fn cursor_starts_at_center_when_no_inputs() {
         // No events, single frame at t=0. Cursor must be reported at the
         // exact center, with zero per-frame delta.
+        // No events → modality falls back to keyboard_mouse (legacy schema).
         let frames = vec![frame_row(0, 0)];
         let inputs: Vec<InputRow> = vec![];
         let recs = build_records(&inputs, &frames, 1920, 1080);
         assert_eq!(recs.len(), 1);
-        assert!((recs[0].mouse_x - 0.5).abs() < 1e-12);
-        assert!((recs[0].mouse_y - 0.5).abs() < 1e-12);
-        assert_eq!(recs[0].mouse_dx, 0.0);
-        assert_eq!(recs[0].mouse_dy, 0.0);
-        assert!(recs[0].key_code.is_empty());
+        assert_eq!(recs[0].input_modality, InputModality::KeyboardMouse);
+        assert!((recs[0].mouse_x.unwrap() - 0.5).abs() < 1e-12);
+        assert!((recs[0].mouse_y.unwrap() - 0.5).abs() < 1e-12);
+        assert_eq!(recs[0].mouse_dx, Some(0.0));
+        assert_eq!(recs[0].mouse_dy, Some(0.0));
+        assert!(recs[0].key_code.as_ref().unwrap().is_empty());
+        // gamepad fields null on KBM modality.
+        assert!(recs[0].gamepad_left_stick_x.is_none());
+        assert!(recs[0].gamepad_buttons.is_none());
         assert!(recs[0].camera_position.is_none());
         assert!(recs[0].camera_rotation_quaternion.is_none());
         assert_eq!(recs[0].frame_index, 0);
@@ -385,17 +617,18 @@ mod tests {
         assert_eq!(recs.len(), 2);
         // Frame 0 at t=0: only the START event (timestamp 0 session) has
         // been applied; cursor is still at center, delta is 0.
-        assert!((recs[0].mouse_x - 0.5).abs() < 1e-12);
-        assert!((recs[0].mouse_y - 0.5).abs() < 1e-12);
-        assert_eq!(recs[0].mouse_dx, 0.0);
+        assert_eq!(recs[0].input_modality, InputModality::KeyboardMouse);
+        assert!((recs[0].mouse_x.unwrap() - 0.5).abs() < 1e-12);
+        assert!((recs[0].mouse_y.unwrap() - 0.5).abs() < 1e-12);
+        assert_eq!(recs[0].mouse_dx, Some(0.0));
         // Frame 1: cursor accumulated +12, +7 in pixels.
         let expect_x = (1920.0 / 2.0 + 12.0) / 1920.0;
         let expect_y = (1080.0 / 2.0 + 7.0) / 1080.0;
-        assert!((recs[1].mouse_x - expect_x).abs() < 1e-12);
-        assert!((recs[1].mouse_y - expect_y).abs() < 1e-12);
+        assert!((recs[1].mouse_x.unwrap() - expect_x).abs() < 1e-12);
+        assert!((recs[1].mouse_y.unwrap() - expect_y).abs() < 1e-12);
         // mouse_dx / mouse_dy are per-frame pixel deltas (NOT normalized).
-        assert!((recs[1].mouse_dx - 12.0).abs() < 1e-12);
-        assert!((recs[1].mouse_dy - 7.0).abs() < 1e-12);
+        assert!((recs[1].mouse_dx.unwrap() - 12.0).abs() < 1e-12);
+        assert!((recs[1].mouse_dy.unwrap() - 7.0).abs() < 1e-12);
     }
 
     #[test]
@@ -409,16 +642,16 @@ mod tests {
         ];
         let frames = vec![frame_row(0, 16_000_000)];
         let recs = build_records(&inputs, &frames, 1920, 1080);
-        assert!((recs[0].mouse_x - 0.0).abs() < 1e-12);
-        assert!((recs[0].mouse_y - 0.0).abs() < 1e-12);
+        assert!((recs[0].mouse_x.unwrap() - 0.0).abs() < 1e-12);
+        assert!((recs[0].mouse_y.unwrap() - 0.0).abs() < 1e-12);
 
         let inputs2 = vec![
             input_row(1000.000, "START", serde_json::json!([])),
             input_row(1000.001, "MOUSE_MOVE", serde_json::json!([5000, 5000])),
         ];
         let recs2 = build_records(&inputs2, &frames, 1920, 1080);
-        assert!((recs2[0].mouse_x - 1.0).abs() < 1e-12);
-        assert!((recs2[0].mouse_y - 1.0).abs() < 1e-12);
+        assert!((recs2[0].mouse_x.unwrap() - 1.0).abs() < 1e-12);
+        assert!((recs2[0].mouse_y.unwrap() - 1.0).abs() < 1e-12);
     }
 
     #[test]
@@ -442,9 +675,9 @@ mod tests {
             frame_row(2, 50_000_000), // 0.050s — none held
         ];
         let recs = build_records(&inputs, &frames, 1920, 1080);
-        assert_eq!(recs[0].key_code, vec![65, 87]); // A, W (sorted ascending)
-        assert_eq!(recs[1].key_code, vec![68, 87]); // D, W
-        assert!(recs[2].key_code.is_empty());
+        assert_eq!(recs[0].key_code, Some(vec![65, 87])); // A, W (sorted ascending)
+        assert_eq!(recs[1].key_code, Some(vec![68, 87])); // D, W
+        assert!(recs[2].key_code.as_ref().unwrap().is_empty());
     }
 
     #[test]
@@ -459,7 +692,7 @@ mod tests {
         ];
         let frames = vec![frame_row(0, 10_000_000)];
         let recs = build_records(&inputs, &frames, 1920, 1080);
-        assert_eq!(recs[0].key_code, vec![87]);
+        assert_eq!(recs[0].key_code, Some(vec![87]));
     }
 
     #[test]
@@ -473,26 +706,31 @@ mod tests {
         ];
         let frames = vec![frame_row(0, 10_000_000)];
         let recs = build_records(&inputs, &frames, 1920, 1080);
-        assert!(recs[0].key_code.is_empty());
+        assert!(recs[0].key_code.as_ref().unwrap().is_empty());
     }
 
     #[test]
     fn unrelated_events_do_not_affect_cursor_or_held_keys() {
-        // MOUSE_BUTTON / SCROLL / GAMEPAD_* / VIDEO_* / HOOK_START all must
-        // pass through without mutating cursor or held-key state.
+        // MOUSE_BUTTON / SCROLL / VIDEO_* / HOOK_START must pass through
+        // without mutating cursor or held-key state. NOTE: GAMEPAD_BUTTON
+        // is now a state-mutating event in `mixed` modality (KBM events
+        // present here keep us in the kbm/mixed set), so this test omits
+        // gamepad events to retain the original semantics.
         let inputs = vec![
             input_row(1000.000, "START", serde_json::json!([])),
             input_row(1000.001, "MOUSE_BUTTON", serde_json::json!([1, true])),
             input_row(1000.002, "SCROLL", serde_json::json!([3])),
-            input_row(1000.003, "GAMEPAD_BUTTON", serde_json::json!([1, true])),
             input_row(1000.004, "VIDEO_START", serde_json::json!([])),
             input_row(1000.005, "HOOK_START", serde_json::json!([])),
         ];
         let frames = vec![frame_row(0, 10_000_000)];
         let recs = build_records(&inputs, &frames, 1920, 1080);
-        assert!((recs[0].mouse_x - 0.5).abs() < 1e-12);
-        assert!((recs[0].mouse_y - 0.5).abs() < 1e-12);
-        assert!(recs[0].key_code.is_empty());
+        assert_eq!(recs[0].input_modality, InputModality::KeyboardMouse);
+        assert!((recs[0].mouse_x.unwrap() - 0.5).abs() < 1e-12);
+        assert!((recs[0].mouse_y.unwrap() - 0.5).abs() < 1e-12);
+        assert!(recs[0].key_code.as_ref().unwrap().is_empty());
+        // Gamepad fields remain null on KBM modality.
+        assert!(recs[0].gamepad_buttons.is_none());
     }
 
     #[test]
@@ -512,9 +750,9 @@ mod tests {
         // The two valid events: cursor moves +5,+5 and W is held.
         let expect_x = (1920.0 / 2.0 + 5.0) / 1920.0;
         let expect_y = (1080.0 / 2.0 + 5.0) / 1080.0;
-        assert!((recs[0].mouse_x - expect_x).abs() < 1e-12);
-        assert!((recs[0].mouse_y - expect_y).abs() < 1e-12);
-        assert_eq!(recs[0].key_code, vec![87]);
+        assert!((recs[0].mouse_x.unwrap() - expect_x).abs() < 1e-12);
+        assert!((recs[0].mouse_y.unwrap() - expect_y).abs() < 1e-12);
+        assert_eq!(recs[0].key_code, Some(vec![87]));
     }
 
     #[test]
@@ -522,15 +760,23 @@ mod tests {
         // Round-trip a record through serde_json and verify the field names
         // and types match the buyer's exact wire contract — mouseX/mouseY
         // (camelCase), keyCode (camelCase), camera_position (snake_case,
-        // null), etc.
+        // null), gamepad_* (snake_case) — every documented field appears.
         let rec = ActionCameraRecord {
             frame_index: 1,
             timestamp: 0.0333,
-            mouse_x: 0.506,
-            mouse_y: 0.507,
-            mouse_dx: 12.0,
-            mouse_dy: 7.0,
-            key_code: vec![65, 87],
+            input_modality: InputModality::KeyboardMouse,
+            mouse_x: Some(0.506),
+            mouse_y: Some(0.507),
+            mouse_dx: Some(12.0),
+            mouse_dy: Some(7.0),
+            key_code: Some(vec![65, 87]),
+            gamepad_left_stick_x: None,
+            gamepad_left_stick_y: None,
+            gamepad_right_stick_x: None,
+            gamepad_right_stick_y: None,
+            gamepad_left_trigger: None,
+            gamepad_right_trigger: None,
+            gamepad_buttons: None,
             camera_position: None,
             camera_rotation_quaternion: None,
         };
@@ -539,16 +785,29 @@ mod tests {
         let obj = json.as_object().expect("record is object");
         assert!(obj.contains_key("frame_index"));
         assert!(obj.contains_key("timestamp"));
+        assert!(obj.contains_key("input_modality"));
         assert!(obj.contains_key("mouseX"));
         assert!(obj.contains_key("mouseY"));
         assert!(obj.contains_key("mouse_dx"));
         assert!(obj.contains_key("mouse_dy"));
         assert!(obj.contains_key("keyCode"));
+        assert!(obj.contains_key("gamepad_left_stick_x"));
+        assert!(obj.contains_key("gamepad_left_stick_y"));
+        assert!(obj.contains_key("gamepad_right_stick_x"));
+        assert!(obj.contains_key("gamepad_right_stick_y"));
+        assert!(obj.contains_key("gamepad_left_trigger"));
+        assert!(obj.contains_key("gamepad_right_trigger"));
+        assert!(obj.contains_key("gamepad_buttons"));
         assert!(obj.contains_key("camera_position"));
         assert!(obj.contains_key("camera_rotation_quaternion"));
+        // input_modality renders as snake_case string.
+        assert_eq!(obj["input_modality"].as_str(), Some("keyboard_mouse"));
         // Nullable camera fields render as JSON null (NOT omitted).
         assert!(obj["camera_position"].is_null());
         assert!(obj["camera_rotation_quaternion"].is_null());
+        // gamepad fields render as JSON null when None.
+        assert!(obj["gamepad_left_stick_x"].is_null());
+        assert!(obj["gamepad_buttons"].is_null());
         // keyCode is a JSON array of integers.
         assert!(obj["keyCode"].is_array());
         assert_eq!(obj["keyCode"][0].as_u64(), Some(65));
@@ -575,8 +834,8 @@ mod tests {
         let inputs = vec![input_row(1000.0, "START", serde_json::json!([]))];
         let frames = vec![frame_row(0, 0)];
         let recs = build_records(&inputs, &frames, 0, 0);
-        assert!(recs[0].mouse_x.is_finite());
-        assert!(recs[0].mouse_y.is_finite());
+        assert!(recs[0].mouse_x.unwrap().is_finite());
+        assert!(recs[0].mouse_y.unwrap().is_finite());
     }
 
     #[test]
@@ -659,9 +918,13 @@ mod tests {
         // t=0.005 and t=0.010 are AFTER frame 0's t_ns=0, so they have
         // not been applied).
         assert_eq!(arr[0]["frame_index"].as_u64(), Some(0));
+        assert_eq!(arr[0]["input_modality"].as_str(), Some("keyboard_mouse"));
         assert!((arr[0]["mouseX"].as_f64().unwrap() - 0.5).abs() < 1e-9);
         assert!((arr[0]["mouseY"].as_f64().unwrap() - 0.5).abs() < 1e-9);
         assert!(arr[0]["keyCode"].as_array().unwrap().is_empty());
+        // gamepad fields are null on a KBM session.
+        assert!(arr[0]["gamepad_left_stick_x"].is_null());
+        assert!(arr[0]["gamepad_buttons"].is_null());
         assert!(arr[0]["camera_position"].is_null());
         assert!(arr[0]["camera_rotation_quaternion"].is_null());
 
@@ -699,5 +962,194 @@ mod tests {
         .expect("write frames");
         let result = write_action_camera_json(dir.path(), 1920, 1080).await;
         assert!(result.is_err(), "expected error on missing inputs.jsonl");
+    }
+
+    // --------------------------------------------------------------- gamepad
+
+    #[test]
+    fn gamepad_only_session_nulls_kbm_fields() {
+        // A pure-gamepad recording: only gamepad events present. The
+        // mouse / keyboard fields must serialize as `null` and the
+        // gamepad fields must carry real values.
+        let inputs = vec![
+            input_row(1000.000, "START", serde_json::json!([])),
+            // Left stick deflected up-right; gilrs AXIS_LSTICKX=1,
+            // AXIS_LSTICKY=2.
+            input_row(1000.001, "GAMEPAD_AXIS", serde_json::json!([1, 0.5])),
+            input_row(1000.002, "GAMEPAD_AXIS", serde_json::json!([2, -0.25])),
+            // Right trigger pulled.
+            input_row(1000.003, "GAMEPAD_AXIS", serde_json::json!([6, 0.75])),
+            // A button (gilrs BTN_SOUTH=1) and START (gilrs idx 12) held.
+            input_row(1000.004, "GAMEPAD_BUTTON", serde_json::json!([1, true])),
+            input_row(1000.005, "GAMEPAD_BUTTON", serde_json::json!([12, true])),
+        ];
+        let frames = vec![frame_row(0, 10_000_000)];
+        let recs = build_records(&inputs, &frames, 1920, 1080);
+        assert_eq!(recs[0].input_modality, InputModality::Gamepad);
+        // KBM fields nulled out.
+        assert!(recs[0].mouse_x.is_none());
+        assert!(recs[0].mouse_y.is_none());
+        assert!(recs[0].mouse_dx.is_none());
+        assert!(recs[0].mouse_dy.is_none());
+        assert!(recs[0].key_code.is_none());
+        // Gamepad fields populated.
+        assert_eq!(recs[0].gamepad_left_stick_x, Some(0.5));
+        assert_eq!(recs[0].gamepad_left_stick_y, Some(-0.25));
+        assert_eq!(recs[0].gamepad_right_stick_x, Some(0.0));
+        assert_eq!(recs[0].gamepad_right_stick_y, Some(0.0));
+        assert_eq!(recs[0].gamepad_left_trigger, Some(0.0));
+        assert_eq!(recs[0].gamepad_right_trigger, Some(0.75));
+        // A=0x1000 | START=0x0010 = 0x1010
+        assert_eq!(recs[0].gamepad_buttons, Some(0x1010));
+    }
+
+    #[test]
+    fn mixed_modality_populates_all_fields() {
+        // Both keyboard and gamepad events present → modality=mixed,
+        // both field families populated.
+        let inputs = vec![
+            input_row(1000.000, "START", serde_json::json!([])),
+            input_row(1000.001, "KEYBOARD", serde_json::json!([87, true])), // W
+            input_row(1000.002, "GAMEPAD_AXIS", serde_json::json!([1, 0.3])),
+            input_row(1000.003, "GAMEPAD_BUTTON", serde_json::json!([2, true])), // B
+        ];
+        let frames = vec![frame_row(0, 10_000_000)];
+        let recs = build_records(&inputs, &frames, 1920, 1080);
+        assert_eq!(recs[0].input_modality, InputModality::Mixed);
+        assert_eq!(recs[0].key_code, Some(vec![87]));
+        assert!(recs[0].mouse_x.is_some());
+        assert_eq!(recs[0].gamepad_left_stick_x, Some(0.3));
+        // B = 0x2000
+        assert_eq!(recs[0].gamepad_buttons, Some(0x2000));
+    }
+
+    #[test]
+    fn gamepad_axis_values_are_clamped() {
+        // Stick events outside [-1, 1] and trigger events outside [0, 1]
+        // must be clamped silently — the recorder occasionally reports
+        // slightly out-of-range values from gilrs.
+        let inputs = vec![
+            input_row(1000.000, "START", serde_json::json!([])),
+            input_row(1000.001, "GAMEPAD_AXIS", serde_json::json!([1, 5.0])), // overflow stick
+            input_row(1000.002, "GAMEPAD_AXIS", serde_json::json!([2, -3.0])), // underflow stick
+            input_row(1000.003, "GAMEPAD_AXIS", serde_json::json!([3, -0.5])), // underflow trigger
+            input_row(1000.004, "GAMEPAD_AXIS", serde_json::json!([6, 2.0])), // overflow trigger
+        ];
+        let frames = vec![frame_row(0, 10_000_000)];
+        let recs = build_records(&inputs, &frames, 1920, 1080);
+        assert_eq!(recs[0].gamepad_left_stick_x, Some(1.0));
+        assert_eq!(recs[0].gamepad_left_stick_y, Some(-1.0));
+        assert_eq!(recs[0].gamepad_left_trigger, Some(0.0));
+        assert_eq!(recs[0].gamepad_right_trigger, Some(1.0));
+    }
+
+    #[test]
+    fn gamepad_buttons_xinput_mapping_is_correct() {
+        // Spot-check the gilrs→XInput mapping used by `gamepad_buttons`.
+        // We press one button per documented mapping and verify the OR'd
+        // bitmask matches the table in ACTION_CAMERA_FORMAT.md.
+        // Pairs: (gilrs_idx, xinput_bit).
+        let pairs: &[(u16, u16)] = &[
+            (1, 0x1000),  // A
+            (2, 0x2000),  // B
+            (4, 0x8000),  // Y
+            (5, 0x4000),  // X
+            (7, 0x0100),  // LB
+            (8, 0x0200),  // RB
+            (11, 0x0020), // BACK
+            (12, 0x0010), // START
+            (14, 0x0040), // LSTICK
+            (15, 0x0080), // RSTICK
+            (16, 0x0001), // DPAD_UP
+            (17, 0x0002), // DPAD_DOWN
+            (18, 0x0004), // DPAD_LEFT
+            (19, 0x0008), // DPAD_RIGHT
+        ];
+        let mut expected: u16 = 0;
+        let mut inputs = vec![input_row(1000.0, "START", serde_json::json!([]))];
+        let mut t = 1000.001f64;
+        for (idx, bit) in pairs {
+            inputs.push(input_row(
+                t,
+                "GAMEPAD_BUTTON",
+                serde_json::json!([*idx, true]),
+            ));
+            t += 0.001;
+            expected |= bit;
+        }
+        let frames = vec![frame_row(0, 100_000_000)];
+        let recs = build_records(&inputs, &frames, 1920, 1080);
+        assert_eq!(recs[0].gamepad_buttons, Some(expected));
+        assert_eq!(expected, 0xF3FF); // sanity: all 14 mapped slots set
+    }
+
+    #[test]
+    fn unknown_gamepad_button_indices_drop_from_bitmask() {
+        // gilrs indices that don't appear in the XInput map (e.g.
+        // BTN_MODE=13, BTN_C=3, BTN_Z=6, BTN_LT2=9, BTN_RT2=10) must
+        // contribute nothing to `gamepad_buttons`. The bitmask stays 0
+        // when only unmapped buttons are held.
+        let inputs = vec![
+            input_row(1000.000, "START", serde_json::json!([])),
+            input_row(1000.001, "GAMEPAD_BUTTON", serde_json::json!([13, true])), // MODE
+            input_row(1000.002, "GAMEPAD_BUTTON", serde_json::json!([3, true])),  // C
+            input_row(1000.003, "GAMEPAD_BUTTON", serde_json::json!([9, true])),  // LT2
+        ];
+        let frames = vec![frame_row(0, 10_000_000)];
+        let recs = build_records(&inputs, &frames, 1920, 1080);
+        // Modality is gamepad (we have gamepad events) — bitmask is Some(0).
+        assert_eq!(recs[0].input_modality, InputModality::Gamepad);
+        assert_eq!(recs[0].gamepad_buttons, Some(0));
+    }
+
+    #[test]
+    fn gamepad_button_release_without_press_does_not_panic() {
+        // Defensive: a `pressed=false` for a button we never saw `true`
+        // for (e.g. recording started with the button already held) must
+        // be a no-op, not a panic. Mirrors keyboard_release_without_press_does_not_panic.
+        let inputs = vec![
+            input_row(1000.000, "START", serde_json::json!([])),
+            input_row(1000.001, "GAMEPAD_BUTTON", serde_json::json!([1, false])),
+        ];
+        let frames = vec![frame_row(0, 10_000_000)];
+        let recs = build_records(&inputs, &frames, 1920, 1080);
+        assert_eq!(recs[0].input_modality, InputModality::Gamepad);
+        assert_eq!(recs[0].gamepad_buttons, Some(0));
+    }
+
+    #[test]
+    fn detect_input_modality_classifies_correctly() {
+        // Pure KBM.
+        let inputs_kbm = vec![
+            input_row(1000.0, "START", serde_json::json!([])),
+            input_row(1000.001, "MOUSE_MOVE", serde_json::json!([1, 1])),
+            input_row(1000.002, "KEYBOARD", serde_json::json!([87, true])),
+        ];
+        assert_eq!(
+            detect_input_modality(&inputs_kbm),
+            InputModality::KeyboardMouse
+        );
+
+        // Pure gamepad.
+        let inputs_pad = vec![
+            input_row(1000.0, "START", serde_json::json!([])),
+            input_row(1000.001, "GAMEPAD_AXIS", serde_json::json!([1, 0.5])),
+        ];
+        assert_eq!(detect_input_modality(&inputs_pad), InputModality::Gamepad);
+
+        // Mixed.
+        let inputs_mix = vec![
+            input_row(1000.0, "START", serde_json::json!([])),
+            input_row(1000.001, "KEYBOARD", serde_json::json!([87, true])),
+            input_row(1000.002, "GAMEPAD_AXIS", serde_json::json!([1, 0.5])),
+        ];
+        assert_eq!(detect_input_modality(&inputs_mix), InputModality::Mixed);
+
+        // Empty / meta-only → fallback to KBM (legacy default).
+        let inputs_empty = vec![input_row(1000.0, "START", serde_json::json!([]))];
+        assert_eq!(
+            detect_input_modality(&inputs_empty),
+            InputModality::KeyboardMouse
+        );
     }
 }
