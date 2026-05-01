@@ -9,7 +9,7 @@
 //! validated independently of the hook itself.
 
 use engine_telemetry::{
-    CyberpunkHook, EngineFrame, EngineHook, HookError, write_telemetry_sidecar,
+    CyberpunkHook, EngineFrame, EngineHook, GtaVHook, HookError, write_telemetry_sidecar,
 };
 
 // ---------------------------------------------------------------------------
@@ -259,4 +259,93 @@ fn default_cyberpunk_hook_equals_new() {
     assert_eq!(fa.player_position, fb.player_position);
     assert_eq!(fa.camera_follow_offset, fb.camera_follow_offset);
     assert_eq!(fa.metric_scale, fb.metric_scale);
+}
+
+// ---------------------------------------------------------------------------
+// GtaVHook: sibling-of-CyberpunkHook contract checks
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gta_v_hook_is_constructible() {
+    // Smoke test: the per-title scaffold pattern generalises past
+    // CyberpunkHook. A new title should require no more than `Hook::new()`
+    // + `impl EngineHook` to plug into the rest of the recorder.
+    let _hook = GtaVHook::new();
+    let _default_hook = GtaVHook::default();
+}
+
+#[test]
+fn gta_v_hook_captures_default_frame() {
+    // The mock implementation must produce a fully-populated EngineFrame
+    // (no defaulted fields, no NaNs, RAGE-flavoured mock values). This
+    // doubles as a regression test that the buyer wire contract is
+    // satisfied for GTA V telemetry the same way it is for Cyberpunk.
+    let mut hook = GtaVHook::new();
+    let f0 = hook.capture_frame().expect("first mock capture");
+    assert_eq!(f0.frame_index, 0);
+    // RAGE mock walks along +Y (north), distinguishing it from the
+    // Cyberpunk mock which walks along +X. See the GtaVHook docstring.
+    let f1 = hook.capture_frame().expect("second mock capture");
+    assert!(
+        f1.player_position[1] > f0.player_position[1],
+        "GtaVHook mock should advance along +Y (north): f0={:?}, f1={:?}",
+        f0.player_position,
+        f1.player_position
+    );
+    assert_eq!(f0.player_position[0], 0.0);
+    assert_eq!(f0.player_position[2], 0.0);
+    // Default RAGE gameplay FOV is 50°, distinct from CyberpunkHook's 70°
+    // mock. Locks in the documented per-title default.
+    assert_eq!(f0.fov_degrees, 50.0);
+    // Quaternions must be unit-length even in mock frames — the runtime
+    // InvariantViolation guard is exercised by this assertion path.
+    for q in [
+        &f0.player_rotation_quaternion,
+        &f0.camera_rotation_quaternion,
+    ] {
+        let n2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+        assert!(
+            (n2 - 1.0).abs() < 1e-9,
+            "GtaVHook mock quaternion not unit-length: {q:?}"
+        );
+    }
+}
+
+#[test]
+fn gta_v_hook_respects_metric_scale_one() {
+    // RAGE world units are meters (validated empirically — see the
+    // 100m walk test in docs/GTA_V_HOOK_RUNBOOK.md). Locking
+    // metric_scale = 1.0 catches a future refactor that copies in
+    // a UE5-style cm scale by accident.
+    let mut hook = GtaVHook::new();
+    let trait_scale = hook.metric_scale();
+    let frame_scale = hook.capture_frame().unwrap().metric_scale;
+    assert_eq!(trait_scale, 1.0);
+    assert_eq!(frame_scale, 1.0);
+    assert_eq!(GtaVHook::METRIC_SCALE, 1.0);
+    assert_eq!(trait_scale, frame_scale);
+}
+
+#[test]
+fn gta_v_hook_frame_serde_round_trip() {
+    // End-to-end serde round-trip on a captured GtaVHook frame. This is
+    // the contract test: if the buyer plugin parses GTA V telemetry
+    // differently from Cyberpunk telemetry, the bug shows up here.
+    let mut hook = GtaVHook::new();
+    let original = hook.capture_frame().expect("mock capture");
+    let s = serde_json::to_string(&original).expect("serialize");
+    let parsed: EngineFrame = serde_json::from_str(&s).expect("deserialize");
+    assert_eq!(parsed, original);
+    // Also verify the sidecar writer accepts a vec of GtaVHook frames
+    // unchanged — it should, because EngineFrame is engine-agnostic, but
+    // a regression in the trait surface would surface here first.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("engine_telemetry.json");
+    let frames: Vec<EngineFrame> = (0..4)
+        .map(|_| hook.capture_frame().expect("mock capture"))
+        .collect();
+    write_telemetry_sidecar(&frames, &path).expect("write sidecar");
+    let raw = std::fs::read_to_string(&path).expect("read sidecar");
+    let reparsed: Vec<EngineFrame> = serde_json::from_str(&raw).expect("parse sidecar");
+    assert_eq!(reparsed, frames);
 }
