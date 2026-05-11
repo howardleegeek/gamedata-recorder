@@ -73,6 +73,38 @@ pub struct Metadata {
     /// Wall-clock end in RFC 3339.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub wall_clock_end: Option<String>,
+    /// rc16.4 — diagnostics from the Raw Input capture thread, captured
+    /// at recording stop. Optional for backwards compatibility with
+    /// older recordings. See [`InputCaptureDiagnostics`] for fields.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub input_capture_diagnostics: Option<InputCaptureDiagnostics>,
+}
+
+/// rc16.4 — Raw Input capture-thread diagnostics, written to
+/// `metadata.json` at recording stop.
+///
+/// This struct exists to distinguish three failure modes that all
+/// produce empty `inputs.jsonl` from a user's perspective:
+///
+/// 1. **Hook never installed** — `registration_tier == "none"`. Both
+///    INPUTSINK tiers failed; raw input is dead for the session.
+/// 2. **Hook installed, no events delivered** — `registration_tier`
+///    is `inputsink_*` but `wm_input_total == 0`. The OS isn't sending
+///    us WM_INPUT despite a successful registration. Possible causes:
+///    UIPI / anti-cheat, session 0, integrity-level mismatch.
+/// 3. **Events delivered, parsing failed** — `wm_input_total > 0` but
+///    `inputs.jsonl` is still empty. `get_raw_input_data_failures`
+///    will be non-zero in that case.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InputCaptureDiagnostics {
+    /// Which `RegisterRawInputDevices` shape succeeded. One of
+    /// `inputsink_batch`, `inputsink_per_device`, or `none`.
+    pub registration_tier: String,
+    /// Total `WM_INPUT` messages dispatched to the capture thread.
+    pub wm_input_total: u64,
+    /// Total `GetRawInputData` failures (typically zero on healthy
+    /// systems).
+    pub get_raw_input_data_failures: u64,
 }
 
 #[derive(Debug)]

@@ -467,6 +467,25 @@ impl Recording {
         }
 
         let gamepads = input_capture.gamepads();
+
+        // rc16.4 — snapshot Raw Input capture diagnostics. These tell
+        // the data team whether a zero-event recording was caused by a
+        // failed hook install or a hook that delivered nothing.
+        let wm_input_total = input_capture.raw_input_messages_observed();
+        let get_raw_input_data_failures = input_capture.get_raw_input_data_failures();
+        let tier = input_capture.registration_tier();
+        let input_capture_diagnostics = Some(crate::output_types::InputCaptureDiagnostics {
+            registration_tier: tier.as_str().to_string(),
+            wm_input_total,
+            get_raw_input_data_failures,
+        });
+        tracing::info!(
+            registration_tier = tier.as_str(),
+            wm_input_total,
+            get_raw_input_data_failures,
+            "Raw Input capture summary at recording stop"
+        );
+
         LocalRecording::write_metadata_and_validate(
             self.recording_location,
             self.game_exe,
@@ -481,6 +500,7 @@ impl Recording {
             result.as_ref().ok().cloned(),
             frame_count,
             dropped_input_events,
+            input_capture_diagnostics,
         )
         .await?;
 

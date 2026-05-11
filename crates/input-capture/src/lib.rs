@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock, atomic::Ordering},
 };
 
 use color_eyre::Result;
@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 mod kbm_capture;
 use kbm_capture::KbmCapture;
-pub use kbm_capture::{ConsentGuard, ConsentStatus};
+pub use kbm_capture::{CaptureMetrics, ConsentGuard, ConsentStatus, RegistrationTier};
 
 mod gamepad_capture;
 pub use gamepad_capture::{ActiveGamepad, GamepadId, GamepadMetadata};
@@ -77,6 +77,11 @@ pub struct InputCapture {
     active_keys: Arc<Mutex<kbm_capture::ActiveKeys>>,
     active_gamepad: Arc<Mutex<gamepad_capture::ActiveGamepads>>,
     gamepads: Arc<RwLock<HashMap<GamepadId, GamepadMetadata>>>,
+    /// rc16.4 — shared with the Win32 raw-input thread. Exposes the
+    /// registration tier and event counters so the recorder can record
+    /// them in metadata.json and so we can diagnose "HOOK_START fires
+    /// but inputs.jsonl is empty" reports without a debug build.
+    metrics: Arc<CaptureMetrics>,
 }
 impl InputCapture {
     /// Initialize input capture.
@@ -107,12 +112,14 @@ impl InputCapture {
 
         tracing::debug!("Spawning raw input thread for keyboard/mouse capture");
         let active_keys = Arc::new(Mutex::new(kbm_capture::ActiveKeys::default()));
+        let metrics = Arc::new(CaptureMetrics::default());
         let _raw_input_thread = std::thread::spawn({
             let input_tx = input_tx.clone();
             let active_keys = active_keys.clone();
+            let metrics = metrics.clone();
             let consent = consent.clone();
             move || {
-                KbmCapture::initialize(active_keys, &consent)
+                KbmCapture::initialize(active_keys, metrics, &consent)
                     .expect("failed to initialize raw input")
                     .run_queue(move |event| {
                         if input_tx.blocking_send(event).is_err() {
@@ -139,9 +146,38 @@ impl InputCapture {
                 active_keys,
                 active_gamepad,
                 gamepads,
+                metrics,
             },
             input_rx,
         ))
+    }
+
+    /// Which `RegisterRawInputDevices` tier succeeded for this capture
+    /// session. The host should record this in `metadata.json` so the
+    /// data team can group recordings by tier in support tickets.
+    ///
+    /// Returns [`RegistrationTier::None`] if both INPUTSINK tiers failed
+    /// — in that case the recording will have only lifecycle events.
+    pub fn registration_tier(&self) -> RegistrationTier {
+        self.metrics.tier()
+    }
+
+    /// Total `WM_INPUT` messages dispatched to the capture thread since
+    /// initialization. A zero value while the recording is active is a
+    /// strong indicator of either no hook installed or an integrity-
+    /// level / anti-cheat mismatch that blocks Raw Input delivery.
+    pub fn raw_input_messages_observed(&self) -> u64 {
+        self.metrics.wm_input_total.load(Ordering::Relaxed)
+    }
+
+    /// Number of times `GetRawInputData` failed for a `WM_INPUT` whose
+    /// header we already saw. A persistently non-zero value with a
+    /// non-zero `raw_input_messages_observed` indicates a different
+    /// failure mode (e.g. driver returning oversized data we can't fit).
+    pub fn get_raw_input_data_failures(&self) -> u64 {
+        self.metrics
+            .get_raw_input_data_failures
+            .load(Ordering::Relaxed)
     }
 
     pub fn active_input(&self) -> ActiveInput {

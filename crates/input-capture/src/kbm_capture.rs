@@ -27,7 +27,10 @@
 
 use std::{
     collections::HashSet,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
 };
 
 use color_eyre::{
@@ -148,11 +151,101 @@ pub struct ActiveKeys {
     pub mouse: HashSet<u16>,
 }
 
+/// Which `RegisterRawInputDevices` call shape actually succeeded.
+///
+/// rc16.4: this is reported in `metadata.json` so we can diagnose
+/// "HOOK_START but zero input events" in the field. The Win11 26100
+/// fallback cascade in [`KbmCapture::initialize`] tries the preferred
+/// path first and falls back to per-device registration when batch
+/// registration is rejected by a filter driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationTier {
+    /// Tier 1: `RIDEV_INPUTSINK` batch with valid hwnd. Both devices
+    /// registered in a single call. Preferred — gives global capture.
+    InputSinkBatch,
+    /// Tier 2: `RIDEV_INPUTSINK` with per-device calls. At least one of
+    /// (mouse, keyboard) succeeded. Global capture for the device(s)
+    /// that went through.
+    InputSinkPerDevice,
+    /// No tier succeeded. Raw Input capture is DEAD for the session —
+    /// the message pump will spin but never receive `WM_INPUT`.
+    None,
+}
+
+/// Shared metrics for the running capture thread. Owned by [`KbmCapture`]
+/// and exposed through the parent `InputCapture` so the host can:
+///
+/// * surface "zero events captured" in metadata.json (rc16.4 — bingd's
+///   case where HOOK_START fired but `inputs.jsonl` had zero raw input
+///   events), and
+/// * periodically log capture activity for live diagnosis.
+#[derive(Debug)]
+pub struct CaptureMetrics {
+    /// Total raw-input events observed since [`KbmCapture::initialize`]
+    /// returned, including events that produced no [`Event`] (e.g. mouse
+    /// move with zero delta). Counts WM_INPUT dispatches, not bytes.
+    pub wm_input_total: AtomicU64,
+    /// Total `GetRawInputData` failures. A non-zero value here with a
+    /// zero `wm_input_total` would indicate a different bug class than
+    /// "no hook installed".
+    pub get_raw_input_data_failures: AtomicU64,
+    /// Which registration tier succeeded. Stored as `usize` so we can
+    /// publish it atomically; decoded via [`RegistrationTier::from_raw`].
+    pub registration_tier: AtomicUsize,
+}
+
+impl Default for CaptureMetrics {
+    fn default() -> Self {
+        Self {
+            wm_input_total: AtomicU64::new(0),
+            get_raw_input_data_failures: AtomicU64::new(0),
+            registration_tier: AtomicUsize::new(RegistrationTier::None.as_raw()),
+        }
+    }
+}
+
+impl CaptureMetrics {
+    /// Read the current registration tier.
+    pub fn tier(&self) -> RegistrationTier {
+        RegistrationTier::from_raw(self.registration_tier.load(Ordering::Relaxed))
+    }
+}
+
+impl RegistrationTier {
+    const fn as_raw(self) -> usize {
+        match self {
+            RegistrationTier::InputSinkBatch => 1,
+            RegistrationTier::InputSinkPerDevice => 2,
+            RegistrationTier::None => 0,
+        }
+    }
+
+    fn from_raw(raw: usize) -> Self {
+        match raw {
+            1 => RegistrationTier::InputSinkBatch,
+            2 => RegistrationTier::InputSinkPerDevice,
+            _ => RegistrationTier::None,
+        }
+    }
+
+    /// Stable string identifier for logs and metadata.json. Must remain
+    /// stable across versions so the data team can group recordings by
+    /// tier without parsing free-form text.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RegistrationTier::InputSinkBatch => "inputsink_batch",
+            RegistrationTier::InputSinkPerDevice => "inputsink_per_device",
+            RegistrationTier::None => "none",
+        }
+    }
+}
+
 pub struct KbmCapture {
     hwnd: HWND,
     class_name: PCSTR,
     h_instance: HINSTANCE,
     active_keys: Arc<Mutex<ActiveKeys>>,
+    metrics: Arc<CaptureMetrics>,
 }
 impl Drop for KbmCapture {
     fn drop(&mut self) {
@@ -183,7 +276,15 @@ impl KbmCapture {
     /// before `RegisterRawInputDevices` is called. If consent is not granted
     /// this function returns `Err` immediately without installing any hook.
     /// See the module-level doc comment for the full contract.
-    pub fn initialize(active_keys: Arc<Mutex<ActiveKeys>>, consent: &ConsentGuard) -> Result<Self> {
+    ///
+    /// `metrics` is shared with the parent [`super::InputCapture`] so the
+    /// recorder can observe the registration tier and event counters in
+    /// `metadata.json` (rc16.4).
+    pub fn initialize(
+        active_keys: Arc<Mutex<ActiveKeys>>,
+        metrics: Arc<CaptureMetrics>,
+        consent: &ConsentGuard,
+    ) -> Result<Self> {
         // R46: no hook installation without consent. This MUST run before any
         // Win32 call that registers a system-wide input sink.
         consent.require_granted()?;
@@ -243,23 +344,34 @@ impl KbmCapture {
             // the MSDN `RAWINPUTDEVICE` docs. We always have a valid message-
             // only `hwnd` from `CreateWindowExA` above, so we pass it.
             //
-            // Fallback cascade — we try progressively less-demanding
-            // registrations so that at least *some* kbm input flows even if
-            // the preferred path is rejected by the OS or a third-party
-            // filter driver:
+            // rc16.4 — Fallback cascade revisited.
+            //
+            // The previous cascade had THREE tiers, with tier 3 falling back
+            // to `dwFlags = 0` (foreground-only). That tier is broken-by-
+            // design for this codebase: our hwnd is a hidden, zero-size,
+            // tool-style message-only window — it *never* owns the foreground
+            // while a game is running. So tier-3 "success" was indistinguish-
+            // able from "no hook installed at all" from the user's POV: zero
+            // events delivered for the entire session, but no error logged.
+            // Bingd's rc15.x report ("HOOK_START fires, inputs.jsonl has zero
+            // keyboard/mouse events after 5 minutes of Minecraft") matches
+            // this failure mode exactly: OBS hooked the game and emitted the
+            // lifecycle events through the same channel, but Raw Input
+            // delivered nothing because the foreground-only registration
+            // never met its precondition.
+            //
+            // The remaining cascade:
             //
             //   1. RIDEV_INPUTSINK + valid hwnd, both devices in one call
             //      (preferred: global capture regardless of foreground state)
             //   2. RIDEV_INPUTSINK + valid hwnd, registered ONE DEVICE AT A
             //      TIME (works around batch-rejection quirks on some driver
-            //      stacks)
-            //   3. dwFlags = 0 + valid hwnd, one device at a time
-            //      (foreground-only fallback: only delivers input when our
-            //      window owns focus, but never NULL-target and never INPUTSINK
-            //      — this is the maximally-compatible shape accepted by every
-            //      Windows build we care about)
+            //      stacks; the mouse and keyboard succeed independently)
+            //
+            // If both tiers fail, we report it loudly and the host crate
+            // surfaces the failure in `metadata.json` so the data team sees
+            // "registration_tier=none" instead of a silent empty stream.
             let preferred_flags = RIDEV_INPUTSINK;
-            let foreground_flags = RAWINPUTDEVICE_FLAGS(0);
             let make_devices = |flags: RAWINPUTDEVICE_FLAGS| {
                 [
                     0x02, // Mouse
@@ -269,12 +381,10 @@ impl KbmCapture {
                     usUsagePage: 0x01, // Generic Desktop Controls
                     usUsage: usage,
                     dwFlags: flags,
-                    // Per MSDN: when RIDEV_INPUTSINK is set, hwndTarget MUST be
-                    // a valid HWND. Win11 26100 enforces this strictly. We use
-                    // our message-only window so we receive WM_INPUT even when
-                    // not in foreground. For the dwFlags=0 fallback, a valid
-                    // HWND is also accepted (and is what Windows wants for
-                    // foreground capture).
+                    // Per MSDN: when RIDEV_INPUTSINK is set, hwndTarget MUST
+                    // be a valid HWND. Win11 26100 enforces this strictly.
+                    // We use our message-only window so we receive WM_INPUT
+                    // even when not in foreground.
                     hwndTarget: hwnd,
                 })
             };
@@ -284,14 +394,20 @@ impl KbmCapture {
             let tier1 = make_devices(preferred_flags);
             let tier1_result = RegisterRawInputDevices(&tier1, tier1.len() as u32)
                 .wrap_err("tier 1: RIDEV_INPUTSINK batch with valid hwnd");
-            let registered = if let Err(ref e) = tier1_result {
+            let tier = if tier1_result.is_ok() {
                 tracing::info!(
-                    error = ?e,
-                    "RegisterRawInputDevices tier 1 (INPUTSINK batch) failed, trying tier 2"
+                    tier = RegistrationTier::InputSinkBatch.as_str(),
+                    "RegisterRawInputDevices tier 1 (INPUTSINK batch) succeeded — global Raw Input capture armed"
+                );
+                RegistrationTier::InputSinkBatch
+            } else {
+                tracing::info!(
+                    error = ?tier1_result.err(),
+                    "RegisterRawInputDevices tier 1 (INPUTSINK batch) failed, trying tier 2 (per-device)"
                 );
                 // Tier 2: same flags, but register devices one at a time.
-                // Some filter drivers reject the whole batch if they dislike a
-                // single entry; sequential registration lets us succeed for
+                // Some filter drivers reject the whole batch if they dislike
+                // a single entry; sequential registration lets us succeed for
                 // at least one device (the mouse often goes through even when
                 // the keyboard does not, or vice versa).
                 let mut any_ok = false;
@@ -301,76 +417,51 @@ impl KbmCapture {
                         .wrap_err("tier 2: RIDEV_INPUTSINK per-device with valid hwnd")
                     {
                         Ok(()) => {
-                            tracing::debug!(
+                            tracing::info!(
                                 usage = format!("0x{:02X}", dev.usUsage),
-                                "tier 2 succeeded for device"
+                                "tier 2 succeeded for device (INPUTSINK per-device)"
                             );
                             any_ok = true;
                         }
                         Err(e) => {
-                            tracing::info!(
+                            tracing::warn!(
                                 error = ?e,
                                 usage = format!("0x{:02X}", dev.usUsage),
-                                "tier 2 failed for device, will try tier 3"
+                                "tier 2 failed for device"
                             );
                         }
                     }
                 }
 
-                if !any_ok {
-                    // Tier 3: dwFlags = 0 (foreground-only), one device at a
-                    // time. No INPUTSINK means we only receive input when our
-                    // hidden message window owns the foreground — which it
-                    // normally does not — so coverage will be partial. This
-                    // is still strictly better than zero input: the game
-                    // overlay and any injected focus windows will pass through
-                    // real WM_INPUT events instead of the silent empty stream
-                    // we ship today.
-                    let tier3 = make_devices(foreground_flags);
-                    let mut any_tier3_ok = false;
-                    for dev in &tier3 {
-                        let single = [*dev];
-                        match RegisterRawInputDevices(&single, 1)
-                            .wrap_err("tier 3: dwFlags=0 per-device foreground-only")
-                        {
-                            Ok(()) => {
-                                tracing::debug!(
-                                    usage = format!("0x{:02X}", dev.usUsage),
-                                    "tier 3 succeeded for device (foreground-only)"
-                                );
-                                any_tier3_ok = true;
-                            }
-                            Err(e) => {
-                                tracing::debug!(
-                                    error = ?e,
-                                    usage = format!("0x{:02X}", dev.usUsage),
-                                    "tier 3 failed for device"
-                                );
-                            }
-                        }
-                    }
-                    any_tier3_ok
+                if any_ok {
+                    RegistrationTier::InputSinkPerDevice
                 } else {
-                    true
+                    RegistrationTier::None
                 }
-            } else {
-                tracing::debug!("RegisterRawInputDevices tier 1 (INPUTSINK batch) succeeded");
-                true
             };
 
-            if !registered {
-                // All three tiers failed. This is very rare (e.g. session 0 /
-                // headless / certain kernel-mode anti-cheat filters). Log and
-                // proceed — the capture thread still pumps window messages so
-                // the rest of the pipeline (gamepad via XInput, video via OBS)
-                // is unaffected. Downstream validators will flag the empty
-                // input stream.
-                tracing::warn!(
-                    "RegisterRawInputDevices failed at all fallback tiers \
-                     (preferred INPUTSINK batch, per-device INPUTSINK, and \
-                     foreground-only) — continuing without keyboard/mouse \
-                     Raw Input. Video recording and gamepad input are \
-                     unaffected."
+            // Publish the tier so the host can read it. Done before we
+            // return so the parent thread sees the value as soon as the
+            // initialize call completes.
+            metrics
+                .registration_tier
+                .store(tier.as_raw(), Ordering::Relaxed);
+
+            if matches!(tier, RegistrationTier::None) {
+                // Both tiers failed. This is rare (e.g. session 0 / headless
+                // / certain kernel-mode anti-cheat filters). Log loudly — the
+                // capture thread will still pump window messages but will
+                // never receive WM_INPUT, so the recording's inputs.jsonl
+                // will contain only lifecycle events. Downstream validation
+                // will mark the recording INVALID via the dropped-events
+                // path; metadata.json will record `registration_tier=none`
+                // for fingerprinting in support tickets.
+                tracing::error!(
+                    tier = tier.as_str(),
+                    "RegisterRawInputDevices FAILED at both INPUTSINK tiers \
+                     (batch and per-device). Raw Input capture is dead for \
+                     this session — keyboard/mouse events will NOT be \
+                     recorded. Video and gamepad input are unaffected."
                 );
             }
 
@@ -379,6 +470,7 @@ impl KbmCapture {
                 class_name,
                 h_instance,
                 active_keys,
+                metrics,
             })
         }
     }
@@ -612,6 +704,12 @@ impl KbmCapture {
         last_absolute: &mut Option<(i32, i32)>,
     ) -> Vec<Event> {
         unsafe {
+            // rc16.4: bump the WM_INPUT dispatch counter unconditionally
+            // here. We want this counter to reflect "Windows delivered a
+            // WM_INPUT to us" even when the subsequent GetRawInputData
+            // call fails — that ratio is the diagnostic signal.
+            self.metrics.wm_input_total.fetch_add(1, Ordering::Relaxed);
+
             let hrawinput = HRAWINPUT(lparam.0 as *mut _);
             let header_size = match size_of::<RAWINPUTHEADER>().try_into() {
                 Ok(size) => size,
@@ -626,6 +724,20 @@ impl KbmCapture {
             let size_result =
                 GetRawInputData(hrawinput, RID_INPUT, None, &mut pcbsize, header_size);
             if size_result == u32::MAX {
+                // rc16.4: previously this returned silently. The bingd
+                // report on Win11 26100 had HOOK_START + zero events but
+                // we had no signal whether the hook was dead or the
+                // GetRawInputData call was failing — log explicitly so
+                // future investigations can distinguish the two cases.
+                use windows::Win32::Foundation::GetLastError;
+                let error = GetLastError();
+                self.metrics
+                    .get_raw_input_data_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    "GetRawInputData size query failed: {:?}, dropping input event",
+                    error
+                );
                 return Vec::new();
             }
 
@@ -641,6 +753,9 @@ impl KbmCapture {
             if result == u32::MAX {
                 use windows::Win32::Foundation::GetLastError;
                 let error = GetLastError();
+                self.metrics
+                    .get_raw_input_data_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 tracing::warn!("GetRawInputData failed: {:?}, dropping input event", error);
                 return Vec::new();
             }
