@@ -15,10 +15,10 @@ use color_eyre::{
 use constants::{FPS, RECORDING_HEIGHT, RECORDING_WIDTH, encoding::VideoEncoderType};
 use input_capture::ConsentGuard;
 use windows::Win32::{
-    Foundation::{HWND, POINT},
+    Foundation::{HWND, LPARAM, POINT, RECT},
     Graphics::Gdi::{
-        HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint,
-        MonitorFromWindow,
+        EnumDisplayMonitors, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+        MonitorFromPoint, MonitorFromWindow,
     },
     System::StationsAndDesktops::{
         CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, OpenInputDesktop,
@@ -1765,6 +1765,117 @@ fn video_info(adapter_index: usize, (base_width, base_height): (u32, u32)) -> Ob
         .build()
 }
 
+/// rc16.9: pointer value of the HMONITOR at the user-selected index from the
+/// rc16.6 preflight picker, or 0 if the override should not apply.
+///
+/// `OYSTER_PREFLIGHT_MONITOR_IDX` is set by `bin/oyster_play.py` (line 727)
+/// after the user confirms a monitor in the preflight Tk dialog. The Python
+/// side enumerates monitors via `user32!EnumDisplayMonitors` and assigns
+/// indices in callback-arrival order; mirroring that here keeps the index
+/// the user picked aligned with what the recorder selects (rc16.6/rc16.8
+/// were cosmetic — the env var was set but never read by Rust).
+///
+/// Returns 0 (sentinel "not applicable") rather than panicking when:
+///   - env var is unset / blank → preflight skipped or declined
+///   - env var doesn't parse as `usize` → malformed; fall through to existing
+///     HWND-from-game → cursor-fallback chain
+///   - parsed index is out of range vs. enumerated monitors → display config
+///     changed since the picker ran; fall through rather than capturing the
+///     wrong screen
+///
+/// The returned pointer is matched against
+/// `MonitorCaptureSourceBuilder::get_monitors()` later in `prepare_source`
+/// via HMONITOR pointer equality (same scheme rc16.2 already uses for the
+/// HWND/cursor signals), so we don't need to assume the two enumerations
+/// produce identical orderings — we just need a real HMONITOR libobs also
+/// knows about. EnumDisplayMonitors and libobs both walk the same Win32
+/// monitor list, so any HMONITOR returned here will resolve.
+fn hmonitor_ptr_from_preflight_env() -> usize {
+    let Ok(idx_str) = std::env::var("OYSTER_PREFLIGHT_MONITOR_IDX") else {
+        return 0; // not set — preflight skipped or non-Windows launcher
+    };
+    let Ok(idx) = idx_str.trim().parse::<usize>() else {
+        tracing::warn!(
+            "rc16.9 preflight: OYSTER_PREFLIGHT_MONITOR_IDX={idx_str:?} did not parse as \
+             usize — falling through to HWND/cursor monitor resolution"
+        );
+        return 0;
+    };
+
+    // Collect HMONITOR pointer values in EnumDisplayMonitors callback order.
+    // We store as `usize` rather than `HMONITOR` so the Vec doesn't outlive
+    // any borrow rules across the FFI boundary; the pointer value alone is
+    // what we need to match against libobs's monitor list downstream.
+    let mut monitors: Vec<usize> = Vec::new();
+
+    // SAFETY: `enum_proc_collect_hmonitors` matches the MONITORENUMPROC
+    // signature (`unsafe extern "system"`) required by `EnumDisplayMonitors`.
+    // The `LPARAM` is a stable pointer to `monitors` which lives on this
+    // function's stack for the duration of the call (EnumDisplayMonitors is
+    // synchronous — it invokes the callback for each monitor and returns
+    // before this frame is torn down). `hdc=None, lprcclip=None` requests
+    // enumeration across all displays in virtual-screen space — the same
+    // mode the Python preflight uses (`user32.EnumDisplayMonitors(0, None,
+    // …, 0)` at bin/preflight_capture.py:108).
+    let ok: bool = unsafe {
+        EnumDisplayMonitors(
+            None,
+            None,
+            Some(enum_proc_collect_hmonitors),
+            LPARAM(&mut monitors as *mut Vec<usize> as isize),
+        )
+    }
+    .as_bool();
+    if !ok {
+        tracing::warn!(
+            "rc16.9 preflight: EnumDisplayMonitors returned FALSE — falling through to \
+             HWND/cursor monitor resolution"
+        );
+        return 0;
+    }
+
+    match monitors.get(idx).copied() {
+        Some(ptr) if ptr != 0 => {
+            tracing::info!(
+                "rc16.9 preflight: using user-selected monitor index {idx} (HMONITOR {ptr:#x}, \
+                 enumerated {} total)",
+                monitors.len()
+            );
+            ptr
+        }
+        _ => {
+            tracing::warn!(
+                "rc16.9 preflight: monitor index {idx} unusable (only {} monitors found, or \
+                 NULL HMONITOR) — falling through to HWND/cursor",
+                monitors.len()
+            );
+            0
+        }
+    }
+}
+
+/// MONITORENUMPROC callback for [`hmonitor_ptr_from_preflight_env`]. Pushes
+/// each HMONITOR's pointer value into the `Vec<usize>` pointed to by `lparam`.
+/// Returns `TRUE` to keep enumerating until Windows exhausts the display list.
+///
+/// SAFETY: the caller (`EnumDisplayMonitors` inside
+/// `hmonitor_ptr_from_preflight_env`) guarantees `lparam` is a non-null,
+/// well-aligned pointer to a live `Vec<usize>` for the duration of
+/// enumeration. We do not retain the pointer past this call.
+unsafe extern "system" fn enum_proc_collect_hmonitors(
+    hmon: HMONITOR,
+    _hdc: HDC,
+    _rect: *mut RECT,
+    lparam: LPARAM,
+) -> windows::core::BOOL {
+    if lparam.0 == 0 {
+        return windows::core::BOOL(0);
+    }
+    let monitors = unsafe { &mut *(lparam.0 as *mut Vec<usize>) };
+    monitors.push(hmon.0 as usize);
+    windows::core::BOOL(1)
+}
+
 /// Pointer value of the HMONITOR that `hwnd` is currently on, or 0 if unavailable.
 ///
 /// The pointer is the universal key across `windows` crate versions — `display_info`
@@ -2006,36 +2117,48 @@ fn prepare_source(
                         .add_to_scene(scene)
                 }
             } else {
-                // Pick the monitor the game window currently lives on. Two
+                // Pick the monitor the game window currently lives on. Four
                 // signals, in priority order:
-                //   1. `MonitorFromWindow(hwnd)` — works whenever the game-
+                //   1. `OYSTER_PREFLIGHT_MONITOR_IDX` env var (rc16.9) — set
+                //      by the launcher when the user picks a monitor in the
+                //      rc16.6 preflight Tk dialog. Authoritative when present
+                //      because it reflects the user's stated intent. Falls
+                //      through silently when the env var is unset, malformed,
+                //      or points to an out-of-range index (e.g. monitor was
+                //      unplugged between picker and capture-start).
+                //   2. `MonitorFromWindow(hwnd)` — works whenever the game-
                 //      detection code in `recorder.rs::get_foregrounded_game`
                 //      returned a real HWND for us.
-                //   2. `MonitorFromPoint(GetCursorPos())` — used when (1)
+                //   3. `MonitorFromPoint(GetCursorPos())` — used when (2)
                 //      returns 0 because the HWND is null (the game-detection
                 //      code occasionally returns `HWND::default()` when the
                 //      foreground window changes between detection and
                 //      capture-start, see rc16.2 black-MP4 incident for the
                 //      RTX 4060 / dual-monitor case).
-                //   3. Primary monitor (index 0) — terminal fallback used
-                //      only when both queries fail.
-                let hwnd_ptr = hmonitor_ptr_for_hwnd(hwnd);
-                let target_ptr = if hwnd_ptr != 0 {
-                    hwnd_ptr
+                //   4. Primary monitor (index 0) — terminal fallback used
+                //      only when all upstream queries fail.
+                let preflight_ptr = hmonitor_ptr_from_preflight_env();
+                let target_ptr = if preflight_ptr != 0 {
+                    preflight_ptr
                 } else {
-                    let cursor_ptr = hmonitor_ptr_for_cursor();
-                    if cursor_ptr != 0 {
-                        tracing::info!(
-                            "HWND-based monitor lookup returned 0 (null/invalid window handle), \
-                             falling back to MonitorFromPoint(GetCursorPos()) = {cursor_ptr:#x}"
-                        );
+                    let hwnd_ptr = hmonitor_ptr_for_hwnd(hwnd);
+                    if hwnd_ptr != 0 {
+                        hwnd_ptr
                     } else {
-                        tracing::warn!(
-                            "Both MonitorFromWindow and MonitorFromPoint failed — \
-                             will fall back to enumerated monitor index 0 (primary)"
-                        );
+                        let cursor_ptr = hmonitor_ptr_for_cursor();
+                        if cursor_ptr != 0 {
+                            tracing::info!(
+                                "HWND-based monitor lookup returned 0 (null/invalid window handle), \
+                                 falling back to MonitorFromPoint(GetCursorPos()) = {cursor_ptr:#x}"
+                            );
+                        } else {
+                            tracing::warn!(
+                                "Both MonitorFromWindow and MonitorFromPoint failed — \
+                                 will fall back to enumerated monitor index 0 (primary)"
+                            );
+                        }
+                        cursor_ptr
                     }
-                    cursor_ptr
                 };
                 let monitor_idx = if target_ptr == 0 {
                     tracing::warn!(
