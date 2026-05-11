@@ -170,6 +170,15 @@ impl Recording {
             )
             .await?;
 
+        // rc16.3 — fire-and-forget adaptive capture probe. The probe
+        // task is a no-op unless `OYSTER_ADAPTIVE_CAPTURE=1` is set
+        // (default: disabled). When enabled, it waits ~5s, samples
+        // the MP4 with ffmpeg's `signalstats` filter, and updates the
+        // per-rig cache so the NEXT session lands on the correct
+        // tier. See `record::adaptive_capture` for the full
+        // explanation and design trade-offs.
+        crate::record::adaptive_capture::spawn_probe_task(video_path.clone(), effective_mode);
+
         Ok(Self {
             input_writer,
             input_stream,

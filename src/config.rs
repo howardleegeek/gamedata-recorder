@@ -353,6 +353,29 @@ impl GameConfig {
             );
             return forced;
         }
+
+        // rc16.3 — adaptive cache override. Sits below the manual env
+        // override (so support can still force-pin a tier) but above
+        // the rc16.2 default. When `OYSTER_ADAPTIVE_CAPTURE=1` and the
+        // per-rig cache has a non-stale validated entry, use it
+        // directly — this is how a tester whose first session
+        // triggered a black-frame probe gets corrected to the working
+        // tier on their second session.
+        //
+        // The cache is consulted only when the adaptive feature is
+        // enabled. With the env var off, this is a no-op zero-cost
+        // function call. We intentionally bypass the test_game and
+        // hook-required allowlist carve-outs here for the same reason
+        // `OYSTER_CAPTURE_MODE` does: the cache is a "you already saw
+        // this fail on this rig" signal that trumps heuristics.
+        if let Some(cached) = crate::record::adaptive_capture::lookup_cached_tier_for_current_rig()
+        {
+            tracing::info!(
+                "Capture mode pinned to {cached:?} via adaptive cache \
+                 (rc16.3, game_exe_stem={game_exe_stem})"
+            );
+            return cached;
+        }
         match self.capture_mode {
             CaptureMode::Monitor => EffectiveCaptureMode::Monitor,
             CaptureMode::GameHook => EffectiveCaptureMode::GameHook,
