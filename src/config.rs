@@ -284,6 +284,56 @@ pub enum EffectiveCaptureMode {
 /// the same PR that flips the Auto default.
 const TEST_GAME_EXE_STEM: &str = "test_game";
 
+/// rc16.2 — runtime escape hatch for the Auto resolution.
+///
+/// `OYSTER_CAPTURE_MODE` overrides every other selector (config,
+/// hook-required allowlist, legacy `use_window_capture`) so that
+/// support can flip a tester's machine without rebuilding. Accepted
+/// values (case-insensitive, surrounding whitespace ignored):
+///
+///   `display`         → `EffectiveCaptureMode::Monitor`  (DXGI Desktop
+///                       Duplication; captures whichever monitor the
+///                       game is on regardless of how the game presents)
+///   `window` / `wgc`  → `EffectiveCaptureMode::Wgc`      (per-window
+///                       Windows.Graphics.Capture)
+///   `game` / `hook`   → `EffectiveCaptureMode::GameHook` (libobs game-
+///                       capture hook injection)
+///   `auto` / unset    → fall through to the normal Auto resolution
+///                       (rc16.2 default: Monitor; pre-rc16.2: WGC).
+///
+/// Why this exists: bingd's RTX 4060 / dual-monitor rig (2026-05-11)
+/// produced 5-minute pure-black MP4s because the Auto path resolved to
+/// `Wgc` for Minecraft Java, and the WGC hook attaches poorly to LWJGL/
+/// GLFW OpenGL swap chains (it reports "attached" but reads a black
+/// surface because the GL frame swap chain isn't visible to the DXGI
+/// hook). Display Capture goes through DXGI Desktop Duplication and is
+/// agnostic to what the captured window does — it just reads the
+/// composited monitor framebuffer, so OpenGL and Vulkan windows render
+/// correctly the same way they do for the user.
+const OYSTER_CAPTURE_MODE_ENV: &str = "OYSTER_CAPTURE_MODE";
+
+fn capture_mode_from_env() -> Option<EffectiveCaptureMode> {
+    let raw = std::env::var(OYSTER_CAPTURE_MODE_ENV).ok()?;
+    let value = raw.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "display" | "monitor" | "screen" => Some(EffectiveCaptureMode::Monitor),
+        "window" | "wgc" => Some(EffectiveCaptureMode::Wgc),
+        "game" | "hook" | "game_capture" => Some(EffectiveCaptureMode::GameHook),
+        // Empty string or "auto" means "ignore the override and use the
+        // normal resolution path" so deployment scripts can clear the
+        // override by setting it to the empty string instead of needing
+        // to unset the variable.
+        "" | "auto" => None,
+        other => {
+            tracing::warn!(
+                "Unknown {OYSTER_CAPTURE_MODE_ENV}={other:?} — ignoring, falling through to Auto resolution. \
+                 Accepted: display | window | game | auto"
+            );
+            None
+        }
+    }
+}
+
 impl GameConfig {
     /// Resolve the per-recording capture mode, folding in the
     /// hook-required allowlist, the test_game carve-out, and the legacy
@@ -292,6 +342,17 @@ impl GameConfig {
     /// `game_exe_stem` is the lowercase filename without extension (e.g.
     /// `"cs2"`), matching the style used by `constants::GAME_WHITELIST`.
     pub fn effective_capture_mode(&self, game_exe_stem: &str) -> EffectiveCaptureMode {
+        // rc16.2 — `OYSTER_CAPTURE_MODE` is the highest-priority override.
+        // It intentionally bypasses the test_game carve-out and the
+        // hook-required allowlist so support can recover a stuck tester
+        // (e.g. bingd's black-MP4 case) without redeploying.
+        if let Some(forced) = capture_mode_from_env() {
+            tracing::info!(
+                "Capture mode forced to {forced:?} via {OYSTER_CAPTURE_MODE_ENV} env var \
+                 (game_exe_stem={game_exe_stem})"
+            );
+            return forced;
+        }
         match self.capture_mode {
             CaptureMode::Monitor => EffectiveCaptureMode::Monitor,
             CaptureMode::GameHook => EffectiveCaptureMode::GameHook,
@@ -314,16 +375,29 @@ impl GameConfig {
                 // Legacy v2.5.8 escape hatch: if the user explicitly
                 // flipped `use_window_capture = false` in their
                 // persisted config, they asked for game-capture.
-                // Honour that over the new WGC default so upgrades
+                // Honour that over the new default so upgrades
                 // don't surprise anyone who deliberately set it.
                 if !self.use_window_capture {
                     return EffectiveCaptureMode::GameHook;
                 }
-                // Default for Win10 1903+: WGC. Safer than monitor
-                // duplication on fullscreen-exclusive games, doesn't
-                // require DLL injection like GameHook, and is the
-                // Microsoft-blessed path for modern Windows capture.
-                EffectiveCaptureMode::Wgc
+                // rc16.2 (2026-05-11): default flipped from WGC →
+                // Monitor. WGC attaches to a *window's swapchain* and
+                // assumes the window presents a DXGI surface — OpenGL
+                // / Vulkan / GLFW windows (Minecraft Java, factorio,
+                // older indies) present through a path WGC's DXGI hook
+                // can't read, producing 5-minute pure-black MP4s
+                // (bingd, 2026-05-11). Display Capture goes through
+                // DXGI Desktop Duplication on the composited monitor
+                // framebuffer, so it's renderer-agnostic: anything the
+                // user can SEE on the monitor is what we record. The
+                // tradeoff (capturing the whole monitor instead of
+                // just the game window) is acceptable for the world-
+                // model training data we collect.
+                //
+                // Override with `OYSTER_CAPTURE_MODE=window` or
+                // `OYSTER_CAPTURE_MODE=game` per-launch if you need
+                // the older behaviour for a specific title.
+                EffectiveCaptureMode::Monitor
             }
         }
     }

@@ -15,12 +15,18 @@ use color_eyre::{
 use constants::{FPS, RECORDING_HEIGHT, RECORDING_WIDTH, encoding::VideoEncoderType};
 use input_capture::ConsentGuard;
 use windows::Win32::{
-    Foundation::HWND,
-    Graphics::Gdi::{HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorFromWindow},
+    Foundation::{HWND, POINT},
+    Graphics::Gdi::{
+        HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint,
+        MonitorFromWindow,
+    },
     System::StationsAndDesktops::{
         CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, OpenInputDesktop,
     },
-    UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
+    UI::{
+        HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
+        WindowsAndMessaging::GetCursorPos,
+    },
 };
 
 use libobs_simple::sources::{
@@ -1764,11 +1770,77 @@ fn video_info(adapter_index: usize, (base_width, base_height): (u32, u32)) -> Ob
 /// The pointer is the universal key across `windows` crate versions — `display_info`
 /// is pinned to an older `windows` version than we use, so we compare HMONITORs
 /// as raw pointer values rather than by typed equality.
+///
+/// Returns 0 when `hwnd` is the null window handle (HWND(0)) — the caller is
+/// expected to fall back to [`hmonitor_ptr_for_cursor`] in that case (rc16.2).
 fn hmonitor_ptr_for_hwnd(hwnd: HWND) -> usize {
+    // The game-detection code in `recorder.rs::get_foregrounded_game` returns
+    // `(exe, pid, HWND::default())` on some paths (e.g. when the foreground
+    // window changes between detection and capture-start). Calling
+    // `MonitorFromWindow(HWND(NULL), …)` returns the primary monitor on most
+    // setups, but on a dual-monitor rig with the game on the *secondary*
+    // monitor that produces the wrong capture (we'd record an empty desktop
+    // on monitor 0 while the game runs on monitor 1). Return 0 here so the
+    // caller can route to the cursor-position fallback instead. We
+    // intentionally bail _before_ calling `MonitorFromWindow` so we don't
+    // pay the syscall in the null case.
+    if hwnd.is_invalid() {
+        return 0;
+    }
     // SAFETY: MonitorFromWindow is a pure read-only Win32 query; it returns an
     // HMONITOR (or NULL). MONITOR_DEFAULTTONEAREST guarantees a non-null result
     // even when the window sits outside any display rectangle.
     let target: HMONITOR = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if target.is_invalid() {
+        return 0;
+    }
+    target.0 as usize
+}
+
+/// Pointer value of the HMONITOR under the current cursor position, or 0
+/// when the cursor position can't be resolved or `MonitorFromPoint` fails.
+///
+/// Used as the secondary monitor-selection signal in `prepare_source` when
+/// game-detection hands us a null `HWND` (rc16.2). The reasoning: the user
+/// is almost certainly playing on the monitor that has their cursor focus
+/// — even if the game window is fullscreen-exclusive with a transient null
+/// HWND, the input cursor coordinates remain on the monitor the game took
+/// over. This is strictly better than the previous "fall back to monitor 0"
+/// behaviour, which captured a black desktop on bingd's secondary display
+/// while Minecraft ran on the primary (2026-05-11 black-MP4 incident).
+///
+/// Falls through to `MONITOR_DEFAULTTOPRIMARY` semantics on failure rather
+/// than `MONITOR_DEFAULTTONEAREST` — if both `GetCursorPos` and the typical
+/// nearest-monitor lookup fail, the user clearly has a degenerate desktop
+/// state and primary is the safest pick.
+fn hmonitor_ptr_for_cursor() -> usize {
+    let mut point = POINT { x: 0, y: 0 };
+    // SAFETY: GetCursorPos is a read-only Win32 query that writes the cursor
+    // position into the POINT we own. It takes a raw pointer because the
+    // `windows` crate models the out-parameter as `*mut POINT`; we pass a
+    // pointer to a stack-local that outlives the call.
+    let cursor_ok = unsafe { GetCursorPos(&mut point as *mut POINT) }.is_ok();
+    if !cursor_ok {
+        tracing::debug!(
+            "GetCursorPos failed during HWND-null monitor fallback — \
+             dropping back to MONITOR_DEFAULTTOPRIMARY"
+        );
+        // SAFETY: MonitorFromPoint is a read-only Win32 query. The (0,0)
+        // origin combined with DEFAULTTOPRIMARY returns the primary
+        // monitor handle and never the NULL value the
+        // DEFAULTTONULL/NEAREST flags can produce in pathological cases.
+        let primary: HMONITOR =
+            unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+        if primary.is_invalid() {
+            return 0;
+        }
+        return primary.0 as usize;
+    }
+    // SAFETY: MonitorFromPoint is a read-only Win32 query. We hand it a
+    // POINT we just populated with valid coordinates from GetCursorPos.
+    // DEFAULTTONEAREST guarantees a non-null HMONITOR even if the cursor
+    // sits in the seam between monitors.
+    let target: HMONITOR = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
     if target.is_invalid() {
         return 0;
     }
@@ -1934,13 +2006,41 @@ fn prepare_source(
                         .add_to_scene(scene)
                 }
             } else {
-                // Pick the monitor the game window currently lives on — falls back
-                // to primary when MonitorFromWindow can't resolve or when the HMONITOR
-                // doesn't match any enumerated DisplayInfo.
-                let target_ptr = hmonitor_ptr_for_hwnd(hwnd);
+                // Pick the monitor the game window currently lives on. Two
+                // signals, in priority order:
+                //   1. `MonitorFromWindow(hwnd)` — works whenever the game-
+                //      detection code in `recorder.rs::get_foregrounded_game`
+                //      returned a real HWND for us.
+                //   2. `MonitorFromPoint(GetCursorPos())` — used when (1)
+                //      returns 0 because the HWND is null (the game-detection
+                //      code occasionally returns `HWND::default()` when the
+                //      foreground window changes between detection and
+                //      capture-start, see rc16.2 black-MP4 incident for the
+                //      RTX 4060 / dual-monitor case).
+                //   3. Primary monitor (index 0) — terminal fallback used
+                //      only when both queries fail.
+                let hwnd_ptr = hmonitor_ptr_for_hwnd(hwnd);
+                let target_ptr = if hwnd_ptr != 0 {
+                    hwnd_ptr
+                } else {
+                    let cursor_ptr = hmonitor_ptr_for_cursor();
+                    if cursor_ptr != 0 {
+                        tracing::info!(
+                            "HWND-based monitor lookup returned 0 (null/invalid window handle), \
+                             falling back to MonitorFromPoint(GetCursorPos()) = {cursor_ptr:#x}"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "Both MonitorFromWindow and MonitorFromPoint failed — \
+                             will fall back to enumerated monitor index 0 (primary)"
+                        );
+                    }
+                    cursor_ptr
+                };
                 let monitor_idx = if target_ptr == 0 {
                     tracing::warn!(
-                        "MonitorFromWindow failed, falling back to primary monitor (index 0)"
+                        "No HMONITOR resolvable for either HWND or cursor position, \
+                         falling back to primary monitor (index 0)"
                     );
                     0
                 } else {
@@ -2264,6 +2364,14 @@ fn parse_skipped_frames(msg: &str) -> Option<SkippedFrames> {
 mod tests {
     use super::*;
 
+    /// Serializes tests that touch process-global `OYSTER_CAPTURE_MODE`.
+    /// Cargo runs tests within a module concurrently by default, and
+    /// `std::env::set_var` / `remove_var` are inherently racy — without
+    /// this lock, the env-var override test and the explicit-mode tests
+    /// can interleave and produce flaky failures. Held for the duration
+    /// of any test that mutates or reads the env var.
+    static OYSTER_CAPTURE_MODE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_parse_skipped_frames_basic() {
         let msg =
@@ -2323,28 +2431,53 @@ mod tests {
     }
 
     #[test]
-    fn capture_mode_auto_prefers_wgc_as_new_default() {
+    fn capture_mode_auto_prefers_monitor_as_new_default() {
         use crate::config::{CaptureMode, EffectiveCaptureMode, GameConfig};
 
-        // Auto's new default on Win10 1903+ is WGC — it handles
-        // exclusive fullscreen D3D11/D3D12 without DLL injection and
-        // is the path that works for titles like CS2 where the
-        // game_capture hook is refused by anti-hook (Valve refuses
-        // even VAC-whitelisted OBS hooks, so the old GameHook route
-        // produced black frames).
+        // rc16.2 (2026-05-11): Auto's default flipped from WGC →
+        // Monitor (Display Capture / DXGI Desktop Duplication). WGC
+        // attaches to a window's swap chain and assumes a DXGI
+        // surface — OpenGL/Vulkan/GLFW windows (Minecraft Java,
+        // factorio, older indies) present through a path WGC's DXGI
+        // hook can't read, producing 5-minute pure-black MP4s
+        // (bingd, 2026-05-11). Display Capture goes through the
+        // composited monitor framebuffer and is renderer-agnostic.
+        //
+        // Lock + clear OYSTER_CAPTURE_MODE so this test isn't
+        // perturbed by a developer shell that has it set, and so we
+        // don't race with the env-var override test below.
+        let _guard = OYSTER_CAPTURE_MODE_ENV_LOCK
+            .lock()
+            .expect("OYSTER_CAPTURE_MODE_ENV_LOCK poisoned by an earlier test panic");
+        // SAFETY: env::remove_var is unsafe on edition 2024 because
+        // it touches process-global state. We hold the
+        // OYSTER_CAPTURE_MODE_ENV_LOCK for the lifetime of this test,
+        // and no production code in this crate reads
+        // OYSTER_CAPTURE_MODE outside `capture_mode_from_env`. Other
+        // tests that also touch this env var serialize through the
+        // same mutex, so no concurrent reader can observe a torn
+        // value here.
+        unsafe {
+            std::env::remove_var("OYSTER_CAPTURE_MODE");
+        }
+
         let cfg = GameConfig {
             use_window_capture: true,
             capture_mode: CaptureMode::Auto,
         };
-        // Previously-allowlisted exe under Auto now routes to WGC,
-        // because `KNOWN_HOOK_REQUIRED_GAMES` is empty by default
-        // (we only add entries when empirical testing proves WGC
-        // regressed for that specific game).
-        assert_eq!(cfg.effective_capture_mode("cs2"), EffectiveCaptureMode::Wgc);
-        // Any other non-test_game exe under Auto also routes to WGC.
+        // Previously-allowlisted exe under Auto now routes to
+        // Monitor, because `KNOWN_HOOK_REQUIRED_GAMES` is empty by
+        // default (we only add entries when empirical testing proves
+        // Monitor regressed for that specific game).
+        assert_eq!(
+            cfg.effective_capture_mode("cs2"),
+            EffectiveCaptureMode::Monitor
+        );
+        // Any other non-test_game exe under Auto also routes to
+        // Monitor.
         assert_eq!(
             cfg.effective_capture_mode("abyssus"),
-            EffectiveCaptureMode::Wgc
+            EffectiveCaptureMode::Monitor
         );
 
         // Explicit override always wins — Auto's new preference
@@ -2360,12 +2493,79 @@ mod tests {
         );
         let cfg = GameConfig {
             use_window_capture: false,
-            capture_mode: CaptureMode::Monitor,
+            capture_mode: CaptureMode::Wgc,
         };
+        assert_eq!(cfg.effective_capture_mode("cs2"), EffectiveCaptureMode::Wgc);
+    }
+
+    #[test]
+    fn oyster_capture_mode_env_overrides_auto() {
+        // rc16.2 — `OYSTER_CAPTURE_MODE` is the highest-priority
+        // override. It must beat Auto's resolution AND the
+        // hook-required allowlist (we ship empty so this test
+        // doesn't actually need an allowlisted exe, but it's
+        // documented contract). It must accept the three documented
+        // values and fall through on anything else.
+        use crate::config::{CaptureMode, EffectiveCaptureMode, GameConfig};
+
+        let _guard = OYSTER_CAPTURE_MODE_ENV_LOCK
+            .lock()
+            .expect("OYSTER_CAPTURE_MODE_ENV_LOCK poisoned by an earlier test panic");
+
+        let cfg = GameConfig {
+            use_window_capture: true,
+            capture_mode: CaptureMode::Auto,
+        };
+
+        // SAFETY: see the safety comment on remove_var in
+        // capture_mode_auto_prefers_monitor_as_new_default — we hold
+        // OYSTER_CAPTURE_MODE_ENV_LOCK for the duration of this test
+        // and other tests that touch the same env var serialize
+        // through the same mutex.
+        unsafe {
+            std::env::set_var("OYSTER_CAPTURE_MODE", "display");
+        }
         assert_eq!(
-            cfg.effective_capture_mode("cs2"),
+            cfg.effective_capture_mode("anything"),
             EffectiveCaptureMode::Monitor
         );
+        unsafe {
+            std::env::set_var("OYSTER_CAPTURE_MODE", "window");
+        }
+        assert_eq!(
+            cfg.effective_capture_mode("anything"),
+            EffectiveCaptureMode::Wgc
+        );
+        unsafe {
+            std::env::set_var("OYSTER_CAPTURE_MODE", "game");
+        }
+        assert_eq!(
+            cfg.effective_capture_mode("anything"),
+            EffectiveCaptureMode::GameHook
+        );
+        // "auto" and unrecognised values fall through to the
+        // normal resolution path, which under rc16.2 is Monitor.
+        unsafe {
+            std::env::set_var("OYSTER_CAPTURE_MODE", "auto");
+        }
+        assert_eq!(
+            cfg.effective_capture_mode("anything"),
+            EffectiveCaptureMode::Monitor
+        );
+        unsafe {
+            std::env::set_var("OYSTER_CAPTURE_MODE", "garbage");
+        }
+        assert_eq!(
+            cfg.effective_capture_mode("anything"),
+            EffectiveCaptureMode::Monitor
+        );
+
+        // Clean up so later tests in the same process aren't
+        // affected.
+        // SAFETY: see the safety comment above on remove_var.
+        unsafe {
+            std::env::remove_var("OYSTER_CAPTURE_MODE");
+        }
     }
 
     #[test]
@@ -2377,6 +2577,17 @@ mod tests {
         // would also work. Shipping the Auto flip without this pin
         // would break `.github/workflows/ci-e2e.yml` in the same PR.
         use crate::config::{CaptureMode, EffectiveCaptureMode, GameConfig};
+
+        let _guard = OYSTER_CAPTURE_MODE_ENV_LOCK
+            .lock()
+            .expect("OYSTER_CAPTURE_MODE_ENV_LOCK poisoned by an earlier test panic");
+        // SAFETY: see the env-var-mutating tests above — we hold
+        // OYSTER_CAPTURE_MODE_ENV_LOCK so concurrent tests can't
+        // race us, and no production code outside
+        // `capture_mode_from_env` reads this variable.
+        unsafe {
+            std::env::remove_var("OYSTER_CAPTURE_MODE");
+        }
 
         let cfg = GameConfig {
             use_window_capture: true,
@@ -2413,6 +2624,14 @@ mod tests {
         // get coverage automatically.
         use crate::config::{CaptureMode, EffectiveCaptureMode, GameConfig};
 
+        let _guard = OYSTER_CAPTURE_MODE_ENV_LOCK
+            .lock()
+            .expect("OYSTER_CAPTURE_MODE_ENV_LOCK poisoned by an earlier test panic");
+        // SAFETY: see the env-var-mutating tests above.
+        unsafe {
+            std::env::remove_var("OYSTER_CAPTURE_MODE");
+        }
+
         let cfg = GameConfig {
             use_window_capture: true,
             capture_mode: CaptureMode::Auto,
@@ -2433,7 +2652,23 @@ mod tests {
         // ignores the test_game carve-out. Useful when ops needs to
         // force WGC on a game that'd otherwise be pinned to the hook
         // fallback.
+        //
+        // NOTE: under rc16.2 `OYSTER_CAPTURE_MODE` is a higher-
+        // priority override than even an explicit `CaptureMode::Wgc`.
+        // That's intentional — the env var is the "support breakglass"
+        // — but it means we must lock + clear here so we observe the
+        // explicit-config branch and not whatever env var a parallel
+        // test set.
         use crate::config::{CaptureMode, EffectiveCaptureMode, GameConfig};
+
+        let _guard = OYSTER_CAPTURE_MODE_ENV_LOCK
+            .lock()
+            .expect("OYSTER_CAPTURE_MODE_ENV_LOCK poisoned by an earlier test panic");
+        // SAFETY: see the env-var-mutating tests above.
+        unsafe {
+            std::env::remove_var("OYSTER_CAPTURE_MODE");
+        }
+
         let cfg = GameConfig {
             use_window_capture: true,
             capture_mode: CaptureMode::Wgc,
@@ -2488,10 +2723,18 @@ mod tests {
         // A v2.5.8 user who explicitly flipped `use_window_capture = false`
         // in their persisted config expected game-capture. Under Auto,
         // this legacy preference must still route to GameHook even
-        // though the new Auto default is WGC — upgrades shouldn't
-        // silently change capture behaviour for power users who set
-        // that flag deliberately.
+        // though the new Auto default (post-rc16.2) is Monitor —
+        // upgrades shouldn't silently change capture behaviour for
+        // power users who set that flag deliberately.
         use crate::config::{CaptureMode, EffectiveCaptureMode, GameConfig};
+
+        let _guard = OYSTER_CAPTURE_MODE_ENV_LOCK
+            .lock()
+            .expect("OYSTER_CAPTURE_MODE_ENV_LOCK poisoned by an earlier test panic");
+        // SAFETY: see the env-var-mutating tests above.
+        unsafe {
+            std::env::remove_var("OYSTER_CAPTURE_MODE");
+        }
 
         let cfg = GameConfig {
             use_window_capture: false,
