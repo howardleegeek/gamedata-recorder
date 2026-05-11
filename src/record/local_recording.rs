@@ -603,6 +603,7 @@ impl LocalRecording {
     /// Creates a [`constants::filename::recording::INVALID`] file if validation fails.
     #[allow(clippy::too_many_arguments)]
     // TODO: refactor all of these arguments into a single struct
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn write_metadata_and_validate(
         recording_location: PathBuf,
         game_exe: String,
@@ -617,6 +618,9 @@ impl LocalRecording {
         recorder_extra: Option<serde_json::Value>,
         frame_count: Option<u64>,
         dropped_input_events: u64,
+        // rc16.4 — capture-thread diagnostics, surfaced so we can tell
+        // "hook never installed" from "hook installed but no events".
+        input_capture_diagnostics: Option<crate::output_types::InputCaptureDiagnostics>,
     ) -> Result<()> {
         // Resolve metadata path from recording location
         let metadata_path = recording_location.join(constants::filename::recording::METADATA);
@@ -712,6 +716,7 @@ impl LocalRecording {
             capture_resolution: Some(capture_resolution),
             wall_clock_start: Some(wall_clock_start),
             wall_clock_end: Some(wall_clock_end),
+            input_capture_diagnostics,
         };
 
         // Write metadata to disk using atomic + fsync'd write.
