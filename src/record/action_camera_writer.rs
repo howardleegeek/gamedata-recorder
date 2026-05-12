@@ -54,6 +54,7 @@
 //!   "timestamp_ns": <u64>,   // PRD: same instant as `timestamp`, in ns
 //!   "time": "MM-DD HH:MM:SS",  // PRD page 4: wall-clock (UTC) of this frame
 //!   "fps": <f64>,  // PRD page 4: per-session effective FPS
+//!   "route_type": <u8 in {1,2,3}>,  // PRD page 4: route classification
 //!   "input_modality": "keyboard_mouse" | "gamepad" | "mixed",
 //!   "mouseX": <f64 in [0, 1]> | null,
 //!   "mouseY": <f64 in [0, 1]> | null,
@@ -120,6 +121,16 @@ use crate::util::durable_write;
 /// second. Documented in one place so test assertions and the writer share
 /// a single source of truth (a regex test pins the surface shape).
 const PRD_TIME_FORMAT: &str = "%m-%d %H:%M:%S";
+
+/// PRD `route_type` — semantic not specified in PRD page 4 (the spec lists
+/// the value domain `{1, 2, 3}` but no decision logic). Default to `1` for
+/// every record so the field is always present and well-typed; revisit
+/// once the customer clarifies which game-state condition maps to each value.
+///
+/// TODO(prd-clarification): replace with a per-frame computation once the
+/// PRD specifies what game state determines the value (e.g. movement
+/// classification, scripted vs. exploratory, navmesh segment kind).
+const ROUTE_TYPE_DEFAULT: u8 = 1;
 
 /// Detected input modality for a recording session.
 ///
@@ -312,6 +323,12 @@ pub struct ActionCameraRecord {
     /// "always populated so the buyer plugin doesn't special-case nulls".
     /// Constant across the session (mirrors PRD's per-session FPS notion).
     pub fps: f64,
+    /// PRD page 4: route classification in `{1, 2, 3}`. The PRD does NOT
+    /// specify which game state determines the value, so every record
+    /// gets `ROUTE_TYPE_DEFAULT` (= 1) until the customer clarifies.
+    /// Centralized in one constant so future per-frame logic only needs
+    /// to change one site.
+    pub route_type: u8,
     pub input_modality: InputModality,
     #[serde(rename = "mouseX")]
     pub mouse_x: Option<f64>,
@@ -924,6 +941,9 @@ fn build_records(
             // PRD `fps`: per-session effective FPS, constant across every
             // record in the session. Resolved once before the loop.
             fps: session_fps,
+            // PRD `route_type`: semantic undefined in PRD; default to 1
+            // for every record. See `ROUTE_TYPE_DEFAULT` TODO.
+            route_type: ROUTE_TYPE_DEFAULT,
             input_modality: modality,
             mouse_x: if has_kbm {
                 Some(cursor_x / screen_w_f)
@@ -1370,6 +1390,7 @@ mod tests {
             timestamp_ns: 33_333_333,
             time: "01-01 00:00:00".to_string(),
             fps: 30.0,
+            route_type: 1,
             input_modality: InputModality::KeyboardMouse,
             mouse_x: Some(0.506),
             mouse_y: Some(0.507),
@@ -1409,6 +1430,7 @@ mod tests {
         assert!(obj.contains_key("timestamp_ns"));
         assert!(obj.contains_key("time"));
         assert!(obj.contains_key("fps"));
+        assert!(obj.contains_key("route_type"));
         assert!(obj.contains_key("input_modality"));
         assert!(obj.contains_key("mouseX"));
         assert!(obj.contains_key("mouseY"));
@@ -2257,6 +2279,7 @@ mod tests {
         let rec = &v.as_array().unwrap()[0];
         assert_eq!(rec["time"].as_str(), Some("05-11 15:30:45"));
         assert_eq!(rec["fps"].as_f64(), Some(29.97));
+        assert_eq!(rec["route_type"].as_u64(), Some(1));
     }
 
     #[test]
@@ -2299,6 +2322,8 @@ mod tests {
         assert_eq!(rec["time"].as_str(), Some("01-01 00:00:00"));
         // PRD `fps` falls back to 0.0 when metadata is missing.
         assert_eq!(rec["fps"].as_f64(), Some(0.0));
+        // PRD `route_type` stays at the default regardless of metadata.
+        assert_eq!(rec["route_type"].as_u64(), Some(1));
     }
 
     // ------------------------------------ PRD Audit K P0: `fps` field
@@ -2433,5 +2458,68 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&raw).expect("parse");
         let rec = &v.as_array().unwrap()[0];
         assert_eq!(rec["fps"].as_f64(), Some(59.94));
+    }
+
+    // ------------------------------- PRD Audit K P0: `route_type` field
+
+    #[test]
+    fn action_camera_record_has_prd_route_type_field() {
+        // PRD page 4 requires `route_type` ∈ {1,2,3} on every record.
+        // It must serialize as a top-level integer key. Verifies the
+        // buyer's plugin won't fail a missing-key check.
+        let inputs = vec![input_row(1000.0, "START", serde_json::json!([]))];
+        let frames = vec![frame_row(0, 0)];
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
+        let v = serde_json::to_value(&recs[0]).expect("serialize");
+        let obj = v.as_object().expect("record is object");
+        assert!(
+            obj.contains_key("route_type"),
+            "missing PRD `route_type` key: {obj:?}"
+        );
+        // Must be an integer in the PRD-specified domain {1,2,3}.
+        let val = obj["route_type"]
+            .as_u64()
+            .expect("route_type must serialize as integer");
+        assert!(
+            (1..=3).contains(&val),
+            "route_type {val} not in PRD-allowed {{1,2,3}}"
+        );
+    }
+
+    #[test]
+    fn route_type_defaults_to_one_until_prd_clarification() {
+        // PRD page 4 doesn't specify the game-state mapping for
+        // route_type ∈ {1,2,3}, so the writer defaults to 1 for every
+        // record. This test pins that default so a future change that
+        // varies route_type per-frame surfaces the PRD-clarification TODO.
+        let inputs = vec![input_row(1000.0, "START", serde_json::json!([]))];
+        let frames = vec![frame_row(0, 0), frame_row(1, 33_333_333)];
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
+        assert_eq!(recs[0].route_type, ROUTE_TYPE_DEFAULT);
+        assert_eq!(recs[1].route_type, ROUTE_TYPE_DEFAULT);
+        assert_eq!(ROUTE_TYPE_DEFAULT, 1);
+    }
+
+    #[test]
+    fn route_type_is_session_constant_regardless_of_inputs() {
+        // Defending the centralized constant: changing modality, frame
+        // rate, or game_state must NOT cause route_type to vary. The
+        // writer emits the default uniformly; any future per-frame
+        // variation will fail this assertion and force a deliberate
+        // update to the test + ROUTE_TYPE_DEFAULT.
+        let inputs = vec![
+            input_row(1000.000, "START", serde_json::json!([])),
+            input_row(1000.001, "KEYBOARD", serde_json::json!([87, true])),
+            input_row(1000.002, "GAMEPAD_BUTTON", serde_json::json!([1, true])),
+        ];
+        let frames = vec![
+            frame_row(0, 0),
+            frame_row(1, 33_333_333),
+            frame_row(2, 66_666_666),
+        ];
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), 30.0);
+        for r in &recs {
+            assert_eq!(r.route_type, 1);
+        }
     }
 }
