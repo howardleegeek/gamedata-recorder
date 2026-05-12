@@ -13,6 +13,14 @@ use std::{
 /// DXGI adapter enumeration. Stable across every NVIDIA GPU ever shipped.
 const NVIDIA_PCI_VENDOR_ID: u32 = 0x10DE;
 
+/// PCI vendor ID for Advanced Micro Devices — used to identify AMD GPUs
+/// (both discrete Radeon and integrated 780M/890M class iGPUs).
+const AMD_PCI_VENDOR_ID: u32 = 0x1002;
+
+/// PCI vendor ID for Intel Corporation — used to identify Intel integrated
+/// graphics (UHD/Iris/Arc) for QuickSync hardware encoding.
+const INTEL_PCI_VENDOR_ID: u32 = 0x8086;
+
 /// Quick probe: does any DX12-capable GPU report NVIDIA as its vendor?
 ///
 /// v2.5.5: rewritten to use direct DXGI adapter enumeration via `wgpu`.
@@ -40,6 +48,88 @@ fn detect_nvidia_gpu() -> Result<bool> {
     {
         Ok(false)
     }
+}
+
+/// Quick probe: does any DX12-capable GPU report AMD as its vendor?
+///
+/// Mirrors `detect_nvidia_gpu` — wgpu/DXGI enumeration is the only
+/// dependency-free probe that works on every modern Windows SKU
+/// (no wmic / no DXDIAG shell-out). Catches discrete Radeon as well as
+/// the integrated 780M/890M class iGPUs found in Ryzen 7040/8040 mobile
+/// chips, where AMF gives the same "essentially free" hardware encoding
+/// benefit that NVENC gives NVIDIA users — and where X264 software
+/// encoding chews the entire CPU budget down to <1 FPS effective.
+fn detect_amd_gpu() -> Result<bool> {
+    #[cfg(target_os = "windows")]
+    {
+        use egui_wgpu::wgpu;
+
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let has_amd = instance
+            .enumerate_adapters(wgpu::Backends::DX12)
+            .into_iter()
+            .any(|adapter| adapter.get_info().vendor == AMD_PCI_VENDOR_ID);
+        Ok(has_amd)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(false)
+    }
+}
+
+/// Quick probe: does any DX12-capable GPU report Intel as its vendor?
+///
+/// Mirrors `detect_nvidia_gpu` — wgpu/DXGI enumeration. Intel iGPUs
+/// (UHD 6xx / Iris Xe / Arc) ship QuickSync, which is the same
+/// fixed-function hardware encoder benefit as NVENC/AMF: near-zero CPU
+/// cost, leaves the game's frame budget alone. We pick this over X264
+/// when no NVIDIA / AMD device is present.
+fn detect_intel_gpu() -> Result<bool> {
+    #[cfg(target_os = "windows")]
+    {
+        use egui_wgpu::wgpu;
+
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let has_intel = instance
+            .enumerate_adapters(wgpu::Backends::DX12)
+            .into_iter()
+            .any(|adapter| adapter.get_info().vendor == INTEL_PCI_VENDOR_ID);
+        Ok(has_intel)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(false)
+    }
+}
+
+/// Pick the best available hardware encoder for the current machine.
+///
+/// Priority order: NVIDIA NVENC > AMD AMF > Intel QSV > X264 (software).
+/// All three hardware paths give "essentially free" encoding relative to
+/// software X264, which has been observed running at <1 FPS effective on
+/// AMD 780M-class iGPUs (PRD-100 requires recording NOT to impact the
+/// game's frame budget). Falls back to X264 when no hardware encoder is
+/// present (e.g. running on a fresh-install Windows VM with WARP only).
+///
+/// We log the chosen encoder once at startup via `tracing::info!` so the
+/// QA/support team can confirm hardware acceleration is in fact picked
+/// up — silent-X264-fallback was the original v2.5.4 bug, this is its
+/// permanent fix at the `Default` impl level.
+fn detect_best_encoder() -> VideoEncoderType {
+    if detect_nvidia_gpu().unwrap_or(false) {
+        tracing::info!("GPU probe: NVIDIA detected — defaulting encoder to NVENC");
+        return VideoEncoderType::NvEnc;
+    }
+    if detect_amd_gpu().unwrap_or(false) {
+        tracing::info!("GPU probe: AMD detected — defaulting encoder to AMF");
+        return VideoEncoderType::Amf;
+    }
+    if detect_intel_gpu().unwrap_or(false) {
+        tracing::info!("GPU probe: Intel detected — defaulting encoder to QuickSync");
+        return VideoEncoderType::Qsv;
+    }
+    tracing::info!("GPU probe: no hardware encoder detected — falling back to X264 (software)");
+    VideoEncoderType::X264
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1319,8 +1409,16 @@ pub struct EncoderSettings {
 }
 impl Default for EncoderSettings {
     fn default() -> Self {
+        // AUDIT-N-2: pick the best hardware encoder available on this
+        // machine instead of unconditionally falling back to X264 software.
+        // X264 chews the entire CPU budget down to <1 FPS effective on
+        // AMD 780M-class iGPUs, which violates PRD-100's "must not impact
+        // game performance" requirement. Existing user configs that
+        // explicitly set `encoder` deserialize through serde and bypass
+        // this default — only fresh installs and missing fields are
+        // affected.
         Self {
-            encoder: VideoEncoderType::X264,
+            encoder: detect_best_encoder(),
             x264: Default::default(),
             nvenc: Default::default(),
             qsv: Default::default(),
