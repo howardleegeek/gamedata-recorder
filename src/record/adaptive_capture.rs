@@ -794,6 +794,147 @@ pub fn decide(probe: ProbeResult, current: EffectiveCaptureMode) -> TierDecision
     }
 }
 
+/// PRD-100 Audit I-2 — fullscreen-aware variant of `decide()`.
+///
+/// **The bug** this fixes: NVIDIA RTX 4060 + an F11 exclusive-fullscreen
+/// game + Monitor (DXGI Desktop Duplication) tier produces a pure-black
+/// MP4. DXGI Desktop Duplication cannot read the dedicated swapchain
+/// that exclusive-fullscreen games own — only the windowed compositor
+/// surface, which the GPU never paints into when the app has stolen the
+/// monitor. The existing `decide()` would advance Monitor → Wgc → only
+/// then to GameHook, costing two extra probe cycles (~10s each) before
+/// landing on the only tier that can actually inject into an
+/// exclusive-fullscreen game.
+///
+/// **The shortcut**: when the caller knows the foreground window is
+/// running exclusive-fullscreen *and* the Monitor probe just classified
+/// as Black, we already have enough information to skip Wgc entirely.
+/// Wgc on an exclusive-fullscreen game has the exact same problem
+/// Monitor does — both read the desktop compositor, neither sees the
+/// dedicated swapchain. Going directly to GameHook saves one full
+/// probe-cycle and one bad-recording session per affected rig.
+///
+/// The hint is **best-effort** — `detect_fullscreen_exclusive()` errs on
+/// the side of false-positives over false-negatives (a false positive
+/// just steers us toward GameHook one tier early, which is harmless;
+/// a false negative re-creates the original bug). When the hint is
+/// `false`, this function behaves identically to `decide()`, so
+/// non-fullscreen sessions are unaffected.
+pub fn decide_with_fullscreen_hint(
+    probe: ProbeResult,
+    current: EffectiveCaptureMode,
+    fullscreen_exclusive: bool,
+) -> TierDecision {
+    // The shortcut only kicks in when *all three* conditions hold:
+    //   1. Probe says the recording is Black (the diagnostic signal).
+    //   2. We're currently on Monitor (the failing tier for fullscreen).
+    //   3. We have positive evidence of exclusive-fullscreen.
+    // Anything else falls through to the unchanged `decide()` logic so
+    // we don't regress any pre-existing flow.
+    if fullscreen_exclusive
+        && matches!(probe, ProbeResult::Black)
+        && matches!(current, EffectiveCaptureMode::Monitor)
+    {
+        tracing::warn!(
+            "Adaptive probe: Monitor tier produced Black frames AND foreground window is \
+             exclusive-fullscreen — skipping Wgc tier and advancing directly to GameHook \
+             (Audit I-2). Wgc reads the same compositor surface Monitor does, so it would \
+             also produce Black on this rig."
+        );
+        return TierDecision::Advance(EffectiveCaptureMode::GameHook);
+    }
+    decide(probe, current)
+}
+
+// ---------------------------------------------------------------------------
+// Fullscreen-exclusive detection (PRD-100 Audit I-2)
+// ---------------------------------------------------------------------------
+
+/// Best-effort detection of whether `hwnd_raw` (the foreground game's
+/// window handle, cast through `isize` so this function compiles on
+/// non-Windows CI without a `windows::Win32::Foundation::HWND` import)
+/// is running in exclusive-fullscreen mode.
+///
+/// **Why isize and not HWND?** `HWND` is a Windows-only type from the
+/// `windows` crate; making the helper portable lets the unit tests in
+/// this file build on macOS / Linux CI without target-gating every call
+/// site. On 64-bit Windows `HWND(*mut c_void)` is bitwise an `isize`,
+/// so the caller does `hwnd.0 as isize` and we restore it with
+/// `HWND(raw as *mut _)`.
+///
+/// **The signal we use**: classic Win32 fullscreen-exclusive games
+/// (D3D9, D3D11 with `Windowed=FALSE` swapchains, OpenGL via wglSwapBuffers
+/// after a `ChangeDisplaySettings` mode-switch) all create a borderless
+/// `WS_POPUP` window with no `WS_CAPTION`. This is the same heuristic
+/// the original WGC implementation in libobs uses to detect "is this
+/// even a regular window?" — it's not a perfect proxy for "owns the
+/// dedicated swapchain", but in practice it catches every real
+/// exclusive-fullscreen game we've tested against.
+///
+/// We deliberately accept the false-positive case (a borderless-windowed
+/// game that just *looks* like fullscreen) because the consequence is
+/// purely "skip Wgc and go to GameHook one tier earlier" — GameHook
+/// works on borderless-windowed too. The false-negative case (a real
+/// exclusive-fullscreen that has a caption for some reason) just keeps
+/// the pre-Audit-I-2 behaviour.
+///
+/// Returns `false` on non-Windows targets (no exclusive-fullscreen
+/// model exists outside Win32) and on any Win32 API failure (read:
+/// "we don't know, behave like before").
+pub fn detect_fullscreen_exclusive_raw(hwnd_raw: isize) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        // Null HWND => no window to probe => not fullscreen.
+        if hwnd_raw == 0 {
+            return false;
+        }
+
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GWL_STYLE, GetWindowLongPtrW, WS_CAPTION, WS_POPUP,
+        };
+
+        let hwnd = HWND(hwnd_raw as *mut _);
+
+        // Safety: `GetWindowLongPtrW` is a pure read of a window
+        // property and is safe to call from any thread, on any HWND
+        // value (it returns 0 on invalid handle which we treat as
+        // "unknown"). We never mutate the style — `SetWindowLongPtrW`
+        // is not called from this path.
+        let style_raw = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+        if style_raw == 0 {
+            // `GetWindowLongPtrW` returns 0 either when the style is
+            // genuinely zero (impossible for a real window) or when
+            // the call failed. Either way we have no signal, so
+            // default to false (don't trigger the shortcut).
+            return false;
+        }
+
+        let style = style_raw as u32;
+        let has_popup = (style & WS_POPUP.0) != 0;
+        let has_caption = (style & WS_CAPTION.0) != 0;
+
+        // The classic exclusive-fullscreen footprint: `WS_POPUP` set,
+        // `WS_CAPTION` cleared. Borderless-windowed games hit the
+        // same signature, which is fine (see the false-positive
+        // discussion in the docstring above).
+        has_popup && !has_caption
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = hwnd_raw;
+        false
+    }
+}
+
+/// Windows-typed convenience wrapper around `detect_fullscreen_exclusive_raw`.
+/// Use this from any code that already has a `HWND` in scope; it just
+/// forwards the raw pointer value to the portable helper.
+#[cfg(target_os = "windows")]
+pub fn detect_fullscreen_exclusive(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    detect_fullscreen_exclusive_raw(hwnd.0 as isize)
+}
+
 // ---------------------------------------------------------------------------
 // Background probe task — spawned from `Recording::start`
 // ---------------------------------------------------------------------------
@@ -818,11 +959,42 @@ pub fn decide(probe: ProbeResult, current: EffectiveCaptureMode) -> TierDecision
 /// task so the cache update is paired with the actual tier the user
 /// experienced, not whatever the config happens to say at task end.
 pub fn spawn_probe_task(video_path: PathBuf, current_tier: EffectiveCaptureMode) {
+    // Old API: no fullscreen hint available. Forward to the hwnd-aware
+    // variant with a sentinel `0` so the Audit I-2 shortcut stays
+    // dormant (the hint helper short-circuits on null hwnd). This
+    // preserves the v2.6.0 wire contract for callers in `recording.rs`
+    // that don't yet pass the game HWND through.
+    spawn_probe_task_with_hwnd(video_path, current_tier, 0);
+}
+
+/// PRD-100 Audit I-2 variant of `spawn_probe_task`. Additional `hwnd_raw`
+/// argument is the foreground game's window handle cast to `isize`
+/// (i.e. `hwnd.0 as isize` on Windows). When the probe lands on Black
+/// AND `detect_fullscreen_exclusive_raw(hwnd_raw)` returns true AND the
+/// active tier is Monitor, the cache fast-forwards to GameHook instead
+/// of Wgc, saving one bad-recording session per affected rig.
+///
+/// Callers in `recording.rs` may migrate to this variant when ready;
+/// the legacy `spawn_probe_task` forwards here with `hwnd_raw = 0` so no
+/// behaviour changes for callers that haven't been updated yet.
+pub fn spawn_probe_task_with_hwnd(
+    video_path: PathBuf,
+    current_tier: EffectiveCaptureMode,
+    hwnd_raw: isize,
+) {
     // Don't even spawn if the env var is off — `is_enabled` is cheap
     // but the caller may not have checked yet.
     if !is_enabled() {
         return;
     }
+
+    // Sample the fullscreen state *now*, before spawning the detached
+    // task. The window's style is essentially static for the lifetime
+    // of a recording (games don't flip in and out of exclusive mode
+    // mid-session), and reading it on the calling thread avoids
+    // forcing the detached task to know how to safely cross the HWND
+    // pointer over a tokio task boundary.
+    let fullscreen_exclusive = detect_fullscreen_exclusive_raw(hwnd_raw);
 
     tokio::spawn(async move {
         tokio::time::sleep(PROBE_DELAY).await;
@@ -834,11 +1006,12 @@ pub fn spawn_probe_task(video_path: PathBuf, current_tier: EffectiveCaptureMode)
             rig = %fingerprint.as_str(),
             tier = ?current_tier,
             probe = ?result,
+            fullscreen_exclusive,
             path = %video_path.display(),
             "Adaptive probe: classification complete"
         );
 
-        match decide(result, current_tier) {
+        match decide_with_fullscreen_hint(result, current_tier, fullscreen_exclusive) {
             TierDecision::KeepAndCache => {
                 let mut cache = CaptureModeCache::load();
                 cache.record(&fingerprint, current_tier);
@@ -1132,5 +1305,105 @@ mod tests {
             decide(ProbeResult::Indeterminate, EffectiveCaptureMode::Monitor),
             TierDecision::KeepWithoutCaching
         ));
+    }
+
+    // ---------- PRD-100 Audit I-2 — fullscreen-aware decision ----------
+
+    #[test]
+    fn fullscreen_hint_jumps_monitor_black_to_gamehook() {
+        // The headline case: NVIDIA + exclusive-fullscreen game +
+        // Monitor tier produced Black. We must skip Wgc and go
+        // straight to GameHook.
+        match decide_with_fullscreen_hint(
+            ProbeResult::Black,
+            EffectiveCaptureMode::Monitor,
+            true,
+        ) {
+            TierDecision::Advance(next) => assert_eq!(next, EffectiveCaptureMode::GameHook),
+            TierDecision::KeepAndCache => panic!("expected Advance(GameHook), got KeepAndCache"),
+            TierDecision::Exhausted => panic!("expected Advance(GameHook), got Exhausted"),
+            TierDecision::KeepWithoutCaching => {
+                panic!("expected Advance(GameHook), got KeepWithoutCaching")
+            }
+        }
+    }
+
+    #[test]
+    fn fullscreen_hint_no_shortcut_when_hint_false() {
+        // Same probe + tier, but no fullscreen signal. Must behave
+        // identically to `decide()` — i.e. advance to Wgc, not GameHook.
+        match decide_with_fullscreen_hint(
+            ProbeResult::Black,
+            EffectiveCaptureMode::Monitor,
+            false,
+        ) {
+            TierDecision::Advance(next) => assert_eq!(next, EffectiveCaptureMode::Wgc),
+            _ => panic!("expected Advance(Wgc) when fullscreen hint is false"),
+        }
+    }
+
+    #[test]
+    fn fullscreen_hint_no_shortcut_on_static() {
+        // The shortcut is gated on `Black` specifically — `Static`
+        // (mean luma fine, no motion) means the capture path works
+        // but the screen is frozen. That's not the
+        // fullscreen-vs-DXGI problem the shortcut diagnoses, so we
+        // must follow the regular advancement path.
+        match decide_with_fullscreen_hint(
+            ProbeResult::Static,
+            EffectiveCaptureMode::Monitor,
+            true,
+        ) {
+            TierDecision::Advance(next) => assert_eq!(next, EffectiveCaptureMode::Wgc),
+            _ => panic!("expected Advance(Wgc) on Static even with fullscreen hint"),
+        }
+    }
+
+    #[test]
+    fn fullscreen_hint_no_shortcut_when_tier_already_wgc() {
+        // If we somehow landed on Wgc as the first tier (cache or
+        // env override) and got Black, the shortcut does NOT
+        // apply — Wgc's failure mode is unrelated to the Monitor
+        // exclusive-fullscreen failure and we just advance one tier
+        // (to GameHook, which is the same as decide() would say).
+        match decide_with_fullscreen_hint(ProbeResult::Black, EffectiveCaptureMode::Wgc, true) {
+            TierDecision::Advance(next) => assert_eq!(next, EffectiveCaptureMode::GameHook),
+            _ => panic!("expected Advance(GameHook) from Wgc"),
+        }
+    }
+
+    #[test]
+    fn fullscreen_hint_keeps_healthy() {
+        // A healthy probe is a healthy probe regardless of any hint.
+        assert!(matches!(
+            decide_with_fullscreen_hint(
+                ProbeResult::Healthy,
+                EffectiveCaptureMode::Monitor,
+                true,
+            ),
+            TierDecision::KeepAndCache
+        ));
+    }
+
+    #[test]
+    fn fullscreen_hint_keeps_indeterminate() {
+        // Indeterminate must not flip-flop the tier — we have no
+        // signal and should leave the cache untouched.
+        assert!(matches!(
+            decide_with_fullscreen_hint(
+                ProbeResult::Indeterminate,
+                EffectiveCaptureMode::Monitor,
+                true,
+            ),
+            TierDecision::KeepWithoutCaching
+        ));
+    }
+
+    #[test]
+    fn fullscreen_detection_null_hwnd_is_not_fullscreen() {
+        // 0 is the sentinel value `spawn_probe_task` forwards when
+        // no HWND is known. Must read as "not fullscreen" so the
+        // shortcut stays dormant in that case.
+        assert!(!detect_fullscreen_exclusive_raw(0));
     }
 }
