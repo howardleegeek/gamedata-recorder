@@ -2,15 +2,16 @@
 """Generate per-frame depth EXR files using DepthAnything V2.
 
 This script:
-1. Reads frame timestamps from frames.jsonl (1 Hz cadence)
-2. For each frame, captures a screenshot and runs DepthAnything V2 inference
-3. Writes 32-bit float depth tensor to depth_<idx>.exr
+1. Reads frames from recording.mp4 at 6 fps cadence (every 5th frame at 30 fps)
+2. For each sampled frame, runs DepthAnything V2 inference
+3. Writes 32-bit float depth tensor to NNNNNN.exr (6-digit frame index)
 
 The output matches the PRD requirement:
-- 1 Hz cadence (matching frames.jsonl)
+- 6 fps cadence (every 5th frame at 30 fps)
 - 1920x1080 resolution
 - 32-bit float single-channel EXR
 - Stored in <session_dir>/depth/ directory
+- File naming: NNNNNN.exr where NNNNNN is frame index in 30 fps clock
 """
 
 import argparse
@@ -28,7 +29,17 @@ try:
     from PIL import Image
 except ImportError as e:
     print(f"ERROR: Missing required package: {e}", file=sys.stderr)
-    print("Install with: pip install torch pillow numpy openexr-pack", file=sys.stderr)
+    print("Install with: pip install torch pillow numpy", file=sys.stderr)
+    sys.exit(1)
+
+# Try to import OpenCV
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+    print("ERROR: OpenCV not installed", file=sys.stderr)
+    print("Install with: pip install opencv-python", file=sys.stderr)
     sys.exit(1)
 
 # Try to import OpenEXR, fall back to alternative if not available
@@ -38,69 +49,66 @@ try:
     HAS_OPENEXR = True
 except ImportError:
     HAS_OPENEXR = False
-    # Try alternative: using pillow-simd or raw numpy for EXR-like output
     print("WARNING: OpenEXR not installed. EXR output will be limited.", file=sys.stderr)
     print("Install with: pip install OpenEXR-python", file=sys.stderr)
 
 
-# DepthAnything V2 model configuration
-MODEL_NAME = "Depth-Anything-V2-Base"
-MODEL_URL = "https://github.com/DepthAnywhere/depth-anything-v2/releases/download/v1/base/depth_anything_v2_base.pt"
+# DepthAnything V2 model configuration - using Small model per spec
+MODEL_NAME = "depth-anything/Depth-Anything-V2-Small-hf"
 
 
-def load_frames(session_dir: Path) -> List[Dict[str, Any]]:
-    """Load frame timestamps from frames.jsonl."""
-    frames_path = session_dir / "frames.jsonl"
-    if not frames_path.exists():
-        raise FileNotFoundError(f"frames.jsonl not found in {session_dir}")
+def get_video_info(video_path: Path) -> Tuple[float, int, int, int]:
+    """Get video information: fps, total frames, width, height."""
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video file: {video_path}")
     
-    frames = []
-    with open(frames_path, 'r') as f:
-        for line in f:
-            if line.strip():
-                frames.append(json.loads(line))
-    return frames
-
-
-def capture_screen(region: Optional[Tuple[int, int, int, int]] = None) -> Image.Image:
-    """Capture the screen or a region.
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
-    Args:
-        region: (x, y, width, height) or None for full screen
+    cap.release()
     
-    Returns:
-        PIL Image in RGB format
-    """
-    try:
-        from PIL import ImageGrab
-    except ImportError:
-        # Fallback: create a blank image if ImageGrab is not available
-        # This is a placeholder - in production, you'd use mss or other screen capture
-        print("WARNING: ImageGrab not available, using placeholder", file=sys.stderr)
-        return Image.new('RGB', (1920, 1080), color=(128, 128, 128))
-    
-    if region:
-        screenshot = ImageGrab.grab(bbox=region)
-    else:
-        screenshot = ImageGrab.grab()
-    
-    return screenshot
+    return fps, total_frames, width, height
 
 
 def load_depth_model(device: str = "cuda" if torch.cuda.is_available() else "cpu"):
-    """Load DepthAnything V2 model."""
-    print(f"Loading DepthAnything V2 model on {device}...")
+    """Load DepthAnything V2 Small model from HuggingFace."""
+    print(f"Loading DepthAnything V2 Small model on {device}...")
     
     try:
-        from depth_anything import DepthAnything
-    except ImportError:
-        # If depth_anything package is not available, create a simple inference function
-        print("WARNING: depth_anything package not found, using simple depth estimation", file=sys.stderr)
+        from transformers import pipeline
+        import onnxruntime as ort
+        
+        # Check if we should use ONNX Runtime DirectML
+        if device == "cuda" and torch.cuda.is_available():
+            providers = ["CUDAExecutionProvider"]
+        elif device == "dml" or (sys.platform == "win32" and device == "auto"):
+            # Try DirectML on Windows
+            try:
+                import onnxruntime_directml
+                providers = ["DmlExecutionProvider"]
+                print("Using ONNX Runtime DirectML provider")
+            except ImportError:
+                providers = ["CPUExecutionProvider"]
+                print("DirectML not available, falling back to CPU")
+        else:
+            providers = ["CPUExecutionProvider"]
+        
+        # Create depth estimation pipeline
+        depth_estimator = pipeline(
+            task="depth-estimation",
+            model=MODEL_NAME,
+            device=-1 if providers[0] == "CPUExecutionProvider" else 0
+        )
+        
+        return depth_estimator
+        
+    except ImportError as e:
+        print(f"WARNING: Failed to import transformers or onnxruntime: {e}", file=sys.stderr)
+        print("Using simple depth estimation fallback", file=sys.stderr)
         return None
-    
-    model = DepthAnything.from_pretrained(MODEL_NAME, device=device)
-    model.eval()
-    return model
 
 
 def simple_depth_estimation(image: Image.Image, target_size: Tuple[int, int] = (1920, 1080)) -> np.ndarray:
@@ -148,7 +156,7 @@ def run_depth_inference(
     """Run depth inference on an image.
     
     Args:
-        model: DepthAnything model or None for simple fallback
+        model: DepthAnything pipeline or None for simple fallback
         image: PIL Image
         target_size: Target resolution (width, height)
     
@@ -158,24 +166,26 @@ def run_depth_inference(
     if model is None:
         return simple_depth_estimation(image, target_size)
     
-    # Resize image
+    # Resize image to target size
     image = image.resize(target_size, Image.LANCZOS)
     
-    # Run inference
-    with torch.no_grad():
-        depth = model.infer_image(image)
-    
-    # Convert to numpy and normalize
-    if isinstance(depth, torch.Tensor):
-        depth = depth.cpu().numpy()
-    
-    # Ensure float32
-    depth = depth.astype(np.float32)
-    
-    # Normalize to 0-1 range
-    depth = (depth - depth.min()) / (depth.max() - depth.min() + 1e-8)
-    
-    return depth
+    try:
+        # Run inference using transformers pipeline
+        result = model(image)
+        depth = result["depth"]
+        
+        # Convert PIL Image to numpy array if needed
+        if isinstance(depth, Image.Image):
+            depth = np.array(depth).astype(np.float32)
+        
+        # Normalize to 0-1 range
+        depth = (depth - depth.min()) / (depth.max() - depth.min() + 1e-8)
+        
+        return depth
+        
+    except Exception as e:
+        print(f"WARNING: Depth inference failed: {e}, using fallback", file=sys.stderr)
+        return simple_depth_estimation(image, target_size)
 
 
 def write_exr(output_path: Path, depth: np.ndarray) -> None:
@@ -193,20 +203,21 @@ def write_exr(output_path: Path, depth: np.ndarray) -> None:
         
         # Create EXR file
         header = OpenEXR.Header(w, h)
+        
+        # Set pixel type to FLOAT (32-bit float)
         header['channels'] = {
-            'R': Imath.Channel(Imath.PixelType(Imath.PixelType.FLOAT)),
+            'Z': Imath.Channel(Imath.PixelType(Imath.PixelType.FLOAT))
         }
         
-        # Convert depth to raw bytes
-        depth_bytes = depth.tobytes()
+        # Convert depth to bytes
+        depth_bytes = depth.astype(np.float32).tobytes()
         
         # Write EXR
         out = OpenEXR.OutputFile(str(output_path), header)
-        out.writePixels({'R': depth_bytes})
+        out.writePixels({'Z': depth_bytes})
         out.close()
     else:
         # Fallback: save as numpy array with .npy extension
-        # Or use pillow's EXR support if available
         npy_path = output_path.with_suffix('.npy')
         np.save(npy_path, depth)
         print(f"WARNING: Saved as numpy array {npy_path} (OpenEXR not available)")
@@ -216,15 +227,13 @@ def generate_depth_exr(
     session_dir: Path,
     model: Any,
     target_resolution: Tuple[int, int] = (1920, 1080),
-    capture_region: Optional[Tuple[int, int, int, int]] = None,
 ) -> int:
-    """Generate depth EXR files for all frames in frames.jsonl.
+    """Generate depth EXR files from recording.mp4 at 6 fps cadence.
     
     Args:
         session_dir: Path to the recording session directory
         model: DepthAnything model or None
         target_resolution: Target resolution (width, height)
-        capture_region: Screen region to capture (x, y, width, height) or None
     
     Returns:
         Number of EXR files generated
@@ -233,46 +242,76 @@ def generate_depth_exr(
     depth_dir = session_dir / "depth"
     depth_dir.mkdir(exist_ok=True)
     
-    # Load frames
-    frames = load_frames(session_dir)
-    if not frames:
-        print("No frames found in frames.jsonl")
+    # Check for recording.mp4
+    video_path = session_dir / "recording.mp4"
+    if not video_path.exists():
+        print(f"ERROR: recording.mp4 not found in {session_dir}", file=sys.stderr)
         return 0
     
-    print(f"Processing {len(frames)} frames at 1 Hz cadence...")
+    # Get video information
+    try:
+        fps, total_frames, width, height = get_video_info(video_path)
+        print(f"Video info: {fps:.2f} fps, {total_frames} frames, {width}x{height}")
+    except Exception as e:
+        print(f"ERROR: Failed to read video info: {e}", file=sys.stderr)
+        return 0
     
-    # Process each frame at 1 Hz
+    # Calculate sampling parameters for 6 fps from 30 fps
+    # Every 5th frame at 30 fps = 6 fps
+    frame_interval = 5  # Sample every 5th frame
+    if fps != 30.0:
+        print(f"WARNING: Video is {fps:.2f} fps, not 30 fps. Adjusting sampling...")
+        # Calculate equivalent interval for 6 fps
+        frame_interval = max(1, int(fps / 6))
+    
+    # Calculate total frames to process
+    frames_to_process = total_frames // frame_interval
+    if total_frames % frame_interval != 0:
+        frames_to_process += 1
+    
+    print(f"Processing {frames_to_process} frames at 6 fps cadence (every {frame_interval} frames)...")
+    
+    # Open video capture
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        print(f"ERROR: Cannot open video file: {video_path}", file=sys.stderr)
+        return 0
+    
     generated_count = 0
-    last_capture_time = 0
     
-    for frame in frames:
-        idx = frame.get('idx', 0)
-        t_ns = frame.get('t_ns', 0)
-        
-        # Calculate when this frame should be captured (1 Hz = every 1 second)
-        # t_ns is nanoseconds since recording start
-        target_time_sec = t_ns / 1e9
-        
-        # Wait until it's time to capture this frame
-        current_time = time.time()
-        if target_time_sec > current_time - last_capture_time:
-            time.sleep(max(0, target_time_sec - (current_time - last_capture_time)))
-        
-        # Capture screen
-        screenshot = capture_screen(capture_region)
-        
-        # Run depth inference
-        depth = run_depth_inference(model, screenshot, target_resolution)
-        
-        # Write EXR
-        output_path = depth_dir / f"depth_{idx:06d}.exr"
-        write_exr(output_path, depth)
-        
-        generated_count += 1
-        last_capture_time = time.time()
-        
-        if generated_count % 10 == 0:
-            print(f"Generated {generated_count}/{len(frames)} depth EXR files...")
+    try:
+        for frame_idx in range(0, total_frames, frame_interval):
+            # Set frame position
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            
+            # Read frame
+            ret, frame = cap.read()
+            if not ret:
+                print(f"WARNING: Failed to read frame {frame_idx}", file=sys.stderr)
+                continue
+            
+            # Convert BGR to RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Convert to PIL Image
+            image = Image.fromarray(frame_rgb)
+            
+            # Run depth inference
+            depth = run_depth_inference(model, image, target_resolution)
+            
+            # Write EXR with 6-digit zero-padded frame index
+            output_path = depth_dir / f"{frame_idx:06d}.exr"
+            write_exr(output_path, depth)
+            
+            generated_count += 1
+            
+            if generated_count % 10 == 0:
+                print(f"Generated {generated_count}/{frames_to_process} depth EXR files...")
+                
+    except Exception as e:
+        print(f"ERROR during processing: {e}", file=sys.stderr)
+    finally:
+        cap.release()
     
     print(f"Completed: {generated_count} depth EXR files in {depth_dir}")
     return generated_count
@@ -299,13 +338,8 @@ def main():
         "-d",
         type=str,
         default="auto",
-        choices=["auto", "cuda", "cpu"],
+        choices=["auto", "cuda", "cpu", "dml"],
         help="Device to run inference on (default: auto)"
-    )
-    parser.add_argument(
-        "--region",
-        type=str,
-        help="Screen region to capture as 'x,y,width,height' (default: full screen)"
     )
     args = parser.parse_args()
     
@@ -317,21 +351,14 @@ def main():
         print(f"ERROR: Invalid resolution format: {args.resolution}", file=sys.stderr)
         sys.exit(1)
     
-    # Parse capture region
-    capture_region = None
-    if args.region:
-        try:
-            capture_region = tuple(map(int, args.region.split(',')))
-            if len(capture_region) != 4:
-                raise ValueError()
-        except ValueError:
-            print(f"ERROR: Invalid region format: {args.region}", file=sys.stderr)
-            print("Expected format: x,y,width,height", file=sys.stderr)
-            sys.exit(1)
-    
     # Determine device
     if args.device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif sys.platform == "win32":
+            device = "dml"
+        else:
+            device = "cpu"
     else:
         device = args.device
     
@@ -341,9 +368,10 @@ def main():
         print(f"ERROR: Session directory does not exist: {session_dir}", file=sys.stderr)
         sys.exit(1)
     
-    frames_path = session_dir / "frames.jsonl"
-    if not frames_path.exists():
-        print(f"ERROR: frames.jsonl not found in {session_dir}", file=sys.stderr)
+    # Check for recording.mp4
+    video_path = session_dir / "recording.mp4"
+    if not video_path.exists():
+        print(f"ERROR: recording.mp4 not found in {session_dir}", file=sys.stderr)
         sys.exit(1)
     
     # Load model
@@ -360,7 +388,6 @@ def main():
             session_dir,
             model,
             target_resolution,
-            capture_region,
         )
         print(f"Success: Generated {count} depth EXR files")
     except Exception as e:

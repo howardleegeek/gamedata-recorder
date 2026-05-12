@@ -1,9 +1,9 @@
 //! Depth EXR writer for LEM Format
 //!
 //! Generates per-frame depth EXR files using DepthAnything V2.
-//! - Reads frame timestamps from frames.jsonl (1 Hz cadence)
-//! - Runs depth inference on each frame
-//! - Writes 32-bit float depth tensor to depth_<idx>.exr
+//! - Reads frames from recording.mp4 at 6 fps cadence (every 5th frame at 30 fps)
+//! - Runs depth inference on each sampled frame
+//! - Writes 32-bit float depth tensor to NNNNNN.exr (6-digit frame index)
 //!
 //! This module shells out to Python with DepthAnything V2 and onnxruntime.
 
@@ -15,12 +15,12 @@ use color_eyre::{Result, eyre::Context};
 /// Generate depth EXR files for a recording session.
 ///
 /// This function shells out to Python with DepthAnything V2 to generate depth maps.
-/// The script reads from frames.jsonl in the session directory and writes to depth/.
+/// The script reads from recording.mp4 in the session directory and writes to depth/.
 ///
 /// # Arguments
 /// * `session_dir` - Path to the recording session directory
 /// * `resolution` - Target resolution (width, height)
-/// * `device` - Device to run inference on ("auto", "cuda", or "cpu")
+/// * `device` - Device to run inference on ("auto", "cuda", "cpu", or "dml")
 pub async fn write_depth_exr(
     session_dir: &PathBuf,
     resolution: Option<(u32, u32)>,
@@ -79,40 +79,38 @@ pub async fn write_depth_exr(
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             return Err(color_eyre::eyre::eyre!(
-                "depth_exr.py script failed: {}\nstdout: {}\nstderr: {}",
+                "depth_exr.py script failed with status {}: stdout={}, stderr={}",
                 output.status,
                 stdout,
                 stderr
             ));
         }
         
-        // Count generated EXR files
+        // Parse output to get count of generated files
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        
+        // Look for success message
+        for line in lines.iter().rev() {
+            if line.contains("Success: Generated") {
+                if let Some(count_str) = line.split_whitespace().nth(2) {
+                    if let Ok(count) = count_str.parse::<usize>() {
+                        return Ok(count);
+                    }
+                }
+            }
+        }
+        
+        // Fallback: count files in depth directory
         let depth_dir = session_dir.join("depth");
-        let exr_count = if depth_dir.exists() {
-            std::fs::read_dir(&depth_dir)
-                .map(|entries| {
-                    entries
-                        .filter_map(|e| e.ok())
-                        .filter(|e| {
-                            e.path()
-                                .extension()
-                                .map(|ext| ext == "exr")
-                                .unwrap_or(false)
-                        })
-                        .count()
-                })
-                .unwrap_or(0)
+        if depth_dir.exists() {
+            let count = std::fs::read_dir(&depth_dir)
+                .map(|entries| entries.filter_map(|e| e.ok()).count())
+                .unwrap_or(0);
+            Ok(count)
         } else {
-            0
-        };
-        
-        tracing::info!(
-            session_dir = %session_dir.display(),
-            exr_count = exr_count,
-            "depth EXR files generated successfully"
-        );
-        
-        Ok(exr_count)
+            Ok(0)
+        }
     })
     .await
     .context("Failed to join depth EXR generation task")??;
@@ -129,6 +127,7 @@ try:
     import torch
     import numpy
     from PIL import Image
+    import cv2
     print('ok')
     sys.exit(0)
 except ImportError as e:
@@ -173,22 +172,21 @@ mod tests {
     }
     
     #[tokio::test]
-    async fn test_depth_generation_with_mock_frames() {
-        // Create a temp directory with mock frames
+    async fn test_depth_generation_with_mock_session() {
+        // Create a temp directory with mock session data
         let temp_dir = TempDir::new().unwrap();
         let session_dir = temp_dir.path();
         
         // Create depth directory
         fs::create_dir_all(session_dir.join("depth")).unwrap();
         
-        // Write mock frames.jsonl
-        let frames = r#"{"idx": 0, "t_ns": 0}
-{"idx": 1, "t_ns": 1000000000}
-{"idx": 2, "t_ns": 2000000000}
-"#;
-        fs::write(session_dir.join("frames.jsonl"), frames).unwrap();
+        // Create empty recording.mp4 file (script will check for file existence)
+        // Note: The script will fail when trying to read this empty file,
+        // but that's OK for this test - we're just testing that the Rust
+        // wrapper can call the script.
+        fs::write(session_dir.join("recording.mp4"), b"").unwrap();
         
-        // Try to run the script (will likely fail without proper setup)
+        // Try to run the script (will likely fail without proper video file)
         let result = write_depth_exr(
             &session_dir.to_path_buf(),
             Some((640, 480)), // Small resolution for testing
@@ -210,6 +208,7 @@ mod tests {
             }
             Err(e) => {
                 // Depth generation may fail for various reasons in test env
+                // This is expected since we're providing an empty video file
                 tracing::warn!("depth generation failed (expected in test env): {}", e);
             }
         }
