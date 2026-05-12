@@ -887,6 +887,115 @@ fn read_game_state_jsonl(path: &Path) -> std::io::Result<Vec<GameStateRow>> {
     Ok(out)
 }
 
+/// Resolve the on-disk `game_state.jsonl` to consume.
+///
+/// The MC Fabric mod writes its tick stream to a directory it predicts at
+/// JVM-launch time (`oyster_launch_mc.py:predict_session_dir`). Meanwhile
+/// the Rust recorder generates its OWN session_id when the user clicks
+/// Start (`SessionManager::create_directory_structure`), so the two land
+/// in sibling dirs under `%LOCALAPPDATA%/GameData Recorder/recordings/`
+/// rather than in the same dir. With that drift the recorder's
+/// `session_dir.join("game_state.jsonl")` is ENOENT and every PRD camera
+/// field serializes as `null` — even though the mc-mod IS running, IS
+/// writing, and the bytes ARE on disk one folder over.
+///
+/// This resolver fixes the join by:
+///
+/// 1. Preferring `session_dir/game_state.jsonl` (the contract path) when
+///    it exists. Production launchers that DO coordinate session_dirs
+///    (and any unit-test stub) hit this path.
+/// 2. Falling back to the most-recently-modified `game_state.jsonl`
+///    found in any **sibling** session dir under `session_dir`'s parent,
+///    provided its mtime is within ±10 minutes of the recorder's session
+///    start. The recency window is wide enough to absorb the slow path
+///    (launcher predicts dir, user clicks Start ~30-60s later) but tight
+///    enough to avoid binding to a STALE `game_state.jsonl` from a prior
+///    MC run that never got cleaned up.
+///
+/// Returns `None` when no candidate file is found anywhere. Errors during
+/// directory iteration are logged at debug and treated as "no candidate"
+/// — this resolver must never abort `action_camera.json` generation.
+fn resolve_game_state_path(session_dir: &Path) -> Option<std::path::PathBuf> {
+    let preferred = session_dir.join(constants::filename::recording::GAME_STATE_JSONL);
+    if preferred.is_file() {
+        return Some(preferred);
+    }
+
+    // Fallback: scan sibling dirs under `session_dir`'s parent for the
+    // most-recently-modified `game_state.jsonl` within the recency window.
+    // We anchor the recency window against `session_dir`'s mtime (it was
+    // created by `SessionManager` at recording-start, so its mtime is the
+    // closest proxy we have for "when the user started recording").
+    let parent = session_dir.parent()?;
+    let session_start_mtime = std::fs::metadata(session_dir)
+        .and_then(|m| m.modified())
+        .ok()?;
+    let recency_window = std::time::Duration::from_secs(600); // ±10 min
+
+    let entries = match std::fs::read_dir(parent) {
+        Ok(it) => it,
+        Err(e) => {
+            tracing::debug!(
+                "resolve_game_state_path: read_dir({}) failed ({e}); no fallback",
+                parent.display()
+            );
+            return None;
+        }
+    };
+
+    let mut best: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        // Skip our own session_dir — we already proved game_state.jsonl
+        // isn't there. (Some filesystems return the same path via the
+        // parent-iterate; cheap guard.)
+        if path == session_dir {
+            continue;
+        }
+        let candidate = path.join(constants::filename::recording::GAME_STATE_JSONL);
+        let candidate_meta = match std::fs::metadata(&candidate) {
+            Ok(m) if m.is_file() && m.len() > 0 => m,
+            _ => continue,
+        };
+        let candidate_mtime = match candidate_meta.modified() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        // Recency check: |candidate_mtime - session_start_mtime| <= window.
+        // `duration_since` is symmetric via Err on negative — handle both.
+        let delta = candidate_mtime
+            .duration_since(session_start_mtime)
+            .or_else(|_| session_start_mtime.duration_since(candidate_mtime))
+            .unwrap_or(std::time::Duration::MAX);
+        if delta > recency_window {
+            continue;
+        }
+        // Keep the candidate with the largest (most recent) mtime.
+        match &best {
+            Some((_, best_mtime)) if *best_mtime >= candidate_mtime => {}
+            _ => best = Some((candidate, candidate_mtime)),
+        }
+    }
+
+    if let Some((path, _)) = &best {
+        tracing::info!(
+            "resolve_game_state_path: session_dir {} has no game_state.jsonl; \
+             falling back to sibling {} (within recency window)",
+            session_dir.display(),
+            path.display()
+        );
+    } else {
+        tracing::debug!(
+            "resolve_game_state_path: no game_state.jsonl found in {} or its siblings",
+            session_dir.display()
+        );
+    }
+    best.map(|(p, _)| p)
+}
+
 /// Compose `action_camera.json` from `inputs.jsonl` + `frames.jsonl` in the
 /// session directory and write it durably to `action_camera.json`.
 ///
@@ -900,7 +1009,11 @@ pub async fn write_action_camera_json(
 ) -> Result<usize> {
     let inputs_path = session_dir.join(constants::filename::recording::INPUTS);
     let frames_path = session_dir.join(constants::filename::recording::FRAMES_JSONL);
-    let game_state_path = session_dir.join(constants::filename::recording::GAME_STATE_JSONL);
+    // Prefer in-session `game_state.jsonl`; fall back to a recently-touched
+    // sibling session dir's file when the MC mod and recorder disagreed on
+    // session_id (see `resolve_game_state_path` for the full rationale).
+    let game_state_path = resolve_game_state_path(session_dir)
+        .unwrap_or_else(|| session_dir.join(constants::filename::recording::GAME_STATE_JSONL));
     let out_path = session_dir.join(constants::filename::recording::ACTION_CAMERA_JSON);
 
     // Run the synchronous CPU work (read + parse + replay + serialize) on a

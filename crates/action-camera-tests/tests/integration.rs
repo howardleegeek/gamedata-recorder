@@ -382,3 +382,103 @@ fn action_camera_record_serializes_with_correct_field_names() {
         .collect();
     assert_eq!(codes, vec![16, 87]);
 }
+
+#[tokio::test]
+async fn camera_position_resolves_from_sibling_session_dir() {
+    // Reproduces the Stream BH-narrow bug: the MC Fabric mod and the Rust
+    // recorder predict different session_ids (the mod at JVM-launch, the
+    // recorder at user-click-Start), so `game_state.jsonl` lands in a
+    // sibling session_dir rather than `session_dir/`. Without the
+    // sibling-dir fallback, every `camera_position` serializes as `null`
+    // even though the mc-mod IS writing per-tick ticks to disk one folder
+    // over.
+    //
+    // This test sets up: recordings_root/{mod_session, recorder_session},
+    // with `game_state.jsonl` only in `mod_session`, and `inputs.jsonl` +
+    // `frames.jsonl` only in `recorder_session`. After
+    // `write_action_camera_json(recorder_session, ...)`, the resulting
+    // record's `camera_position` must be a 3-vector of real MC coords,
+    // NOT null.
+    let root = tempfile::tempdir().unwrap();
+    let mod_session = root.path().join("session_20260511_230500_aaaaaaaa");
+    let recorder_session = root.path().join("session_20260511_230537_bbbbbbbb");
+    std::fs::create_dir_all(&mod_session).unwrap();
+    std::fs::create_dir_all(&recorder_session).unwrap();
+
+    // Wall-clock anchor: input first event at t=1_000_000.000s (in seconds,
+    // same convention as elsewhere in this file). Game_state tick at the
+    // SAME wall-clock instant so the join lands at frame 0.
+    let anchor_sec: f64 = 1_000_000.000;
+    let anchor_ms: i64 = (anchor_sec * 1_000.0) as i64;
+
+    let inputs = format!(
+        "{{\"timestamp\":{anchor_sec:.3},\"event_type\":\"START\",\"event_args\":[]}}\n"
+    );
+    let frames = "{\"idx\":0,\"t_ns\":0}\n";
+    let game_state = format!(
+        "{{\"tick\":0,\"timestamp_ms\":{anchor_ms},\"x\":65.5,\"y\":64.0,\"z\":-102.5,\
+         \"yaw_deg\":12.5,\"pitch_deg\":-3.25,\
+         \"velocity_x\":0.0,\"velocity_y\":0.0,\"velocity_z\":0.0}}\n"
+    );
+
+    // Recorder dir has inputs + frames; mod dir has game_state. This is
+    // the on-disk shape of the bug.
+    std::fs::write(
+        recorder_session.join(constants::filename::recording::INPUTS),
+        &inputs,
+    )
+    .unwrap();
+    std::fs::write(
+        recorder_session.join(constants::filename::recording::FRAMES_JSONL),
+        frames,
+    )
+    .unwrap();
+    std::fs::write(
+        mod_session.join(constants::filename::recording::GAME_STATE_JSONL),
+        &game_state,
+    )
+    .unwrap();
+
+    // The recency window between session dirs is small (both just-created)
+    // so the sibling-dir fallback must accept the mod_session candidate.
+    write_action_camera_json(&recorder_session, 1920, 1080)
+        .await
+        .expect("write_action_camera_json");
+
+    let out_path = recorder_session.join(constants::filename::recording::ACTION_CAMERA_JSON);
+    let raw = std::fs::read_to_string(&out_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let arr = json.as_array().expect("array");
+    assert_eq!(arr.len(), 1, "expected 1 frame in action_camera.json");
+
+    let cam = &arr[0]["camera_position"];
+    assert!(
+        !cam.is_null(),
+        "camera_position must be non-null after sibling-dir fallback, got: {cam:?}"
+    );
+    let cam_obj = cam
+        .as_object()
+        .or_else(|| None)
+        .or_else(|| arr[0]["camera_position"].as_object());
+    if let Some(obj) = cam_obj {
+        // Serialized as {x, y, z} object form.
+        let x = obj["x"].as_f64().expect("camera_position.x");
+        let y = obj["y"].as_f64().expect("camera_position.y");
+        let z = obj["z"].as_f64().expect("camera_position.z");
+        assert!((x - 65.5).abs() < 1e-9, "x got {x}");
+        assert!((y - 64.0).abs() < 1e-9, "y got {y}");
+        // MC z=-102.5 → customer z=102.5 (the writer flips MC z to
+        // customer left-handed frame; see `mc_pos_to_customer`).
+        assert!((z - 102.5).abs() < 1e-9, "z got {z}");
+    } else if let Some(arr3) = cam.as_array() {
+        // Array form [x, y, z]. Either is acceptable per schema doc.
+        let x = arr3[0].as_f64().unwrap();
+        let y = arr3[1].as_f64().unwrap();
+        let z = arr3[2].as_f64().unwrap();
+        assert!((x - 65.5).abs() < 1e-9);
+        assert!((y - 64.0).abs() < 1e-9);
+        assert!((z - 102.5).abs() < 1e-9);
+    } else {
+        panic!("camera_position must be object {{x,y,z}} or array [x,y,z], got: {cam:?}");
+    }
+}
