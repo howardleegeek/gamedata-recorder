@@ -475,6 +475,72 @@ impl Recording {
             );
         }
 
+        // Audit F P0 — MP4 fps cap detection.
+        //
+        // Some rigs (notably AMD 780M iGPUs under bingd) capture far fewer
+        // logical frames than the encoder's nominal rate. The encoder still
+        // muxes at constants::FPS (30) by padding/duplicating frames, so the
+        // resulting MP4 reports e.g. 9026 frames over 5 minutes while
+        // frames.jsonl only contains 301 entries. A customer playing the MP4
+        // sees a frozen-slideshow effect and rejects the dataset.
+        //
+        // We do NOT re-encode here — that's a multi-minute operation we'd
+        // be doing on the recorder shutdown path. Instead we emit a sidecar
+        // `fps_mismatch.json` next to metadata.json so the PRD validator /
+        // downstream lint can flag the recording without parsing MP4
+        // headers themselves. The sidecar is intentionally a separate file
+        // (not a field on Metadata) so older readers that only know about
+        // metadata.json are unaffected.
+        let duration_secs = self.start_instant.elapsed().as_secs_f64();
+        let fps_effective = frame_count.and_then(|n| {
+            if duration_secs > 0.0 {
+                Some(n as f64 / duration_secs)
+            } else {
+                None
+            }
+        });
+        if let Some(fps_eff) = fps_effective
+            && fps_eff < 10.0
+        {
+            let mp4_actual_fps = constants::FPS as f64;
+            tracing::warn!(
+                fps_effective = fps_eff,
+                mp4_actual_fps,
+                "fps_effective={:.2} <<< target {}fps; mp4 will appear as slideshow; \
+                 consider hardware upgrade or capture-mode override",
+                fps_eff,
+                mp4_actual_fps
+            );
+            let sidecar = serde_json::json!({
+                "mp4_actual_fps": mp4_actual_fps,
+                "logical_fps": fps_eff,
+                "fps_mismatch": true,
+                "frame_count": frame_count,
+                "duration_secs": duration_secs,
+            });
+            let sidecar_path = self.recording_location.join("fps_mismatch.json");
+            let sidecar_path_for_log = sidecar_path.clone();
+            let sidecar_bytes = match serde_json::to_vec_pretty(&sidecar) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("Failed to serialize fps_mismatch.json: {e}");
+                    Vec::new()
+                }
+            };
+            if !sidecar_bytes.is_empty() {
+                match durable_write::write_atomic_async(&sidecar_path, sidecar_bytes).await {
+                    Ok(()) => tracing::info!(
+                        "Wrote fps_mismatch sidecar: {}",
+                        sidecar_path_for_log.display()
+                    ),
+                    Err(e) => tracing::warn!(
+                        "Failed to write fps_mismatch sidecar at {}: {e}",
+                        sidecar_path_for_log.display()
+                    ),
+                }
+            }
+        }
+
         let gamepads = input_capture.gamepads();
 
         // rc16.4 — snapshot Raw Input capture diagnostics. These tell
