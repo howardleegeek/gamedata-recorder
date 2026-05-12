@@ -497,6 +497,15 @@ struct GameStateRow {
     velocity_x: f64,
     velocity_y: f64,
     velocity_z: f64,
+    /// Scene name from world dimension.
+    #[serde(rename = "scene_name", default)]
+    scene_name: Option<String>,
+    /// Weather condition: "clear", "rain", or "thunder".
+    #[serde(default)]
+    weather: Option<String>,
+    /// Time of day: "day", "night", "dawn", or "dusk".
+    #[serde(rename = "time_of_day", default)]
+    time_of_day: Option<String>,
 }
 
 /// Build the per-frame `action_camera.json` records by replaying the events

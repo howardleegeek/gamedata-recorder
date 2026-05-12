@@ -15,7 +15,7 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 try:
     from openpyxl import Workbook
@@ -39,6 +39,23 @@ def load_metadata(session_dir: Path) -> Dict[str, Any]:
         return json.load(f)
 
 
+def load_game_state(session_dir: Path) -> List[Dict[str, Any]]:
+    """Load game state from game_state.jsonl."""
+    game_state_path = session_dir / "game_state.jsonl"
+    if not game_state_path.exists():
+        return []
+    
+    game_state = []
+    with open(game_state_path, 'r') as f:
+        for line in f:
+            if line.strip():
+                try:
+                    game_state.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    return game_state
+
+
 def load_frames(session_dir: Path) -> list[Dict[str, Any]]:
     """Load frame timestamps from frames.jsonl."""
     frames_path = session_dir / "frames.jsonl"
@@ -53,12 +70,58 @@ def load_frames(session_dir: Path) -> list[Dict[str, Any]]:
     return frames
 
 
+def extract_game_state_summary(game_state: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Extract summary information from game state data."""
+    if not game_state:
+        return {}
+    
+    # Count occurrences of each scene, weather, and time_of_day
+    scene_counts = {}
+    weather_counts = {}
+    time_of_day_counts = {}
+    
+    for entry in game_state:
+        # Scene name
+        scene = entry.get("scene_name")
+        if scene:
+            scene_counts[scene] = scene_counts.get(scene, 0) + 1
+        
+        # Weather
+        weather = entry.get("weather")
+        if weather:
+            weather_counts[weather] = weather_counts.get(weather, 0) + 1
+        
+        # Time of day
+        time_of_day = entry.get("time_of_day")
+        if time_of_day:
+            time_of_day_counts[time_of_day] = time_of_day_counts.get(time_of_day, 0) + 1
+    
+    # Find most common values
+    most_common_scene = max(scene_counts.items(), key=lambda x: x[1])[0] if scene_counts else "unknown"
+    most_common_weather = max(weather_counts.items(), key=lambda x: x[1])[0] if weather_counts else "unknown"
+    most_common_time_of_day = max(time_of_day_counts.items(), key=lambda x: x[1])[0] if time_of_day_counts else "unknown"
+    
+    return {
+        "scene_name": most_common_scene,
+        "weather": most_common_weather,
+        "time_of_day": most_common_time_of_day,
+        "scene_counts": scene_counts,
+        "weather_counts": weather_counts,
+        "time_of_day_counts": time_of_day_counts,
+        "total_samples": len(game_state)
+    }
+
+
 def create_workbook(session_dir: Path, output_path: Optional[Path] = None) -> None:
     """Create the gameinfo.xlsx workbook."""
     session_dir = Path(session_dir)
     
     # Load metadata
     metadata = load_metadata(session_dir)
+    
+    # Load game state and extract summary
+    game_state = load_game_state(session_dir)
+    game_state_summary = extract_game_state_summary(game_state)
     
     # Determine output path
     if output_path is None:
@@ -94,6 +157,10 @@ def create_workbook(session_dir: Path, output_path: Optional[Path] = None) -> No
         ("cpu", metadata.get("cpu", "")),
         ("ram_gb", metadata.get("ram_gb", "")),
         ("os", metadata.get("os", "")),
+        # New game state fields
+        ("scene_name", game_state_summary.get("scene_name", "")),
+        ("weather", game_state_summary.get("weather", "")),
+        ("time_of_day", game_state_summary.get("time_of_day", "")),
     ]
     
     for row_idx, (key, value) in enumerate(session_data, start=1):
