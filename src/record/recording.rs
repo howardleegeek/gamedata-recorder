@@ -556,18 +556,29 @@ impl Recording {
             Ok(rows) => tracing::info!(rows = rows, "Recording::stop: gameinfo.xlsx written"),
             Err(e) => tracing::warn!(error = %e, "gameinfo_writer failed (advisory)"),
         }
-        tokio::spawn(async move {
-            match super::depth_exr_writer::write_depth_exr(
-                &session_dir_for_depth,
-                Some((1920, 1080)),
-                Some("auto".to_string()),
-            )
-            .await
-            {
-                Ok(n) => tracing::info!(frames = n, "depth EXR background job complete"),
-                Err(e) => tracing::warn!(error = %e, "depth_exr_writer failed (advisory)"),
-            }
-        });
+        // rc17.3.1 (Howard "必须解决" 2026-05-12): depth EXR background job
+        // is DISABLED pending rc17.4 rewrite.
+        //
+        // Reason: the BJ-cluster scripts/generate_depth_exr.py uses
+        // live `capture_screen()` to grab the desktop at run time, but
+        // this function is invoked AFTER `Recording::stop()` finalizes
+        // the mp4 — so it captures whatever the user is currently
+        // looking at (their desktop after MC quit), NOT the recorded
+        // gameplay. The output would be desktop screenshots stored as
+        // depth EXR — worse than no depth at all.
+        //
+        // Plus, BJ's 1 Hz cadence violates PRD §3.4 which mandates
+        // 6 fps (1800 frames / 5-min session vs BJ's 300).
+        //
+        // Correct implementation (rc17.4 Stream BJ-v2):
+        //   1. cv2.VideoCapture(mp4) or ffmpeg -ss seek to read recorded frames
+        //   2. Iterate at exactly 6 fps stride (every 5th frame at 30fps)
+        //   3. Run DepthAnything V2 per frame → float32 EXR
+        //   4. Save with PRD naming `000000.exr` → `000005.exr` → ...
+        //
+        // Tracked: oyster-audit/PRD-DATA-REQUIREMENTS.md §8 known deviations.
+        let _ = session_dir_for_depth; // silence unused warning
+        // (intentionally not spawned)
 
         // Stream BN (rc17.2): automatic post-session lint v3.
         //
