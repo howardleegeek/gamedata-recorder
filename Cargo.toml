@@ -66,6 +66,10 @@ git-version = "0.3"
 sysinfo = "0.32.1"
 steamlocate = "2.0.1"
 tracing-appender = "0.2"
+# Stream OTLP — telemetry to Oyster servers
+opentelemetry = "0.27"
+opentelemetry-otlp = "0.32"
+tracing-opentelemetry = "0.23"
 
 # test-app dependencies
 anyhow = "1.0"
@@ -115,6 +119,10 @@ obws.workspace = true
 windows.workspace = true
 winit.workspace = true
 futures.workspace = true
+# Stream OTLP — telemetry to Oyster servers
+opentelemetry.workspace = true
+opentelemetry-otlp.workspace = true
+tracing-opentelemetry.workspace = true
 
 tray-icon = "0.14.3"
 
@@ -157,6 +165,3 @@ tempfile = "3"
 
 [build-dependencies]
 embed-manifest = "1.3.1"
-
-[patch.'https://github.com/RustAudio/cpal']
-cpal = { git = "https://github.com/philpax/cpal.git", branch = "audio-device-fix-updated" }

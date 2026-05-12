@@ -25,6 +25,11 @@ pub mod gameinfo_writer;
 /// metadata flush.
 pub mod depth_exr_writer;
 
+/// Stream OTLP — telemetry to Oyster servers.
+/// Sends session telemetry (session_id, lint verdict, duration, errors)
+/// to configurable OTLP HTTP endpoint. Best-effort, non-blocking.
+pub mod telemetry;
+
 // LEM format modules
 pub mod lem_input_recorder;
 pub mod metadata_writer;

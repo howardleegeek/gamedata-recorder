@@ -16,6 +16,7 @@ use crate::{
     record::{
         input_recorder::{InputEventStream, InputEventWriter},
         recorder::VideoRecorder,
+        telemetry,
     },
     system::hardware_specs,
     util::durable_write,
@@ -121,15 +122,16 @@ impl Recording {
                                 ?wh,
                                 mode = ?effective_mode,
                                 game_exe_stem,
-                                "Game resolution (monitor-native for game-capture/wgc)"
+                                "Recording::start: using monitor-native resolution for game-capture"
                             );
                             wh
                         }
                         Err(e) => {
-                            tracing::warn!(error = ?e, "Failed to get monitor resolution for HWND, falling back to client rect");
-                            let fallback = get_recording_base_resolution(hwnd)?;
-                            tracing::info!("Game resolution (fallback client rect): {fallback:?}");
-                            fallback
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to get monitor resolution for game-capture, falling back to window client rect"
+                            );
+                            get_recording_base_resolution(hwnd)?
                         }
                     }
                 }
@@ -138,51 +140,49 @@ impl Recording {
                     get_recording_base_resolution(hwnd)?
                 }
             }
-            crate::config::EffectiveCaptureMode::Monitor => {
-                let wh = get_recording_base_resolution(hwnd)?;
-                tracing::info!(
-                    ?wh,
-                    mode = ?effective_mode,
-                    game_exe_stem,
-                    "Game resolution (client rect for monitor/window capture)"
-                );
-                wh
+            crate::config::EffectiveCaptureMode::MonitorCapture
+            | crate::config::EffectiveCaptureMode::WindowCapture => {
+                // Monitor/window capture reads the client rect directly
+                // from the target window (or the whole monitor). Use that
+                // rect as the output size.
+                get_recording_base_resolution(hwnd)?
             }
         };
 
-        let video_path = recording_location.join(constants::filename::recording::VIDEO);
-        let csv_path = recording_location.join(constants::filename::recording::INPUTS);
+        tracing::info!(
+            ?game_resolution,
+            mode = ?effective_mode,
+            game_exe_stem,
+            "Recording::start: resolved game resolution"
+        );
 
-        let (input_writer, input_stream) =
-            InputEventWriter::start(&csv_path, input_capture).await?;
+        // Start the video recorder with the resolved resolution
         video_recorder
             .start_recording(
-                &video_path,
-                pid.0,
-                hwnd,
-                &game_exe,
-                video_settings,
-                game_config,
-                record_microphone,
+                &recording_location,
                 game_resolution,
-                input_stream.clone(),
-                consent,
+                video_settings,
+                record_microphone,
             )
-            .await?;
+            .await
+            .context("Failed to start video recorder")?;
 
-        // rc16.3 — fire-and-forget adaptive capture probe. The probe
-        // task is a no-op unless `OYSTER_ADAPTIVE_CAPTURE=1` is set
-        // (default: disabled). When enabled, it waits ~5s, samples
-        // the MP4 with ffmpeg's `signalstats` filter, and updates the
-        // per-rig cache so the NEXT session lands on the correct
-        // tier. See `record::adaptive_capture` for the full
-        // explanation and design trade-offs.
-        crate::record::adaptive_capture::spawn_probe_task(video_path.clone(), effective_mode);
+        // Start input recording
+        let (input_writer, input_stream) = crate::record::input_recorder::start(
+            &recording_location,
+            input_capture,
+            consent,
+        )
+        .await?;
+
+        // Start FPS logger
+        let fps_logger = FpsLogger::new(&recording_location).await?;
 
         Ok(Self {
             input_writer,
             input_stream,
-            fps_logger: FpsLogger::new(),
+            fps_logger,
+
             recording_location,
             game_exe,
             game_resolution,
@@ -195,88 +195,6 @@ impl Recording {
             pid,
             hwnd,
         })
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn game_exe(&self) -> &str {
-        &self.game_exe
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn start_time(&self) -> SystemTime {
-        self.start_time
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn start_instant(&self) -> Instant {
-        self.start_instant
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn elapsed(&self) -> std::time::Duration {
-        self.start_instant.elapsed()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn pid(&self) -> Pid {
-        self.pid
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn hwnd(&self) -> HWND {
-        self.hwnd
-    }
-
-    pub(crate) fn recording_location(&self) -> &std::path::Path {
-        &self.recording_location
-    }
-
-    pub(crate) fn game_resolution(&self) -> (u32, u32) {
-        self.game_resolution
-    }
-
-    pub(crate) fn get_window_name(&self) -> Option<String> {
-        use game_process::windows::Win32::UI::WindowsAndMessaging::{
-            GetWindowTextLengthW, GetWindowTextW,
-        };
-
-        let title_len = unsafe { GetWindowTextLengthW(self.hwnd) };
-        if title_len <= 0 || title_len > 4096 {
-            // 0 means error or empty title; cap at 4096 to prevent absurd allocations
-            return None;
-        }
-        {
-            let mut buf = vec![0u16; (title_len + 1) as usize];
-            let copied = unsafe { GetWindowTextW(self.hwnd, &mut buf) };
-            if copied > 0 {
-                if let Some(end) = buf.iter().position(|&c| c == 0) {
-                    return Some(String::from_utf16_lossy(&buf[..end]));
-                } else {
-                    return Some(String::from_utf16_lossy(&buf));
-                }
-            }
-        }
-        None
-    }
-
-    pub(crate) fn input_stream(&self) -> &InputEventStream {
-        &self.input_stream
-    }
-
-    /// Flush all pending input events to disk
-    pub(crate) async fn flush_input_events(&mut self) -> Result<()> {
-        self.input_writer.flush().await
-    }
-
-    pub(crate) fn update_fps(&mut self, fps: f64) {
-        // True cumulative average (not exponential decay which biases toward recent samples)
-        self.fps_sample_count += 1;
-        self.average_fps = Some(match self.average_fps {
-            Some(avg) => avg + (fps - avg) / self.fps_sample_count as f64,
-            None => fps,
-        });
-        // Feed frame timing data to the per-second FPS logger
-        self.fps_logger.on_frame();
     }
 
     pub(crate) async fn stop(
@@ -454,49 +372,37 @@ impl Recording {
                     // Swallow the error — we still want to write metadata and
                     // validate. The validator will catch an unplayable MP4
                     // downstream and mark the recording INVALID. Logging at
-                    // warn so we see this in the field.
-                    tracing::warn!(
-                        "Failed to fsync MP4 before metadata write, continuing: {} (err={:?})",
-                        mp4_path.display(),
-                        e
-                    );
+                    // warn level so we can see it in production logs.
+                    tracing::warn!("MP4 fsync failed (disk full?): {e}");
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to join MP4 fsync task: {e}");
+                Err(join_err) => {
+                    tracing::error!("Failed to join MP4 fsync task: {join_err}");
                 }
             }
         } else {
-            // The recorder reported success but produced no MP4 — rare, but
-            // possible on some encoder-failure paths. We let the validator
-            // flag it.
-            tracing::warn!(
+            // This should never happen — `stop_recording` succeeded but the
+            // MP4 file is missing. Log at error and continue; the validator
+            // will catch the missing MP4 downstream and mark the recording
+            // INVALID.
+            tracing::error!(
                 "MP4 file missing after successful stop_recording: {}",
                 mp4_path.display()
             );
         }
 
+        // rc16.4 — capture-thread diagnostics, surfaced so we can tell
+        // "hook never installed" from "hook installed but no events".
+        let input_capture_diagnostics = input_capture.diagnostics();
+
+        // rc16.4 — gamepad enumeration at recording stop (not start) so we
+        // capture the final state, not the initial state. This matches the
+        // PRD requirement "list all gamepads present at the end of the
+        // session".
         let gamepads = input_capture.gamepads();
 
-        // rc16.4 — snapshot Raw Input capture diagnostics. These tell
-        // the data team whether a zero-event recording was caused by a
-        // failed hook install or a hook that delivered nothing.
-        let wm_input_total = input_capture.raw_input_messages_observed();
-        let get_raw_input_data_failures = input_capture.get_raw_input_data_failures();
-        let tier = input_capture.registration_tier();
-        let input_capture_diagnostics = Some(crate::output_types::InputCaptureDiagnostics {
-            registration_tier: tier.as_str().to_string(),
-            wm_input_total,
-            get_raw_input_data_failures,
-        });
-        tracing::info!(
-            registration_tier = tier.as_str(),
-            wm_input_total,
-            get_raw_input_data_failures,
-            "Raw Input capture summary at recording stop"
-        );
-
-        // rc17.2 / Stream BD — detect system DPI for systeminfo.json /
-        // metadata.json `recordDpi`. PRD page 3 wants the OS scaling factor
+        // rc17.2 / Stream BD — PRD page 3 `recordDpi`: OS scaling factor at
+        // recording start. `GetDpiForSystem` returns raw DPI (e.g., 144 for
+        // 150% scaling), but the wire field expects the scale factor
         // (1.0 / 1.5 / 2.0), so we convert the raw DPI to a scale relative
         // to the Windows 96-DPI baseline. `GetDpiForSystem` is the
         // process-wide value; per-monitor V2 awareness is declared in
@@ -587,7 +493,7 @@ impl Recording {
         // the contract the uploader / Stream T pre-upload gate reads
         // to make the gating decision. See
         // `src/record/validation.rs` for the full rationale.
-        match super::validation::run_lint_v3(session_dir_for_lint).await {
+        let lint_result = match super::validation::run_lint_v3(session_dir_for_lint.clone()).await {
             Ok(lint_result) => {
                 tracing::info!(
                     status = %lint_result.overall_status,
@@ -595,6 +501,7 @@ impl Recording {
                     failed = lint_result.failed,
                     "Recording::stop: post-session lint v3 finished"
                 );
+                Some(lint_result)
             }
             Err(e) => {
                 // `run_lint_v3` itself returns `Ok(_)` even on lint
@@ -607,10 +514,65 @@ impl Recording {
                     error = %e,
                     "Recording::stop: post-session lint v3 raised I/O error (session NOT invalidated)"
                 );
+                None
             }
-        }
+        };
+
+        // Stream OTLP — telemetry to Oyster servers.
+        // Send session telemetry (best-effort, non-blocking) after lint v3.
+        telemetry::spawn_telemetry_task(&session_dir_for_lint, lint_result);
 
         Ok(())
+    }
+
+    /// Returns the window title (if any) of the game window being recorded.
+    /// Used for metadata.json's `window_name` field.
+    fn get_window_name(&self) -> Option<String> {
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetWindowTextW, GW_OWNER,
+            };
+
+            // SAFETY: `GetWindowTextW` reads the window's title bar text.
+            // It's a pure query with no side effects; the HWND is valid
+            // because we're actively capturing it.
+            let mut buffer = [0u16; 256];
+            let len = unsafe { GetWindowTextW(self.hwnd, &mut buffer) };
+            if len > 0 {
+                let title = String::from_utf16_lossy(&buffer[..len as usize]);
+                Some(title.trim().to_string())
+            } else {
+                None
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            None
+        }
+    }
+
+    /// Update FPS statistics for the current recording.
+    /// Called from the video recorder's frame callback.
+    pub(crate) fn update_fps(&mut self, fps: f64) {
+        self.fps_sample_count += 1;
+        // Update running average
+        if let Some(avg) = self.average_fps {
+            // Weighted average: new average = (old average * (n-1) + new value) / n
+            self.average_fps = Some((avg * (self.fps_sample_count - 1) as f64 + fps) / self.fps_sample_count as f64);
+        } else {
+            self.average_fps = Some(fps);
+        }
+    }
+
+    /// Get the current average FPS.
+    pub(crate) fn average_fps(&self) -> Option<f64> {
+        self.average_fps
+    }
+
+    /// Get the number of FPS samples taken so far.
+    pub(crate) fn fps_sample_count(&self) -> u64 {
+        self.fps_sample_count
     }
 }
 
@@ -648,78 +610,84 @@ fn detect_system_dpi_scale() -> Option<f64> {
 }
 
 pub fn get_recording_base_resolution(hwnd: HWND) -> Result<(u32, u32)> {
-    use windows::Win32::{Foundation::RECT, UI::WindowsAndMessaging::GetClientRect};
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::{
+            Foundation::{RECT, BOOL},
+            Graphics::Gdi::{GetClientRect, ClientToScreen, GetWindowRect},
+            UI::WindowsAndMessaging::GetWindowLongW,
+        };
 
-    /// Returns the size (width, height) of the inner area of a window given its HWND.
-    /// Returns None if the window does not exist or the call fails.
-    fn get_window_inner_size(hwnd: HWND) -> Option<(u32, u32)> {
-        unsafe {
-            let mut rect = RECT::default();
-            GetClientRect(hwnd, &mut rect).ok()?;
-            let width = rect.right - rect.left;
-            let height = rect.bottom - rect.top;
-            Some((width as u32, height as u32))
+        // SAFETY: `GetClientRect` reads the window's client-area dimensions.
+        // It's a pure query with no side effects; the HWND is valid because
+        // we're actively capturing it.
+        let mut client_rect = RECT::default();
+        let success = unsafe { GetClientRect(hwnd, &mut client_rect) };
+        if success.as_bool() {
+            let width = (client_rect.right - client_rect.left) as u32;
+            let height = (client_rect.bottom - client_rect.top) as u32;
+            Ok((width, height))
+        } else {
+            // Fall back to window rect if client rect fails
+            let mut window_rect = RECT::default();
+            let success = unsafe { GetWindowRect(hwnd, &mut window_rect) };
+            if success.as_bool() {
+                let width = (window_rect.right - window_rect.left) as u32;
+                let height = (window_rect.bottom - window_rect.top) as u32;
+                Ok((width, height))
+            } else {
+                Err(color_eyre::eyre::eyre!(
+                    "Failed to get window rect for HWND {:?}",
+                    hwnd
+                ))
+            }
         }
     }
-
-    match get_window_inner_size(hwnd) {
-        Some(size) => Ok(size),
-        None => {
-            tracing::info!("Failed to get window inner size, using primary monitor resolution");
-            hardware_specs::get_primary_monitor_resolution()
-                .context("Failed to get primary monitor resolution")
-        }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Non-Windows builds (test harness) — return a dummy resolution.
+        Ok((1920, 1080))
     }
 }
 
-/// Physical-pixel resolution of the monitor under `hwnd`, falling back to
-/// the primary monitor when `MonitorFromWindow` fails. Used by the
-/// game-capture path (CaptureMode::GameHook) where the tiny boot-window
-/// client rect would be the wrong thing to pin OBS base resolution to —
-/// we want the native monitor resolution so the hook draws into a
-/// correctly-sized surface.
 #[cfg(target_os = "windows")]
-pub fn get_monitor_resolution_for_hwnd(hwnd: HWND) -> Result<(u32, u32)> {
+fn get_monitor_resolution_for_hwnd(hwnd: HWND) -> Result<(u32, u32)> {
     use windows::Win32::{
-        Foundation::RECT,
+        Foundation::{HMONITOR, RECT},
         Graphics::Gdi::{
-            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+            MonitorFromWindow, MONITOR_DEFAULTTONEAREST,
+            GetMonitorInfoW, MONITORINFO,
         },
     };
 
-    // SAFETY: MonitorFromWindow + GetMonitorInfoW are pure read-only Win32
-    // queries. MONITOR_DEFAULTTONEAREST guarantees a non-null HMONITOR even
-    // when `hwnd` sits outside any display. We pass an owned MONITORINFO
-    // struct with `cbSize` set, as required by the documented contract.
-    unsafe {
-        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        if hmon.is_invalid() {
-            tracing::warn!(
-                "MonitorFromWindow returned NULL, falling back to primary monitor resolution"
-            );
-            return hardware_specs::get_primary_monitor_resolution()
-                .context("Failed to get primary monitor resolution");
-        }
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            rcMonitor: RECT::default(),
-            rcWork: RECT::default(),
-            dwFlags: 0,
-        };
-        GetMonitorInfoW(hmon, &mut info)
-            .ok()
-            .context("GetMonitorInfoW failed for window's monitor")?;
-        let w = (info.rcMonitor.right - info.rcMonitor.left) as u32;
-        let h = (info.rcMonitor.bottom - info.rcMonitor.top) as u32;
-        if w == 0 || h == 0 {
-            tracing::warn!(
-                w,
-                h,
-                "GetMonitorInfoW returned zero-sized rect, falling back to primary"
-            );
-            return hardware_specs::get_primary_monitor_resolution()
-                .context("Failed to get primary monitor resolution");
-        }
-        Ok((w, h))
+    // SAFETY: `MonitorFromWindow` returns the monitor that contains the
+    // largest area of the window. It's a pure query.
+    let hmonitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if hmonitor.is_invalid() {
+        return Err(color_eyre::eyre::eyre!(
+            "MonitorFromWindow returned invalid handle for HWND {:?}",
+            hwnd
+        ));
+    }
+
+    // SAFETY: `GetMonitorInfoW` reads monitor dimensions from the system.
+    // It's a pure query; the HMONITOR is valid because we just got it from
+    // `MonitorFromWindow`.
+    let mut monitor_info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        rcMonitor: RECT::default(),
+        rcWork: RECT::default(),
+        dwFlags: 0,
+    };
+    let success = unsafe { GetMonitorInfoW(hmonitor, &mut monitor_info) };
+    if success.as_bool() {
+        let width = (monitor_info.rcMonitor.right - monitor_info.rcMonitor.left) as u32;
+        let height = (monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top) as u32;
+        Ok((width, height))
+    } else {
+        Err(color_eyre::eyre::eyre!(
+            "GetMonitorInfoW failed for HMONITOR {:?}",
+            hmonitor
+        ))
     }
 }
