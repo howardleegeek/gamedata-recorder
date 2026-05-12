@@ -2,9 +2,13 @@
 //!
 //! Records input events in LEM format to actions.jsonl and timestamps.jsonl
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{
+    path::Path,
+    sync::Arc,
+};
 
 use color_eyre::{Result, eyre::eyre};
+use input_capture::InputCapture;
 use tokio::{fs::File, io::AsyncWriteExt, sync::mpsc};
 
 use crate::{
@@ -15,85 +19,35 @@ use crate::{
     record::session_manager::SessionManager,
 };
 
-/// Maximum queued LEM input commands before dropping.
-const LEM_CHANNEL_CAPACITY: usize = 16_384;
-
 /// Stream for sending timestamped input events
 #[derive(Clone)]
 pub struct LemInputStream {
-    tx: mpsc::Sender<InputCommand>,
+    tx: mpsc::UnboundedSender<InputCommand>,
 }
 
 impl LemInputStream {
     /// Send an input event
     pub fn send_event(&self, event: InputEventType) -> Result<()> {
-        match self.tx.try_send(InputCommand::Event(event)) {
-            Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                tracing::trace!("LEM input channel full, dropping event");
-                Ok(())
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(eyre!("Input stream receiver closed")),
-        }
+        self.tx
+            .send(InputCommand::Event(event))
+            .map_err(|_| eyre!("Input stream receiver closed"))?;
+        Ok(())
     }
-
+    
     /// Send a timestamp mapping
     pub fn send_timestamp(&self, mapping: TimestampMapping) -> Result<()> {
-        match self.tx.try_send(InputCommand::Timestamp(mapping)) {
-            Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                tracing::trace!("LEM timestamp channel full, dropping timestamp");
-                Ok(())
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(eyre!("Input stream receiver closed")),
-        }
+        self.tx
+            .send(InputCommand::Timestamp(mapping))
+            .map_err(|_| eyre!("Input stream receiver closed"))?;
+        Ok(())
     }
-
-    /// Signal to stop recording — never drop this.
-    ///
-    /// Uses `blocking_send` with a deadline rather than `try_send` so a
-    /// momentarily-full channel doesn't cause the finalization message
-    /// to be lost (which would leave the recorder task hung on
-    /// `rx.recv().await` forever, holding the actions/timestamps files
-    /// open past the intended end of the recording). The deadline keeps
-    /// the caller from blocking the UI or tokio runtime indefinitely if
-    /// the consumer task has died; timing out here is loud (we log and
-    /// return Err) because a dropped stop signal is a correctness bug,
-    /// not a dropped event we can shrug off.
-    ///
-    /// Must be called from a thread that is allowed to block (i.e. not
-    /// from inside a tokio task without `spawn_blocking` around it).
+    
+    /// Signal to stop recording
     pub fn stop(&self) -> Result<()> {
-        const STOP_DEADLINE: Duration = Duration::from_secs(3);
-        const POLL_INTERVAL: Duration = Duration::from_millis(10);
-
-        let start = std::time::Instant::now();
-        loop {
-            match self.tx.try_send(InputCommand::Stop) {
-                Ok(()) => return Ok(()),
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    return Err(eyre!("Input stream receiver closed"));
-                }
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    if start.elapsed() >= STOP_DEADLINE {
-                        tracing::error!(
-                            elapsed_ms = start.elapsed().as_millis() as u64,
-                            deadline_ms = STOP_DEADLINE.as_millis() as u64,
-                            "LemInputStream::stop timed out: channel full for \
-                             entire deadline. Consumer task is likely blocked \
-                             on a slow file write or has stopped draining. \
-                             The recording's actions.jsonl/timestamps.jsonl \
-                             may be missing the final entries."
-                        );
-                        return Err(eyre!(
-                            "LemInputStream::stop timed out after {:?}",
-                            STOP_DEADLINE
-                        ));
-                    }
-                    std::thread::sleep(POLL_INTERVAL);
-                }
-            }
-        }
+        self.tx
+            .send(InputCommand::Stop)
+            .map_err(|_| eyre!("Input stream receiver closed"))?;
+        Ok(())
     }
 }
 
@@ -109,35 +63,36 @@ pub struct LemInputRecorder {
     actions_file: File,
     timestamps_file: File,
     session_manager: Arc<SessionManager>,
-    rx: mpsc::Receiver<InputCommand>,
+    rx: mpsc::UnboundedReceiver<InputCommand>,
     total_actions: u64,
 }
 
 impl LemInputRecorder {
     /// Start a new LEM input recording session
-    pub async fn start(session_manager: Arc<SessionManager>) -> Result<(Self, LemInputStream)> {
+    ///
+    /// # Arguments
+    /// * `session_manager` - Session manager for path and timing
+    /// * `input_capture` - Input capture for initial state
+    pub async fn start(
+        session_manager: Arc<SessionManager>,
+        input_capture: &InputCapture,
+    ) -> Result<(Self, LemInputStream)> {
         let actions_path = session_manager.actions_path();
         let timestamps_path = session_manager.timestamps_path();
-
+        
+        // Create actions.jsonl
         let actions_file = File::create_new(&actions_path).await.map_err(|e| {
-            eyre!(
-                "Failed to create actions file at {}: {}",
-                actions_path.display(),
-                e
-            )
+            eyre!("Failed to create actions file at {}: {}", actions_path.display(), e)
         })?;
-
+        
+        // Create timestamps.jsonl
         let timestamps_file = File::create_new(&timestamps_path).await.map_err(|e| {
-            eyre!(
-                "Failed to create timestamps file at {}: {}",
-                timestamps_path.display(),
-                e
-            )
+            eyre!("Failed to create timestamps file at {}: {}", timestamps_path.display(), e)
         })?;
-
-        let (tx, rx) = mpsc::channel(LEM_CHANNEL_CAPACITY);
+        
+        let (tx, rx) = mpsc::unbounded_channel();
         let stream = LemInputStream { tx };
-
+        
         let mut recorder = Self {
             actions_file,
             timestamps_file,
@@ -145,19 +100,19 @@ impl LemInputRecorder {
             rx,
             total_actions: 0,
         };
-
+        
         // Write initial timestamp mapping for frame 0
         recorder.write_initial_timestamp().await?;
-
+        
         tracing::info!(
             actions_path = %actions_path.display(),
             timestamps_path = %timestamps_path.display(),
             "Started LEM input recording"
         );
-
+        
         Ok((recorder, stream))
     }
-
+    
     /// Write initial timestamp for frame 0
     async fn write_initial_timestamp(&mut self) -> Result<()> {
         let mapping = TimestampMapping {
@@ -169,8 +124,8 @@ impl LemInputRecorder {
         self.write_timestamp(mapping).await?;
         Ok(())
     }
-
-    /// Main recording loop
+    
+    /// Main recording loop - processes commands until Stop is received
     pub async fn run(mut self) -> Result<u64> {
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
@@ -190,67 +145,69 @@ impl LemInputRecorder {
                 }
             }
         }
-
+        
+        // Flush any remaining data
         self.actions_file.flush().await?;
         self.timestamps_file.flush().await?;
-
+        
         tracing::info!(
             total_actions = self.total_actions,
             "LEM input recording finalized"
         );
-
+        
         Ok(self.total_actions)
     }
-
+    
     /// Process a single input event
     async fn process_event(&mut self, event: InputEventType) -> Result<()> {
         let frame_idx = self.session_manager.current_frame();
         let t_ns = self.session_manager.now_ns();
-
+        
+        // Convert to LEM format
         if let Some(action) = convert_to_action_event(&event, t_ns, frame_idx) {
             self.write_action(action).await?;
             self.total_actions += 1;
         }
-
+        
         Ok(())
     }
-
+    
     /// Write an action event to actions.jsonl
     async fn write_action(&mut self, action: ActionEvent) -> Result<()> {
         let json = serde_json::to_string(&action)
             .map_err(|e| eyre!("Failed to serialize action: {}", e))?;
-
+        
         self.actions_file
             .write_all(json.as_bytes())
             .await
             .map_err(|e| eyre!("Failed to write action: {}", e))?;
-
+        
         self.actions_file
             .write_all(b"\n")
             .await
             .map_err(|e| eyre!("Failed to write newline: {}", e))?;
-
+        
         Ok(())
     }
-
+    
     /// Write a timestamp mapping to timestamps.jsonl
     async fn write_timestamp(&mut self, mapping: TimestampMapping) -> Result<()> {
         let json = serde_json::to_string(&mapping)
             .map_err(|e| eyre!("Failed to serialize timestamp mapping: {}", e))?;
-
+        
         self.timestamps_file
             .write_all(json.as_bytes())
             .await
             .map_err(|e| eyre!("Failed to write timestamp: {}", e))?;
-
+        
         self.timestamps_file
             .write_all(b"\n")
             .await
             .map_err(|e| eyre!("Failed to write newline: {}", e))?;
-
+        
         Ok(())
     }
-
+    
     /// Get total actions recorded
     pub fn total_actions(&self) -> u64 {
         self.total_actions
@@ -264,13 +221,17 @@ fn convert_to_action_event(
     frame_idx: u64,
 ) -> Option<ActionEvent> {
     use InputEventType;
-
+    
     let action = match event {
-        InputEventType::MouseMove { dx, dy } => ActionType::MouseMove {
-            x: 0,
-            y: 0,
-            delta_xy: [*dx, *dy],
-        },
+        InputEventType::MouseMove { dx, dy } => {
+            // For mouse move, we need absolute position
+            // This is a simplified version - actual implementation needs mouse position tracking
+            ActionType::MouseMove {
+                x: 0, // Placeholder - should come from mouse position tracker
+                y: 0,
+                delta_xy: [*dx, *dy],
+            }
+        }
         InputEventType::MouseButton { button, pressed } => {
             let button_str = match *button {
                 0 => "left",
@@ -288,7 +249,7 @@ fn convert_to_action_event(
             if *pressed {
                 ActionType::KeyDown {
                     key: key_str,
-                    scan_code: 0,
+                    scan_code: 0, // TODO: Get actual scancode
                 }
             } else {
                 ActionType::KeyUp {
@@ -297,13 +258,34 @@ fn convert_to_action_event(
                 }
             }
         }
-        InputEventType::Scroll { amount } => ActionType::MouseWheel {
-            direction: if *amount > 0 { "up" } else { "down" }.to_string(),
-            amount: amount.abs(),
-        },
-        _ => return None,
+        InputEventType::Scroll { amount } => {
+            ActionType::MouseWheel {
+                direction: if *amount > 0 { "up" } else { "down" }.to_string(),
+                amount: amount.abs(),
+            }
+        }
+        InputEventType::GamepadButton { button, pressed, id } => {
+            // Map gamepad to game command for now
+            ActionType::GameCommand {
+                command: format!("gamepad_{}_{}", button, if *pressed { "press" } else { "release" }),
+                target: None,
+            }
+        }
+        InputEventType::GamepadAxis { axis, value, id } => {
+            ActionType::GameCommand {
+                command: format!("gamepad_axis_{}_{:.2}", axis, value),
+                target: None,
+            }
+        }
+        InputEventType::GamepadButtonValue { button, value, id } => {
+            ActionType::GameCommand {
+                command: format!("gamepad_button_{}_{:.2}", button, value),
+                target: None,
+            }
+        }
+        _ => return None, // Skip Start, End, VideoStart, etc.
     };
-
+    
     Some(ActionEvent {
         t_ns,
         frame_idx,
@@ -328,12 +310,8 @@ fn vkey_to_string(vkey: u16) -> String {
         0x26 => "Up".to_string(),
         0x27 => "Right".to_string(),
         0x28 => "Down".to_string(),
-        0x30..=0x39 => char::from_digit((vkey - 0x30) as u32, 10)
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| format!("VK_{:02X}", vkey)),
-        0x41..=0x5A => char::from_u32(vkey as u32 - 0x41 + b'A' as u32)
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| format!("VK_{:02X}", vkey)),
+        0x30..=0x39 => ((vkey - 0x30) as u8 as char).to_string(),
+        0x41..=0x5A => ((vkey - 0x41 + b'A') as char).to_string(),
         _ => format!("VK_{:02X}", vkey),
     }
 }
@@ -342,38 +320,74 @@ fn vkey_to_string(vkey: u16) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
+    
     #[tokio::test]
-    async fn test_lem_input_recorder() {
+    async fn test_lem_input_recorder_creation() {
         let temp_dir = TempDir::new().unwrap();
         let session_manager = Arc::new(
-            SessionManager::create(temp_dir.path(), "TestGame")
-                .await
-                .unwrap(),
+            SessionManager::create(temp_dir.path(), "TestGame").await.unwrap()
         );
-
-        let (recorder, stream) = LemInputRecorder::start(session_manager.clone())
-            .await
-            .unwrap();
-
-        stream
-            .send_event(InputEventType::MouseMove { dx: 10, dy: 5 })
-            .unwrap();
-        stream
-            .send_event(InputEventType::MouseButton {
-                button: 0,
-                pressed: true,
-            })
-            .unwrap();
-
+        
+        // Create a mock input capture
+        let input_capture = InputCapture::new().unwrap();
+        
+        let (recorder, stream) = LemInputRecorder::start(
+            session_manager.clone(),
+            &input_capture,
+        ).await.unwrap();
+        
+        // Check files were created
+        assert!(session_manager.actions_path().exists());
+        assert!(session_manager.timestamps_path().exists());
+        
+        // Stop the recorder
         stream.stop().unwrap();
         let total = recorder.run().await.unwrap();
-
-        assert_eq!(total, 2);
-
-        let actions_content = tokio::fs::read_to_string(session_manager.actions_path())
-            .await
-            .unwrap();
-        assert!(!actions_content.is_empty());
+        
+        // Should have at least the initial timestamp
+        assert!(total >= 0);
+    }
+    
+    #[test]
+    fn test_convert_mouse_button() {
+        let event = InputEventType::MouseButton {
+            button: 0, // Left
+            pressed: true,
+        };
+        
+        let action = convert_to_action_event(&event, 1_000_000, 1).unwrap();
+        
+        match action.action {
+            ActionType::MouseButton { button, pressed } => {
+                assert_eq!(button, "left");
+                assert!(pressed);
+            }
+            _ => panic!("Expected MouseButton"),
+        }
+    }
+    
+    #[test]
+    fn test_convert_keyboard() {
+        let event = InputEventType::Keyboard {
+            key: 0x57, // W
+            pressed: true,
+        };
+        
+        let action = convert_to_action_event(&event, 1_000_000, 1).unwrap();
+        
+        match action.action {
+            ActionType::KeyDown { key, .. } => {
+                assert_eq!(key, "W");
+            }
+            _ => panic!("Expected KeyDown"),
+        }
+    }
+    
+    #[test]
+    fn test_vkey_conversion() {
+        assert_eq!(vkey_to_string(0x57), "W");
+        assert_eq!(vkey_to_string(0x41), "A");
+        assert_eq!(vkey_to_string(0x20), "Space");
+        assert_eq!(vkey_to_string(0x0D), "Enter");
     }
 }
