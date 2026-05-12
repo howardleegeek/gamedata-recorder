@@ -312,27 +312,68 @@ async fn durable_write_async_works_from_tokio_context() {
 fn action_camera_record_serializes_with_correct_field_names() {
     // Construct a record directly (bypassing the replay logic) and verify
     // serde produces exactly the buyer's wire contract field names.
+    //
+    // The struct now carries the full PRD schema (frame_number alias,
+    // timestamp_ns, intrinsics, rotation_oula, rotation_quaternion,
+    // Follow_Offset, player_*, metric_scale) — all of which serialize
+    // even when the camera/player pose data isn't available (the pose
+    // fields go to null, the scalars to 0.0 / 1.0).
+    use action_camera_tests::action_camera_writer::{InputModality, Intrinsics};
+
     let rec = ActionCameraRecord {
         frame_index: 7,
+        frame_number: 7,
         timestamp: 0.123,
-        mouse_x: 0.5,
-        mouse_y: 0.5,
-        mouse_dx: 1.5,
-        mouse_dy: -2.0,
-        key_code: vec![16, 87],
+        timestamp_ns: 123_000_000,
+        input_modality: InputModality::KeyboardMouse,
+        mouse_x: Some(0.5),
+        mouse_y: Some(0.5),
+        mouse_dx: Some(1.5),
+        mouse_dy: Some(-2.0),
+        key_code: Some(vec![16, 87]),
+        gamepad_left_stick_x: None,
+        gamepad_left_stick_y: None,
+        gamepad_right_stick_x: None,
+        gamepad_right_stick_y: None,
+        gamepad_left_trigger: None,
+        gamepad_right_trigger: None,
+        gamepad_buttons: None,
         camera_position: None,
+        rotation_oula: None,
+        rotation_quaternion: None,
         camera_rotation_quaternion: None,
+        follow_offset: None,
+        intrinsics: Intrinsics {
+            fx: 1543.0,
+            fy: 1543.0,
+            cx: 960.0,
+            cy: 540.0,
+        },
+        speed: 0.0,
+        player_position: None,
+        player_rotation_quaternion: None,
+        player_speed: 0.0,
+        metric_scale: 1.0,
     };
     let v = serde_json::to_value(&rec).unwrap();
     let obj = v.as_object().unwrap();
     assert_eq!(obj["frame_index"].as_u64(), Some(7));
+    assert_eq!(obj["frame_number"].as_u64(), Some(7));
     assert!((obj["timestamp"].as_f64().unwrap() - 0.123).abs() < 1e-12);
+    assert_eq!(obj["timestamp_ns"].as_u64(), Some(123_000_000));
     assert_eq!(obj["mouseX"].as_f64(), Some(0.5));
     assert_eq!(obj["mouseY"].as_f64(), Some(0.5));
     assert_eq!(obj["mouse_dx"].as_f64(), Some(1.5));
     assert_eq!(obj["mouse_dy"].as_f64(), Some(-2.0));
     assert!(obj["camera_position"].is_null());
     assert!(obj["camera_rotation_quaternion"].is_null());
+    assert!(obj["rotation_oula"].is_null());
+    assert!(obj["rotation_quaternion"].is_null());
+    assert!(obj["Follow_Offset"].is_null());
+    assert!(obj["player_position"].is_null());
+    // intrinsics is always populated (depends only on FOV + resolution).
+    assert!(obj["intrinsics"].is_object());
+    assert_eq!(obj["metric_scale"].as_f64(), Some(1.0));
     let codes: Vec<u64> = obj["keyCode"]
         .as_array()
         .unwrap()

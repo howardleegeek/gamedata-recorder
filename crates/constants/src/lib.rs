@@ -383,6 +383,16 @@ pub mod filename {
         /// implementations produce byte-for-byte equivalent shapes for the
         /// same source data.
         pub const ACTION_CAMERA_JSON: &str = "action_camera.json";
+        /// Per-tick game state stream written by the MC Fabric mod
+        /// (`world.oyster.recorder.GameStateCapture` / `JsonlWriter`).
+        /// One JSON object per tick with player position, look vector,
+        /// velocity, dimension, gamemode. The MC client lands this in
+        /// the recorder's session directory via the mod's `SessionDir`.
+        /// When present, the `action_camera.json` writer joins each
+        /// frame against the nearest tick by timestamp to populate the
+        /// PRD-required `camera_position` / `rotation_*` / `player_*`
+        /// fields. Absence is non-fatal — fields are emitted as `null`.
+        pub const GAME_STATE_JSONL: &str = "game_state.jsonl";
     }
 
     pub mod persistent {
