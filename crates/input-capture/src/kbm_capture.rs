@@ -27,6 +27,7 @@
 
 use std::{
     collections::HashSet,
+    fmt,
     sync::{
         Arc, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -203,6 +204,22 @@ pub struct CaptureMetrics {
     /// Which registration tier succeeded. Stored as `usize` so we can
     /// publish it atomically; decoded via [`RegistrationTier::from_raw`].
     pub registration_tier: AtomicUsize,
+    /// `true` when the WH_KEYBOARD_LL hook fallback is active for this
+    /// session. Surfaced in metadata.json as a top-level boolean so
+    /// support tickets can quickly distinguish "AMD 780M hook-fallback"
+    /// recordings from healthy RawInput recordings without parsing the
+    /// `tier_attempts` array. Atomically writable from the capture
+    /// thread before [`KbmCapture::initialize`] returns.
+    pub hook_fallback_active: std::sync::atomic::AtomicBool,
+    /// Ordered log of per-tier registration outcomes. Written exactly
+    /// once during [`KbmCapture::initialize`] and read at recording
+    /// stop. Locked rather than atomic because we need to publish
+    /// structured per-device records, not a single integer.
+    ///
+    /// PRD-100 Audit I-4: this is the diagnostic field that turns
+    /// "registration_tier: none" silent failures into actionable bug
+    /// reports.
+    pub tier_attempts: Mutex<Vec<TierAttemptRecord>>,
 }
 
 impl Default for CaptureMetrics {
@@ -211,6 +228,8 @@ impl Default for CaptureMetrics {
             wm_input_total: AtomicU64::new(0),
             get_raw_input_data_failures: AtomicU64::new(0),
             registration_tier: AtomicUsize::new(RegistrationTier::None.as_raw()),
+            hook_fallback_active: std::sync::atomic::AtomicBool::new(false),
+            tier_attempts: Mutex::new(Vec::new()),
         }
     }
 }
@@ -219,6 +238,27 @@ impl CaptureMetrics {
     /// Read the current registration tier.
     pub fn tier(&self) -> RegistrationTier {
         RegistrationTier::from_raw(self.registration_tier.load(Ordering::Relaxed))
+    }
+
+    /// Snapshot the per-tier diagnostic log. Returns a clone so the
+    /// caller can release the lock immediately and serialize at leisure
+    /// (the log is small — at most three entries per session). Returns
+    /// an empty vector if the mutex was poisoned, after logging.
+    pub fn tier_attempts_snapshot(&self) -> Vec<TierAttemptRecord> {
+        match self.tier_attempts.lock() {
+            Ok(g) => g.clone(),
+            Err(poisoned) => {
+                tracing::error!(
+                    "CaptureMetrics.tier_attempts mutex poisoned; recovering with stale data"
+                );
+                poisoned.into_inner().clone()
+            }
+        }
+    }
+
+    /// Read the hook-fallback flag.
+    pub fn hook_fallback_active(&self) -> bool {
+        self.hook_fallback_active.load(Ordering::Relaxed)
     }
 }
 
@@ -252,6 +292,112 @@ impl RegistrationTier {
             RegistrationTier::None => "none",
         }
     }
+}
+
+/// Stable tier identifier used in per-tier diagnostic records. Distinct
+/// from [`RegistrationTier`] because:
+///
+/// * `RegistrationTier` reports the tier that *succeeded* for the whole
+///   capture session (a single value, surfaced in metadata as
+///   `registration_tier`).
+/// * `DiagnosticTier` identifies the tier that was *attempted*, so the
+///   diagnostic log can record outcomes for tier 1, tier 2, AND tier 3
+///   — including tiers that ran but failed, and the hook fallback.
+///
+/// PRD-100 Audit I-4: on Howard's AMD 780M minipc1 all three tiers
+/// returned `registration_tier: "none"` with no per-tier reason. With
+/// this field we can publish per-tier-per-device structured records
+/// (return value, GetLastError, hwnd, dwFlags) into metadata.json so
+/// future failures are diagnosable from the recording alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticTier {
+    /// Tier 1: `RIDEV_INPUTSINK` + batch registration.
+    InputSinkBatch,
+    /// Tier 2: `RIDEV_INPUTSINK` + per-device registration.
+    InputSinkPerDevice,
+    /// Tier 3: `SetWindowsHookExW(WH_KEYBOARD_LL, ...)` fallback.
+    HookFallback,
+}
+
+impl DiagnosticTier {
+    /// Stable string identifier for logs and metadata.json.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiagnosticTier::InputSinkBatch => "tier_1_inputsink_batch",
+            DiagnosticTier::InputSinkPerDevice => "tier_2_inputsink_per_device",
+            DiagnosticTier::HookFallback => "tier_3_hook_fallback",
+        }
+    }
+}
+
+impl fmt::Display for DiagnosticTier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Per-device per-tier outcome of a `RegisterRawInputDevices` call.
+///
+/// PRD-100 Audit I-4: replaces the previous coarse "tier 2 failed for
+/// device" warn-level log. Captured at the moment of each Win32 call
+/// so the data team can answer "what exact flags were passed, what was
+/// the hwnd, and what did Windows return?" from `metadata.json` alone.
+#[derive(Debug, Clone)]
+pub struct DeviceRegistrationResult {
+    /// HID usage page (always `0x01` Generic Desktop for our devices).
+    pub usage_page: u16,
+    /// HID usage value: `0x02` mouse, `0x06` keyboard, `0x04`/`0x05`
+    /// joystick/gamepad if ever attempted by this tier. Recorded as the
+    /// raw u16 so future device-class additions remain decodable.
+    pub usage: u16,
+    /// `dwFlags` passed to `RegisterRawInputDevices` for this device.
+    /// Captured as the underlying u32 because `RAWINPUTDEVICE_FLAGS` is
+    /// not `Serialize`-friendly. Decode by matching against
+    /// `RIDEV_*` constants from the `windows` crate.
+    pub dw_flags: u32,
+    /// `hwndTarget` pointer cast to usize for stable formatting. Zero
+    /// means NULL hwnd (which is invalid on Win11 26100 when
+    /// `RIDEV_INPUTSINK` is set — that's exactly the failure mode this
+    /// diagnostic was built to catch).
+    pub hwnd_target: usize,
+    /// `true` if `RegisterRawInputDevices` returned a successful BOOL.
+    pub ok: bool,
+    /// `GetLastError()` raw value if `ok == false`. `Some(0)` is
+    /// possible but extremely unusual (the API returned failure without
+    /// setting last-error); we record it verbatim rather than collapsing
+    /// to `None` so the data team can distinguish "Windows set error 0"
+    /// from "we didn't probe".
+    pub last_error: Option<u32>,
+    /// Free-form context string from the wrap_err call. Stable enough
+    /// for grouping but not part of the structured key; the data team
+    /// should treat this as supplementary text, not a parse target.
+    pub context: &'static str,
+}
+
+/// Outcome of attempting a single tier.
+///
+/// PRD-100 Audit I-4: surfaced in `metadata.json` as an ordered list
+/// (`tier_attempts`) so support tickets show the full per-tier story
+/// even when the final `registration_tier` is `none`. The list grows
+/// in the order tiers were attempted: tier 1 always present, tier 2
+/// only when tier 1 failed, tier 3 only when tier 2 also failed.
+#[derive(Debug, Clone)]
+pub struct TierAttemptRecord {
+    /// Which tier this record describes.
+    pub tier: DiagnosticTier,
+    /// `true` if the tier as a whole was considered successful. For
+    /// per-device tiers ("inputsink_per_device") this means at least
+    /// one device went through; the per-device details are in
+    /// `device_results`.
+    pub ok: bool,
+    /// One entry per `RegisterRawInputDevices` call this tier made.
+    /// Empty for the hook-fallback tier, which doesn't register Raw
+    /// Input devices.
+    pub device_results: Vec<DeviceRegistrationResult>,
+    /// Reason string for failure (empty when `ok == true`). For the
+    /// hook-fallback tier this contains the `SetWindowsHookExW` error
+    /// when installation failed.
+    pub reason: String,
 }
 
 /// Sender end of the LL hook → message-pump channel.
@@ -581,49 +727,208 @@ impl KbmCapture {
                 })
             };
 
+            // PRD-100 Audit I-4: collect per-tier per-device diagnostic
+            // records as we go. The log is moved into
+            // `metrics.tier_attempts` after the cascade finishes so the
+            // host can serialize it into metadata.json.
+            //
+            // Capacity 3 covers the worst case (tier 1 fail, tier 2 fail,
+            // tier 3 fail). Pre-reserving avoids an allocator round-trip
+            // on the recording-start hot path.
+            let mut tier_log: Vec<TierAttemptRecord> = Vec::with_capacity(3);
+            let hwnd_target_usize = hwnd.0 as usize;
+            // Log the hwnd state once up front so the diagnostic always
+            // includes "what hwnd we used" — even if the cascade falls
+            // through to tier 3 (which doesn't take an hwnd at all).
+            tracing::info!(
+                hwnd_target = format!("0x{:016x}", hwnd_target_usize),
+                hwnd_is_null = hwnd.0.is_null(),
+                "RawInput registration cascade starting — using message-only window as hwndTarget"
+            );
+
             // Tier 1: preferred path. Batch register both devices with
             // RIDEV_INPUTSINK and the valid message-only hwnd.
             let tier1 = make_devices(preferred_flags);
+            for dev in &tier1 {
+                tracing::info!(
+                    tier = DiagnosticTier::InputSinkBatch.as_str(),
+                    usage_page = format!("0x{:04x}", dev.usUsagePage),
+                    usage = format!("0x{:04x}", dev.usUsage),
+                    dw_flags = format!("0x{:08x}", dev.dwFlags.0),
+                    hwnd_target = format!("0x{:016x}", hwnd_target_usize),
+                    "Attempting RegisterRawInputDevices (tier 1 entry)"
+                );
+            }
             let tier1_result = RegisterRawInputDevices(&tier1, tier1.len() as u32)
                 .wrap_err("tier 1: RIDEV_INPUTSINK batch with valid hwnd");
+            let tier1_last_error = if tier1_result.is_err() {
+                use windows::Win32::Foundation::GetLastError;
+                Some(GetLastError().0)
+            } else {
+                None
+            };
             let tier = if tier1_result.is_ok() {
                 tracing::info!(
                     tier = RegistrationTier::InputSinkBatch.as_str(),
+                    diagnostic_tier = DiagnosticTier::InputSinkBatch.as_str(),
                     "RegisterRawInputDevices tier 1 (INPUTSINK batch) succeeded — global Raw Input capture armed"
+                );
+                // Tier 1 is a single batched call: both devices succeed
+                // or fail together. Record both as `ok = true`.
+                let device_results = tier1
+                    .iter()
+                    .map(|dev| DeviceRegistrationResult {
+                        usage_page: dev.usUsagePage,
+                        usage: dev.usUsage,
+                        dw_flags: dev.dwFlags.0,
+                        hwnd_target: hwnd_target_usize,
+                        ok: true,
+                        last_error: None,
+                        context: "tier 1: RIDEV_INPUTSINK batch with valid hwnd",
+                    })
+                    .collect();
+                tier_log.push(TierAttemptRecord {
+                    tier: DiagnosticTier::InputSinkBatch,
+                    ok: true,
+                    device_results,
+                    reason: String::new(),
+                });
+                tracing::info!(
+                    tier_1 = "ok",
+                    "registration_cascade tier 1 attempted — result: ok. Cascade halted."
                 );
                 RegistrationTier::InputSinkBatch
             } else {
-                tracing::info!(
-                    error = ?tier1_result.err(),
-                    "RegisterRawInputDevices tier 1 (INPUTSINK batch) failed, trying tier 2 (per-device)"
+                let tier1_err = tier1_result
+                    .as_ref()
+                    .err()
+                    .map(|e| format!("{e:?}"))
+                    .unwrap_or_default();
+                // PRD-100 Audit I-4: this used to be `tracing::info!`,
+                // which made it look like a soft fall-through. Tier 1
+                // failing means input capture is degraded for this
+                // session — surface it at `error` level so it shows up
+                // in standard log dashboards.
+                tracing::error!(
+                    error = %tier1_err,
+                    last_error = ?tier1_last_error,
+                    tier = DiagnosticTier::InputSinkBatch.as_str(),
+                    "registration_cascade tier 1 attempted — result: fail. Trying tier 2 (per-device)."
                 );
+                tier_log.push(TierAttemptRecord {
+                    tier: DiagnosticTier::InputSinkBatch,
+                    ok: false,
+                    device_results: tier1
+                        .iter()
+                        .map(|dev| DeviceRegistrationResult {
+                            usage_page: dev.usUsagePage,
+                            usage: dev.usUsage,
+                            dw_flags: dev.dwFlags.0,
+                            hwnd_target: hwnd_target_usize,
+                            ok: false,
+                            last_error: tier1_last_error,
+                            context: "tier 1: RIDEV_INPUTSINK batch with valid hwnd",
+                        })
+                        .collect(),
+                    reason: tier1_err,
+                });
+
                 // Tier 2: same flags, but register devices one at a time.
                 // Some filter drivers reject the whole batch if they dislike
                 // a single entry; sequential registration lets us succeed for
                 // at least one device (the mouse often goes through even when
                 // the keyboard does not, or vice versa).
                 let mut any_ok = false;
+                let mut tier2_results: Vec<DeviceRegistrationResult> =
+                    Vec::with_capacity(tier1.len());
                 for dev in &tier1 {
+                    tracing::info!(
+                        tier = DiagnosticTier::InputSinkPerDevice.as_str(),
+                        usage_page = format!("0x{:04x}", dev.usUsagePage),
+                        usage = format!("0x{:04x}", dev.usUsage),
+                        dw_flags = format!("0x{:08x}", dev.dwFlags.0),
+                        hwnd_target = format!("0x{:016x}", hwnd_target_usize),
+                        "Attempting RegisterRawInputDevices (tier 2 entry, per-device)"
+                    );
                     let single = [*dev];
-                    match RegisterRawInputDevices(&single, 1)
-                        .wrap_err("tier 2: RIDEV_INPUTSINK per-device with valid hwnd")
-                    {
+                    let call_result = RegisterRawInputDevices(&single, 1)
+                        .wrap_err("tier 2: RIDEV_INPUTSINK per-device with valid hwnd");
+                    match call_result {
                         Ok(()) => {
                             tracing::info!(
-                                usage = format!("0x{:02X}", dev.usUsage),
-                                "tier 2 succeeded for device (INPUTSINK per-device)"
+                                tier = DiagnosticTier::InputSinkPerDevice.as_str(),
+                                usage_page = format!("0x{:04x}", dev.usUsagePage),
+                                usage = format!("0x{:04x}", dev.usUsage),
+                                dw_flags = format!("0x{:08x}", dev.dwFlags.0),
+                                hwnd_target = format!("0x{:016x}", hwnd_target_usize),
+                                return_value = "ok",
+                                "tier 2 device registered (INPUTSINK per-device)"
                             );
                             any_ok = true;
+                            tier2_results.push(DeviceRegistrationResult {
+                                usage_page: dev.usUsagePage,
+                                usage: dev.usUsage,
+                                dw_flags: dev.dwFlags.0,
+                                hwnd_target: hwnd_target_usize,
+                                ok: true,
+                                last_error: None,
+                                context: "tier 2: RIDEV_INPUTSINK per-device with valid hwnd",
+                            });
                         }
                         Err(e) => {
-                            tracing::warn!(
+                            use windows::Win32::Foundation::GetLastError;
+                            let last_err = GetLastError().0;
+                            // PRD-100 Audit I-4: bumped from `warn!` to
+                            // `error!`. A per-device tier-2 failure
+                            // means at least one of (mouse, keyboard)
+                            // is fully dead for this recording — that
+                            // breaks the buyer's keyCode field on Win11
+                            // 26100 AMD systems, not a soft warning.
+                            tracing::error!(
+                                tier = DiagnosticTier::InputSinkPerDevice.as_str(),
                                 error = ?e,
-                                usage = format!("0x{:02X}", dev.usUsage),
-                                "tier 2 failed for device"
+                                last_error = last_err,
+                                usage_page = format!("0x{:04x}", dev.usUsagePage),
+                                usage = format!("0x{:04x}", dev.usUsage),
+                                dw_flags = format!("0x{:08x}", dev.dwFlags.0),
+                                hwnd_target = format!("0x{:016x}", hwnd_target_usize),
+                                return_value = "fail",
+                                "tier 2 device registration failed"
                             );
+                            tier2_results.push(DeviceRegistrationResult {
+                                usage_page: dev.usUsagePage,
+                                usage: dev.usUsage,
+                                dw_flags: dev.dwFlags.0,
+                                hwnd_target: hwnd_target_usize,
+                                ok: false,
+                                last_error: Some(last_err),
+                                context: "tier 2: RIDEV_INPUTSINK per-device with valid hwnd",
+                            });
                         }
                     }
                 }
+
+                let tier2_reason = if any_ok {
+                    String::new()
+                } else {
+                    "no device succeeded in tier 2 (per-device)".to_string()
+                };
+                tier_log.push(TierAttemptRecord {
+                    tier: DiagnosticTier::InputSinkPerDevice,
+                    ok: any_ok,
+                    device_results: tier2_results,
+                    reason: tier2_reason,
+                });
+                tracing::info!(
+                    tier_2 = if any_ok { "ok" } else { "fail" },
+                    "registration_cascade tier 2 attempted — result: {}.{}",
+                    if any_ok { "ok" } else { "fail" },
+                    if any_ok {
+                        " Cascade halted."
+                    } else {
+                        " Trying tier 3 (WH_KEYBOARD_LL hook fallback)."
+                    },
+                );
 
                 if any_ok {
                     RegistrationTier::InputSinkPerDevice
@@ -697,24 +1002,67 @@ impl KbmCapture {
                 // calling process. For a process-only hook that's
                 // fine because the OS dispatches LL hooks to the
                 // installing thread regardless.
-                match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_ll_proc), None, 0)
-                    .wrap_err("tier 3: SetWindowsHookExW(WH_KEYBOARD_LL)")
-                {
+                tracing::info!(
+                    tier = DiagnosticTier::HookFallback.as_str(),
+                    hook_id = "WH_KEYBOARD_LL",
+                    thread_id = 0_u32,
+                    "Attempting SetWindowsHookExW (tier 3 entry, keyboard-only fallback)"
+                );
+                let hook_call_result =
+                    SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_ll_proc), None, 0)
+                        .wrap_err("tier 3: SetWindowsHookExW(WH_KEYBOARD_LL)");
+                let hook_last_error = if hook_call_result.is_err() {
+                    use windows::Win32::Foundation::GetLastError;
+                    Some(GetLastError().0)
+                } else {
+                    None
+                };
+                match hook_call_result {
                     Ok(h) => {
                         tracing::info!(
                             tier = RegistrationTier::Hook.as_str(),
+                            diagnostic_tier = DiagnosticTier::HookFallback.as_str(),
+                            hook_handle = format!("0x{:016x}", h.0 as usize),
                             "INPUTSINK tiers exhausted; installed WH_KEYBOARD_LL hook \
                              as keyboard-only fallback. Mouse capture is DEAD for this \
                              session (no WH_MOUSE_LL hook installed)."
                         );
+                        tier_log.push(TierAttemptRecord {
+                            tier: DiagnosticTier::HookFallback,
+                            ok: true,
+                            device_results: Vec::new(),
+                            reason: String::new(),
+                        });
+                        tracing::info!(
+                            tier_3 = "ok",
+                            hook_fallback = "active",
+                            "registration_cascade tier 3 attempted — result: ok. Hook fallback active."
+                        );
                         (RegistrationTier::Hook, Some(h), Some(rx))
                     }
                     Err(e) => {
+                        let reason_str = format!("{e:?}");
+                        // PRD-100 Audit I-4: keep `error!` level — this
+                        // is the terminal failure of the cascade and
+                        // ends with zero input capture.
                         tracing::error!(
                             error = ?e,
+                            last_error = ?hook_last_error,
+                            tier = DiagnosticTier::HookFallback.as_str(),
                             "tier 3 (WH_KEYBOARD_LL hook) also failed. Input capture is \
                              completely dead for this session — recording will contain \
                              only lifecycle events."
+                        );
+                        tier_log.push(TierAttemptRecord {
+                            tier: DiagnosticTier::HookFallback,
+                            ok: false,
+                            device_results: Vec::new(),
+                            reason: reason_str,
+                        });
+                        tracing::info!(
+                            tier_3 = "fail",
+                            hook_fallback = "inactive",
+                            "registration_cascade tier 3 attempted — result: fail. Cascade exhausted."
                         );
                         // Clear out the slots we just populated so a
                         // future capture instance can retry cleanly.
@@ -746,6 +1094,56 @@ impl KbmCapture {
             metrics
                 .registration_tier
                 .store(tier.as_raw(), Ordering::Relaxed);
+            metrics
+                .hook_fallback_active
+                .store(matches!(tier, RegistrationTier::Hook), Ordering::Relaxed);
+
+            // PRD-100 Audit I-4: publish the per-tier diagnostic log
+            // into shared metrics so `recording.rs` can serialize it
+            // into metadata.json at recording stop. Lock contention
+            // here is impossible — no other thread has a reference to
+            // this Arc yet (we're inside `initialize` and the parent
+            // thread is blocked on us).
+            match metrics.tier_attempts.lock() {
+                Ok(mut g) => {
+                    *g = tier_log.clone();
+                }
+                Err(poisoned) => {
+                    // Should never happen on a fresh Default::default()
+                    // CaptureMetrics, but recover rather than panic so
+                    // the recording can still proceed (degraded).
+                    let mut g = poisoned.into_inner();
+                    *g = tier_log.clone();
+                    tracing::error!(
+                        "CaptureMetrics.tier_attempts mutex was poisoned during initialize; \
+                         diagnostic log written anyway"
+                    );
+                }
+            }
+
+            // PRD-100 Audit I-4: emit a single structured summary line
+            // that mirrors the metadata.json shape so support tickets
+            // can grep it out of logs without needing the JSON.
+            let tier_lookup = |t: DiagnosticTier| -> &'static str {
+                tier_log
+                    .iter()
+                    .find(|r| r.tier == t)
+                    .map(|r| if r.ok { "ok" } else { "fail" })
+                    .unwrap_or("skipped")
+            };
+            tracing::info!(
+                registration_summary = true,
+                final_tier = tier.as_str(),
+                tier_1 = tier_lookup(DiagnosticTier::InputSinkBatch),
+                tier_2 = tier_lookup(DiagnosticTier::InputSinkPerDevice),
+                tier_3 = tier_lookup(DiagnosticTier::HookFallback),
+                hook_fallback = if matches!(tier, RegistrationTier::Hook) {
+                    "active"
+                } else {
+                    "inactive"
+                },
+                "registration_summary: per-tier RawInput cascade outcome (PRD-100 Audit I-4)"
+            );
 
             if matches!(tier, RegistrationTier::None) {
                 // All three tiers failed. Log loudly — the capture

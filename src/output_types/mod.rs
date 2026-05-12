@@ -105,6 +105,95 @@ pub struct InputCaptureDiagnostics {
     /// Total `GetRawInputData` failures (typically zero on healthy
     /// systems).
     pub get_raw_input_data_failures: u64,
+    /// PRD-100 Audit I-4 — per-tier per-device registration outcomes.
+    /// Optional (newly-added field) so older recordings deserialize
+    /// without this key. Ordered: tier 1 first, then tier 2 (if tier 1
+    /// failed), then tier 3 (if tier 2 also failed).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tier_attempts: Option<Vec<TierAttemptDiagnostic>>,
+    /// PRD-100 Audit I-4 — `true` when the WH_KEYBOARD_LL hook fallback
+    /// is the active input path (mouse capture is dead in that mode).
+    /// Optional for backwards compatibility — absence means "unknown
+    /// (older recording)", not "false". Set explicitly to `false` on
+    /// healthy recordings.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub hook_fallback_active: Option<bool>,
+}
+
+/// PRD-100 Audit I-4 — one entry per RegisterRawInputDevices / hook
+/// installation attempt during the registration cascade.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TierAttemptDiagnostic {
+    /// Tier identifier — one of `tier_1_inputsink_batch`,
+    /// `tier_2_inputsink_per_device`, `tier_3_hook_fallback`. Stable
+    /// strings so downstream parsers can match without enum churn.
+    pub tier: String,
+    /// `true` if this tier was considered successful for the cascade.
+    pub ok: bool,
+    /// One entry per `RegisterRawInputDevices` call this tier made.
+    /// Empty for `tier_3_hook_fallback` (no Raw Input devices).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub device_results: Vec<DeviceRegistrationDiagnostic>,
+    /// Free-form failure reason — empty when `ok == true`.
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub reason: String,
+}
+
+/// PRD-100 Audit I-4 — per-device per-tier `RegisterRawInputDevices`
+/// outcome. All values are pre-formatted strings or simple scalars to
+/// keep the JSON readable and avoid Windows-types serde churn.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DeviceRegistrationDiagnostic {
+    /// HID usage page (always `0x0001` Generic Desktop for our devices).
+    /// Stored as a hex string for human reading: `"0x0001"`.
+    pub usage_page: String,
+    /// HID usage value, hex string: `"0x0002"` mouse, `"0x0006"` keyboard.
+    pub usage: String,
+    /// `dwFlags` passed to `RegisterRawInputDevices`, hex string:
+    /// `"0x00000100"` for `RIDEV_INPUTSINK`.
+    pub dw_flags: String,
+    /// `hwndTarget` pointer formatted as `"0x0000_0000_0000_0000"`-style
+    /// 16-hex-char string. `"0x0000000000000000"` means NULL hwnd —
+    /// invalid on Win11 26100 when `RIDEV_INPUTSINK` is set.
+    pub hwnd_target: String,
+    /// `true` if `RegisterRawInputDevices` returned successfully.
+    pub ok: bool,
+    /// `GetLastError()` raw value if `ok == false`. Skipped from JSON
+    /// when None (i.e. on success).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_error: Option<u32>,
+    /// Context string from the `wrap_err` call. Stable enough for
+    /// grouping; treat as supplementary text rather than a parse key.
+    pub context: String,
+}
+
+impl From<input_capture::TierAttemptRecord> for TierAttemptDiagnostic {
+    fn from(rec: input_capture::TierAttemptRecord) -> Self {
+        Self {
+            tier: rec.tier.as_str().to_string(),
+            ok: rec.ok,
+            device_results: rec
+                .device_results
+                .into_iter()
+                .map(DeviceRegistrationDiagnostic::from)
+                .collect(),
+            reason: rec.reason,
+        }
+    }
+}
+
+impl From<input_capture::DeviceRegistrationResult> for DeviceRegistrationDiagnostic {
+    fn from(dev: input_capture::DeviceRegistrationResult) -> Self {
+        Self {
+            usage_page: format!("0x{:04x}", dev.usage_page),
+            usage: format!("0x{:04x}", dev.usage),
+            dw_flags: format!("0x{:08x}", dev.dw_flags),
+            hwnd_target: format!("0x{:016x}", dev.hwnd_target),
+            ok: dev.ok,
+            last_error: dev.last_error,
+            context: dev.context.to_string(),
+        }
+    }
 }
 
 #[derive(Debug)]

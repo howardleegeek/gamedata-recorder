@@ -8,7 +8,10 @@ use tokio::sync::mpsc;
 
 mod kbm_capture;
 use kbm_capture::KbmCapture;
-pub use kbm_capture::{CaptureMetrics, ConsentGuard, ConsentStatus, RegistrationTier};
+pub use kbm_capture::{
+    CaptureMetrics, ConsentGuard, ConsentStatus, DeviceRegistrationResult, DiagnosticTier,
+    RegistrationTier, TierAttemptRecord,
+};
 
 mod gamepad_capture;
 pub use gamepad_capture::{ActiveGamepad, GamepadId, GamepadMetadata};
@@ -178,6 +181,23 @@ impl InputCapture {
         self.metrics
             .get_raw_input_data_failures
             .load(Ordering::Relaxed)
+    }
+
+    /// PRD-100 Audit I-4: snapshot of the per-tier per-device Raw Input
+    /// registration diagnostic log. Empty `Vec` if registration hasn't
+    /// run yet (would only happen if the host queried before the
+    /// capture thread initialized). Cloned per-call — cheap (≤3
+    /// entries, each ≤2 device records).
+    pub fn tier_attempts(&self) -> Vec<TierAttemptRecord> {
+        self.metrics.tier_attempts_snapshot()
+    }
+
+    /// PRD-100 Audit I-4: `true` if the WH_KEYBOARD_LL hook fallback
+    /// is the active input path for this session (both INPUTSINK tiers
+    /// failed). Mouse capture is dead in this mode — the host crate
+    /// should surface this prominently in metadata.json.
+    pub fn hook_fallback_active(&self) -> bool {
+        self.metrics.hook_fallback_active()
     }
 
     pub fn active_input(&self) -> ActiveInput {

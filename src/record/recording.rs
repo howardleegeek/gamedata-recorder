@@ -480,18 +480,37 @@ impl Recording {
         // rc16.4 — snapshot Raw Input capture diagnostics. These tell
         // the data team whether a zero-event recording was caused by a
         // failed hook install or a hook that delivered nothing.
+        //
+        // PRD-100 Audit I-4: also snapshot the per-tier per-device
+        // registration log so support tickets see exactly which device
+        // / flags / hwnd combination failed and what GetLastError
+        // returned — without that, "registration_tier: none" is a
+        // dead-end diagnostic.
         let wm_input_total = input_capture.raw_input_messages_observed();
         let get_raw_input_data_failures = input_capture.get_raw_input_data_failures();
         let tier = input_capture.registration_tier();
+        let tier_attempts_raw = input_capture.tier_attempts();
+        let hook_fallback_active = input_capture.hook_fallback_active();
+        let tier_attempts: Vec<crate::output_types::TierAttemptDiagnostic> = tier_attempts_raw
+            .into_iter()
+            .map(crate::output_types::TierAttemptDiagnostic::from)
+            .collect();
         let input_capture_diagnostics = Some(crate::output_types::InputCaptureDiagnostics {
             registration_tier: tier.as_str().to_string(),
             wm_input_total,
             get_raw_input_data_failures,
+            tier_attempts: if tier_attempts.is_empty() {
+                None
+            } else {
+                Some(tier_attempts)
+            },
+            hook_fallback_active: Some(hook_fallback_active),
         });
         tracing::info!(
             registration_tier = tier.as_str(),
             wm_input_total,
             get_raw_input_data_failures,
+            hook_fallback_active,
             "Raw Input capture summary at recording stop"
         );
 
