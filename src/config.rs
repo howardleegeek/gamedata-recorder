@@ -13,6 +13,18 @@ use std::{
 /// DXGI adapter enumeration. Stable across every NVIDIA GPU ever shipped.
 const NVIDIA_PCI_VENDOR_ID: u32 = 0x10DE;
 
+/// PCI vendor ID for Intel Corporation — used to identify Intel iGPUs
+/// (UHD/Iris/Arc) and dGPUs (Arc A-series) in DXGI adapter enumeration.
+/// Stable across every Intel display device ever shipped.
+const INTEL_PCI_VENDOR_ID: u32 = 0x8086;
+
+/// PCI vendor ID for Advanced Micro Devices, Inc. — used to identify
+/// AMD discrete GPUs and APU iGPUs in DXGI adapter enumeration. Note
+/// that ATI's legacy ID (0x1002) is the surviving identifier even on
+/// post-acquisition AMD silicon, so checking only `AMD_PCI_VENDOR_ID`
+/// covers every Radeon and APU integrated graphics device.
+const AMD_PCI_VENDOR_ID: u32 = 0x1002;
+
 /// Quick probe: does any DX12-capable GPU report NVIDIA as its vendor?
 ///
 /// v2.5.5: rewritten to use direct DXGI adapter enumeration via `wgpu`.
@@ -35,6 +47,71 @@ fn detect_nvidia_gpu() -> Result<bool> {
             .into_iter()
             .any(|adapter| adapter.get_info().vendor == NVIDIA_PCI_VENDOR_ID);
         Ok(has_nvidia)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(false)
+    }
+}
+
+/// Quick probe: does any DX12-capable GPU report Intel as its vendor?
+///
+/// Audit I-3 (PRD-100): Intel iGPU users (the dominant Windows laptop
+/// configuration — UHD 7xx, Iris Xe, Arc A-series) previously fell
+/// through to software x264 because the auto-selection only matched on
+/// NVIDIA. On a laptop iGPU, x264 at 1080p30 typically saturates 50–80%
+/// of the CPU, breaking the PRD's "recording should not impact game
+/// performance" requirement. This probe lets us flip those rigs to the
+/// QSV (QuickSync) hardware encoder, which runs on the iGPU's dedicated
+/// media block and frees the CPU back up for the game.
+///
+/// Mirrors `detect_nvidia_gpu()` exactly so the behaviour, error paths,
+/// and platform gating stay in lockstep: direct DXGI adapter
+/// enumeration via `wgpu`, no external process dependency, works on
+/// every Windows SKU including N / LTSC / Group-Policy-hardened
+/// installs. Returns `Ok(false)` on non-Windows so the rest of the
+/// migration logic compiles and runs unchanged on CI / macOS dev boxes.
+fn detect_intel_gpu() -> Result<bool> {
+    #[cfg(target_os = "windows")]
+    {
+        use egui_wgpu::wgpu;
+
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let has_intel = instance
+            .enumerate_adapters(wgpu::Backends::DX12)
+            .into_iter()
+            .any(|adapter| adapter.get_info().vendor == INTEL_PCI_VENDOR_ID);
+        Ok(has_intel)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(false)
+    }
+}
+
+/// Quick probe: does any DX12-capable GPU report AMD as its vendor?
+///
+/// Audit I-3 (PRD-100): completes the GPU-vendor triad alongside
+/// `detect_nvidia_gpu()` and `detect_intel_gpu()`. Modern AMD APUs
+/// (Ryzen 5/7/9 with Radeon Graphics) and discrete Radeon RX/Pro cards
+/// all expose the AMF (Advanced Media Framework) hardware encoder,
+/// which — like NVENC and QSV — keeps encoding off the CPU and
+/// satisfies the PRD's no-game-impact requirement.
+///
+/// Same shape as the NVIDIA/Intel probes for consistency: DXGI
+/// enumeration via `wgpu`, no external process dependency, safe on
+/// every Windows SKU, and `Ok(false)` on non-Windows targets.
+fn detect_amd_gpu() -> Result<bool> {
+    #[cfg(target_os = "windows")]
+    {
+        use egui_wgpu::wgpu;
+
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let has_amd = instance
+            .enumerate_adapters(wgpu::Backends::DX12)
+            .into_iter()
+            .any(|adapter| adapter.get_info().vendor == AMD_PCI_VENDOR_ID);
+        Ok(has_amd)
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -1227,22 +1304,78 @@ impl Config {
         // encode essentially for free; x264 software encoding chews CPU
         // (we saw 1 FPS effective on an AMD iGPU, and NVIDIA users often
         // end up here by default too).
+        //
+        // PRD-100 Audit I-3: extended to Intel iGPU (QSV) and AMD (AMF).
+        // Preference order is NVENC > QSV > AMF > x264, picked to match
+        // the relative quality-per-watt of each block on the rigs Howard
+        // has profiled. Probing is cheap (a single DXGI enumeration) and
+        // short-circuits as soon as a match lands, so a NVIDIA-only rig
+        // pays exactly the v2.5.4 cost and only Intel/AMD rigs do the
+        // additional one or two DXGI walks.
         if matches!(
             config.preferences.encoder.encoder,
             constants::encoding::VideoEncoderType::X264
         ) {
-            match detect_nvidia_gpu() {
-                Ok(true) => {
-                    tracing::info!("NVIDIA GPU detected — upgrading encoder X264 -> NvEnc");
-                    config.preferences.encoder.encoder =
-                        constants::encoding::VideoEncoderType::NvEnc;
-                    if let Err(e) = config.save() {
-                        tracing::warn!(e=?e, "Failed to persist NvEnc migration");
-                    }
+            // First: NVIDIA (highest-quality block, was the only path in v2.5.4).
+            let nvidia = detect_nvidia_gpu();
+            if let Ok(true) = nvidia {
+                tracing::info!("NVIDIA GPU detected — upgrading encoder X264 -> NvEnc");
+                config.preferences.encoder.encoder =
+                    constants::encoding::VideoEncoderType::NvEnc;
+                if let Err(e) = config.save() {
+                    tracing::warn!(e=?e, "Failed to persist NvEnc migration");
                 }
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::debug!(e=?e, "GPU vendor probe failed, keeping X264");
+            } else {
+                if let Err(ref e) = nvidia {
+                    tracing::debug!(e=?e, "NVIDIA vendor probe failed, trying Intel next");
+                }
+
+                // Second: Intel QSV. Covers every Intel laptop iGPU
+                // (UHD/Iris Xe) plus discrete Arc A-series cards. On
+                // those rigs x264 was burning CPU and starving the
+                // game — Audit I-3's headline fix.
+                let intel = detect_intel_gpu();
+                if let Ok(true) = intel {
+                    tracing::info!(
+                        "Intel GPU detected — upgrading encoder X264 -> Qsv (QuickSync, Audit I-3)"
+                    );
+                    config.preferences.encoder.encoder =
+                        constants::encoding::VideoEncoderType::Qsv;
+                    if let Err(e) = config.save() {
+                        tracing::warn!(e=?e, "Failed to persist Qsv migration");
+                    }
+                } else {
+                    if let Err(ref e) = intel {
+                        tracing::debug!(e=?e, "Intel vendor probe failed, trying AMD next");
+                    }
+
+                    // Third: AMD AMF. Discrete Radeon and Ryzen APU
+                    // integrated graphics both expose the AMF media
+                    // block — preferable to x264 for the same reason
+                    // QSV is.
+                    match detect_amd_gpu() {
+                        Ok(true) => {
+                            tracing::info!(
+                                "AMD GPU detected — upgrading encoder X264 -> Amf (Audit I-3)"
+                            );
+                            config.preferences.encoder.encoder =
+                                constants::encoding::VideoEncoderType::Amf;
+                            if let Err(e) = config.save() {
+                                tracing::warn!(e=?e, "Failed to persist Amf migration");
+                            }
+                        }
+                        Ok(false) => {
+                            tracing::debug!(
+                                "No NVIDIA/Intel/AMD GPU detected, keeping X264 (software)"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                e=?e,
+                                "AMD vendor probe failed, keeping X264 (software)"
+                            );
+                        }
+                    }
                 }
             }
         }
