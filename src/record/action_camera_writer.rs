@@ -53,6 +53,7 @@
 //!   "timestamp": <f64 seconds>,
 //!   "timestamp_ns": <u64>,   // PRD: same instant as `timestamp`, in ns
 //!   "time": "MM-DD HH:MM:SS",  // PRD page 4: wall-clock (UTC) of this frame
+//!   "fps": <f64>,  // PRD page 4: per-session effective FPS
 //!   "input_modality": "keyboard_mouse" | "gamepad" | "mixed",
 //!   "mouseX": <f64 in [0, 1]> | null,
 //!   "mouseY": <f64 in [0, 1]> | null,
@@ -303,6 +304,14 @@ pub struct ActionCameraRecord {
     /// minute+second triple because dropping precision at the recorder
     /// is irreversible, while the buyer can always truncate on their side.
     pub time: String,
+    /// PRD: effective frames-per-second observed during this session.
+    /// Sourced from `metadata.json::fps_effective` (frame_count / duration
+    /// from the recorder's FPS logger). Falls back to
+    /// `metadata.json::average_fps` if `fps_effective` is absent, and to
+    /// `0.0` if neither is available — this matches the schema policy of
+    /// "always populated so the buyer plugin doesn't special-case nulls".
+    /// Constant across the session (mirrors PRD's per-session FPS notion).
+    pub fps: f64,
     pub input_modality: InputModality,
     #[serde(rename = "mouseX")]
     pub mouse_x: Option<f64>,
@@ -464,9 +473,8 @@ struct FrameRow {
 /// for the action-camera-tests crate (which deliberately avoids the
 /// Windows-only deps).
 ///
-/// Currently models only `wall_clock_start` (PRD `time` anchor). Subsequent
-/// Audit K commits add `fps_effective` / `average_fps` for the PRD `fps`
-/// field.
+/// Models `wall_clock_start` (PRD `time` anchor) and the two FPS sources
+/// the PRD `fps` field resolves against.
 #[derive(Debug, serde::Deserialize, Default)]
 struct MetadataPartial {
     /// RFC 3339 string written by `local_recording.rs` at session start
@@ -476,6 +484,17 @@ struct MetadataPartial {
     /// emitted (never missing) but identifiably synthetic.
     #[serde(default)]
     wall_clock_start: Option<String>,
+    /// `frame_count / duration_sec` as measured by the recorder's FPS
+    /// logger. PRD `fps` field's preferred source. See
+    /// `crate::output_types::Metadata::fps_effective`.
+    #[serde(default)]
+    fps_effective: Option<f64>,
+    /// Live-sampled running average from the FPS heartbeat. Used as a
+    /// fallback when `fps_effective` is absent (older recordings) so the
+    /// PRD `fps` field stays populated. See
+    /// `crate::output_types::Metadata::average_fps`.
+    #[serde(default)]
+    average_fps: Option<f64>,
 }
 
 /// Read `metadata.json` into the subset we need.
@@ -490,14 +509,14 @@ fn read_metadata_partial(path: &Path) -> MetadataPartial {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::debug!(
-                "metadata.json not present at {} — PRD `time` will fall back to epoch",
+                "metadata.json not present at {} — PRD `time` will fall back to epoch, `fps` to 0.0",
                 path.display()
             );
             return MetadataPartial::default();
         }
         Err(e) => {
             tracing::warn!(
-                "metadata.json read failed at {} ({e}); PRD `time` will use default",
+                "metadata.json read failed at {} ({e}); PRD `time` / `fps` will use defaults",
                 path.display()
             );
             return MetadataPartial::default();
@@ -505,7 +524,7 @@ fn read_metadata_partial(path: &Path) -> MetadataPartial {
     };
     serde_json::from_str::<MetadataPartial>(&raw).unwrap_or_else(|e| {
         tracing::warn!(
-            "metadata.json parse failed at {} ({e}); PRD `time` will use default",
+            "metadata.json parse failed at {} ({e}); PRD `time` / `fps` will use defaults",
             path.display()
         );
         MetadataPartial::default()
@@ -545,6 +564,26 @@ fn format_prd_time(anchor: DateTime<Utc>, t_ns: u64) -> String {
         .checked_add_signed(chrono::TimeDelta::nanoseconds(offset_ns))
         .unwrap_or(anchor);
     dt.format(PRD_TIME_FORMAT).to_string()
+}
+
+/// Resolve the per-session FPS scalar for the PRD `fps` field.
+///
+/// Precedence: `fps_effective` → `average_fps` → `0.0`. The fallback to
+/// zero (rather than `f64::NAN`) keeps the emitted JSON valid and matches
+/// the writer's blanket policy of "missing inputs degrade to defaults,
+/// never NaN/Inf". Reject non-finite values defensively — a corrupt
+/// metadata.json could in principle round-trip a NaN through `Option<f64>`,
+/// and forwarding that to JSON would produce invalid output.
+fn resolve_session_fps(meta: &MetadataPartial) -> f64 {
+    for cand in [meta.fps_effective, meta.average_fps] {
+        if let Some(v) = cand
+            && v.is_finite()
+            && v >= 0.0
+        {
+            return v;
+        }
+    }
+    0.0
 }
 
 /// One row from `game_state.jsonl`, written by the MC Fabric mod's
@@ -630,6 +669,11 @@ fn build_records(
     // unix epoch is used as a fallback when metadata is missing so the
     // field stays well-typed.
     wall_clock_anchor: DateTime<Utc>,
+    // PRD `fps` — per-session effective FPS. Constant across every
+    // record in this session (PRD has no per-frame FPS notion). Pulled
+    // from `metadata.json::fps_effective` (preferred) with
+    // `average_fps` as a fallback; `0.0` if neither is present.
+    session_fps: f64,
 ) -> Vec<ActionCameraRecord> {
     let mut records: Vec<ActionCameraRecord> = Vec::with_capacity(frames.len());
 
@@ -877,6 +921,9 @@ fn build_records(
             // `PRD_TIME_FORMAT`. Anchor + frame offset; falls back to
             // epoch when metadata is missing (see `format_prd_time`).
             time: format_prd_time(wall_clock_anchor, timestamp_ns),
+            // PRD `fps`: per-session effective FPS, constant across every
+            // record in the session. Resolved once before the loop.
+            fps: session_fps,
             input_modality: modality,
             mouse_x: if has_kbm {
                 Some(cursor_x / screen_w_f)
@@ -1021,10 +1068,10 @@ pub async fn write_action_camera_json(
     let inputs_path = session_dir.join(constants::filename::recording::INPUTS);
     let frames_path = session_dir.join(constants::filename::recording::FRAMES_JSONL);
     let game_state_path = session_dir.join(constants::filename::recording::GAME_STATE_JSONL);
-    // `metadata.json` powers the PRD `time` anchor (Audit K P0 field).
-    // Read with a tolerant parser — missing-file is the common path for
-    // non-MC recordings or partial sessions, and we degrade to safe
-    // defaults rather than poisoning the writer.
+    // `metadata.json` powers the PRD `time` anchor + `fps` scalar
+    // (Audit K P0 fields). Read with a tolerant parser — missing-file
+    // is the common path for non-MC recordings or partial sessions, and
+    // we degrade to safe defaults rather than poisoning the writer.
     let metadata_path = session_dir.join(constants::filename::recording::METADATA);
     let out_path = session_dir.join(constants::filename::recording::ACTION_CAMERA_JSON);
 
@@ -1052,11 +1099,12 @@ pub async fn write_action_camera_json(
             }
         };
 
-        // Resolve PRD `time` anchor from metadata.json. Fallback to the
-        // unix epoch when metadata is absent or malformed, so the new
-        // wire field is always present.
+        // Resolve PRD `time` anchor + `fps` scalar from metadata.json.
+        // Both fallbacks ensure the new wire fields are always present,
+        // even when the metadata file is absent or partially populated.
         let meta = read_metadata_partial(&metadata_path);
         let wall_clock_anchor = resolve_wall_clock_anchor(&meta);
+        let session_fps = resolve_session_fps(&meta);
 
         let records = build_records(
             &inputs,
@@ -1065,6 +1113,7 @@ pub async fn write_action_camera_json(
             screen_w,
             screen_h,
             wall_clock_anchor,
+            session_fps,
         );
         let count = records.len();
 
@@ -1118,6 +1167,13 @@ mod tests {
         DateTime::<Utc>::from_timestamp(0, 0).expect("epoch is in range")
     }
 
+    /// Helper: default session FPS for tests that don't exercise the
+    /// PRD `fps` field directly. Mirrors the writer's
+    /// `resolve_session_fps` fallback when metadata is absent.
+    fn test_fps() -> f64 {
+        0.0
+    }
+
     #[test]
     fn cursor_starts_at_center_when_no_inputs() {
         // No events, single frame at t=0. Cursor must be reported at the
@@ -1125,7 +1181,7 @@ mod tests {
         // No events → modality falls back to keyboard_mouse (legacy schema).
         let frames = vec![frame_row(0, 0)];
         let inputs: Vec<InputRow> = vec![];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].input_modality, InputModality::KeyboardMouse);
         assert!((recs[0].mouse_x.unwrap() - 0.5).abs() < 1e-12);
@@ -1159,7 +1215,7 @@ mod tests {
             frame_row(0, 0),
             frame_row(1, 33_333_333), // ~30 fps
         ];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         assert_eq!(recs.len(), 2);
         // Frame 0 at t=0: only the START event (timestamp 0 session) has
         // been applied; cursor is still at center, delta is 0.
@@ -1187,7 +1243,7 @@ mod tests {
             input_row(1000.001, "MOUSE_MOVE", serde_json::json!([-5000, -5000])),
         ];
         let frames = vec![frame_row(0, 16_000_000)];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         assert!((recs[0].mouse_x.unwrap() - 0.0).abs() < 1e-12);
         assert!((recs[0].mouse_y.unwrap() - 0.0).abs() < 1e-12);
 
@@ -1195,7 +1251,7 @@ mod tests {
             input_row(1000.000, "START", serde_json::json!([])),
             input_row(1000.001, "MOUSE_MOVE", serde_json::json!([5000, 5000])),
         ];
-        let recs2 = build_records(&inputs2, &frames, None, 1920, 1080, test_anchor());
+        let recs2 = build_records(&inputs2, &frames, None, 1920, 1080, test_anchor(), test_fps());
         assert!((recs2[0].mouse_x.unwrap() - 1.0).abs() < 1e-12);
         assert!((recs2[0].mouse_y.unwrap() - 1.0).abs() < 1e-12);
     }
@@ -1220,7 +1276,7 @@ mod tests {
             frame_row(1, 30_000_000), // 0.030s — W and D held
             frame_row(2, 50_000_000), // 0.050s — none held
         ];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         assert_eq!(recs[0].key_code, Some(vec![65, 87])); // A, W (sorted ascending)
         assert_eq!(recs[1].key_code, Some(vec![68, 87])); // D, W
         assert!(recs[2].key_code.as_ref().unwrap().is_empty());
@@ -1237,7 +1293,7 @@ mod tests {
             input_row(1000.003, "KEYBOARD", serde_json::json!([87, true])),
         ];
         let frames = vec![frame_row(0, 10_000_000)];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         assert_eq!(recs[0].key_code, Some(vec![87]));
     }
 
@@ -1251,7 +1307,7 @@ mod tests {
             input_row(1000.001, "KEYBOARD", serde_json::json!([87, false])),
         ];
         let frames = vec![frame_row(0, 10_000_000)];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         assert!(recs[0].key_code.as_ref().unwrap().is_empty());
     }
 
@@ -1270,7 +1326,7 @@ mod tests {
             input_row(1000.005, "HOOK_START", serde_json::json!([])),
         ];
         let frames = vec![frame_row(0, 10_000_000)];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         assert_eq!(recs[0].input_modality, InputModality::KeyboardMouse);
         assert!((recs[0].mouse_x.unwrap() - 0.5).abs() < 1e-12);
         assert!((recs[0].mouse_y.unwrap() - 0.5).abs() < 1e-12);
@@ -1292,7 +1348,7 @@ mod tests {
             input_row(1000.004, "MOUSE_MOVE", serde_json::json!([5, 5])), // valid
         ];
         let frames = vec![frame_row(0, 10_000_000)];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         // The two valid events: cursor moves +5,+5 and W is held.
         let expect_x = (1920.0 / 2.0 + 5.0) / 1920.0;
         let expect_y = (1080.0 / 2.0 + 5.0) / 1080.0;
@@ -1313,6 +1369,7 @@ mod tests {
             timestamp: 0.0333,
             timestamp_ns: 33_333_333,
             time: "01-01 00:00:00".to_string(),
+            fps: 30.0,
             input_modality: InputModality::KeyboardMouse,
             mouse_x: Some(0.506),
             mouse_y: Some(0.507),
@@ -1351,6 +1408,7 @@ mod tests {
         assert!(obj.contains_key("timestamp"));
         assert!(obj.contains_key("timestamp_ns"));
         assert!(obj.contains_key("time"));
+        assert!(obj.contains_key("fps"));
         assert!(obj.contains_key("input_modality"));
         assert!(obj.contains_key("mouseX"));
         assert!(obj.contains_key("mouseY"));
@@ -1403,7 +1461,7 @@ mod tests {
         // not a null or a malformed file.
         let inputs = vec![input_row(1000.0, "START", serde_json::json!([]))];
         let frames: Vec<FrameRow> = vec![];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         assert!(recs.is_empty());
         let json = serde_json::to_string(&recs).expect("serialize");
         assert_eq!(json, "[]");
@@ -1416,7 +1474,7 @@ mod tests {
         // not produce NaN — we'd be writing invalid JSON.
         let inputs = vec![input_row(1000.0, "START", serde_json::json!([]))];
         let frames = vec![frame_row(0, 0)];
-        let recs = build_records(&inputs, &frames, None, 0, 0, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 0, 0, test_anchor(), test_fps());
         assert!(recs[0].mouse_x.unwrap().is_finite());
         assert!(recs[0].mouse_y.unwrap().is_finite());
     }
@@ -1567,7 +1625,7 @@ mod tests {
             input_row(1000.005, "GAMEPAD_BUTTON", serde_json::json!([12, true])),
         ];
         let frames = vec![frame_row(0, 10_000_000)];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         assert_eq!(recs[0].input_modality, InputModality::Gamepad);
         // KBM fields nulled out.
         assert!(recs[0].mouse_x.is_none());
@@ -1597,7 +1655,7 @@ mod tests {
             input_row(1000.003, "GAMEPAD_BUTTON", serde_json::json!([2, true])), // B
         ];
         let frames = vec![frame_row(0, 10_000_000)];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         assert_eq!(recs[0].input_modality, InputModality::Mixed);
         assert_eq!(recs[0].key_code, Some(vec![87]));
         assert!(recs[0].mouse_x.is_some());
@@ -1619,7 +1677,7 @@ mod tests {
             input_row(1000.004, "GAMEPAD_AXIS", serde_json::json!([6, 2.0])), // overflow trigger
         ];
         let frames = vec![frame_row(0, 10_000_000)];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         assert_eq!(recs[0].gamepad_left_stick_x, Some(1.0));
         assert_eq!(recs[0].gamepad_left_stick_y, Some(-1.0));
         assert_eq!(recs[0].gamepad_left_trigger, Some(0.0));
@@ -1661,7 +1719,7 @@ mod tests {
             expected |= bit;
         }
         let frames = vec![frame_row(0, 100_000_000)];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         assert_eq!(recs[0].gamepad_buttons, Some(expected));
         assert_eq!(expected, 0xF3FF); // sanity: all 14 mapped slots set
     }
@@ -1679,7 +1737,7 @@ mod tests {
             input_row(1000.003, "GAMEPAD_BUTTON", serde_json::json!([9, true])),  // LT2
         ];
         let frames = vec![frame_row(0, 10_000_000)];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         // Modality is gamepad (we have gamepad events) — bitmask is Some(0).
         assert_eq!(recs[0].input_modality, InputModality::Gamepad);
         assert_eq!(recs[0].gamepad_buttons, Some(0));
@@ -1695,7 +1753,7 @@ mod tests {
             input_row(1000.001, "GAMEPAD_BUTTON", serde_json::json!([1, false])),
         ];
         let frames = vec![frame_row(0, 10_000_000)];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         assert_eq!(recs[0].input_modality, InputModality::Gamepad);
         assert_eq!(recs[0].gamepad_buttons, Some(0));
     }
@@ -1835,7 +1893,7 @@ mod tests {
         // to 0.0 (not null) so the schema is always populated.
         let inputs = vec![input_row(1000.0, "START", serde_json::json!([]))];
         let frames = vec![frame_row(0, 0)];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         assert_eq!(recs.len(), 1);
         assert!(recs[0].camera_position.is_none());
         assert!(recs[0].rotation_oula.is_none());
@@ -1863,7 +1921,7 @@ mod tests {
         let frames = vec![frame_row(0, 0)]; // session t=0
         // Tick at the same instant as the session anchor.
         let game_state = vec![gs_row(1_000_000, 10.0, 64.0, -5.0, 90.0, 0.0)];
-        let recs = build_records(&inputs, &frames, Some(&game_state), 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, Some(&game_state), 1920, 1080, test_anchor(), test_fps());
         let r = &recs[0];
         // MC pos (10, 64, -5) → customer's (10, 64, 5).
         let cam = r.camera_position.expect("camera_position");
@@ -1912,7 +1970,7 @@ mod tests {
         gs.velocity_y = 4.0;
         gs.velocity_z = 0.0;
         let game_state = vec![gs];
-        let recs = build_records(&inputs, &frames, Some(&game_state), 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, Some(&game_state), 1920, 1080, test_anchor(), test_fps());
         assert!((recs[0].speed - 5.0).abs() < 1e-9);
         assert!((recs[0].player_speed - 5.0).abs() < 1e-9);
     }
@@ -1937,7 +1995,7 @@ mod tests {
             gs_row(1_000_100, 2.0, 64.0, 0.0, 0.0, 0.0), // anchor + 0.1
             gs_row(1_000_500, 3.0, 64.0, 0.0, 0.0, 0.0), // anchor + 0.5
         ];
-        let recs = build_records(&inputs, &frames, Some(&game_state), 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, Some(&game_state), 1920, 1080, test_anchor(), test_fps());
         // Frame 0 (t=0.04s) → nearest tick is t=0 with x=1.0.
         assert_eq!(recs[0].camera_position.unwrap().x, 1.0);
         // Frame 1 (t=0.30s) → nearest tick is t=0.10 with x=2.0
@@ -1995,7 +2053,7 @@ mod tests {
         // a missing-key check on this field.
         let inputs = vec![input_row(1000.0, "START", serde_json::json!([]))];
         let frames = vec![frame_row(0, 0)];
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor());
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), test_fps());
         let v = serde_json::to_value(&recs[0]).expect("serialize");
         let obj = v.as_object().expect("record is object");
         assert!(obj.contains_key("time"), "missing PRD `time` key: {obj:?}");
@@ -2021,7 +2079,7 @@ mod tests {
         let anchor = DateTime::parse_from_rfc3339("2026-05-11T15:30:45Z")
             .expect("rfc3339")
             .with_timezone(&Utc);
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, anchor);
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, anchor, test_fps());
         let time_str = &recs[0].time;
         // Surface shape: NN-NN NN:NN:NN where each N is an ASCII digit.
         let bytes = time_str.as_bytes();
@@ -2062,7 +2120,7 @@ mod tests {
         let anchor = DateTime::parse_from_rfc3339("2026-05-11T15:30:45Z")
             .expect("rfc3339")
             .with_timezone(&Utc);
-        let recs = build_records(&inputs, &frames, None, 1920, 1080, anchor);
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, anchor, test_fps());
         assert_eq!(recs[0].time, "05-11 15:30:45");
         assert_eq!(recs[1].time, "05-11 16:30:45");
     }
@@ -2073,6 +2131,7 @@ mod tests {
         // is RFC 3339. Verify the writer parses it correctly.
         let meta = MetadataPartial {
             wall_clock_start: Some("2026-05-11T15:30:45Z".to_string()),
+            ..MetadataPartial::default()
         };
         let dt = resolve_wall_clock_anchor(&meta);
         assert_eq!(
@@ -2093,6 +2152,7 @@ mod tests {
 
         let bad = MetadataPartial {
             wall_clock_start: Some("not-a-date".to_string()),
+            ..MetadataPartial::default()
         };
         assert_eq!(resolve_wall_clock_anchor(&bad).timestamp(), 0);
     }
@@ -2100,11 +2160,13 @@ mod tests {
     #[test]
     fn read_metadata_partial_tolerates_missing_file() {
         // ENOENT on metadata.json must NOT poison the writer — PRD
-        // `time` falls back to defaults instead.
+        // `time` / `fps` fall back to defaults instead.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("metadata.json");
         let meta = read_metadata_partial(&path);
         assert!(meta.wall_clock_start.is_none());
+        assert!(meta.fps_effective.is_none());
+        assert!(meta.average_fps.is_none());
     }
 
     #[test]
@@ -2125,6 +2187,8 @@ mod tests {
                 "end_timestamp": 1010.0,
                 "duration": 10.0,
                 "wall_clock_start": "2026-05-11T15:30:45Z",
+                "fps_effective": 29.97,
+                "average_fps": 30.0,
                 "hardware_specs": null,
                 "extra_unknown_field": [1, 2, 3]
             }"#,
@@ -2135,14 +2199,16 @@ mod tests {
             meta.wall_clock_start.as_deref(),
             Some("2026-05-11T15:30:45Z")
         );
+        assert_eq!(meta.fps_effective, Some(29.97));
+        assert_eq!(meta.average_fps, Some(30.0));
     }
 
     #[test]
-    fn end_to_end_with_metadata_populates_time() {
+    fn end_to_end_with_metadata_populates_time_and_fps() {
         // Full happy-path coverage: a synthetic metadata.json provides
-        // `wall_clock_start`, and the resulting records carry the
-        // expected `time` value. Exercises the public-API resolution
-        // path (not just `build_records` in isolation).
+        // `wall_clock_start` + `fps_effective`, and the resulting records
+        // carry the expected `time` / `fps` values. Exercises the
+        // public-API resolution path (not just `build_records` in isolation).
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join(constants::filename::recording::METADATA),
@@ -2154,6 +2220,7 @@ mod tests {
                 "end_timestamp": 0.0,
                 "duration": 0.0,
                 "wall_clock_start": "2026-05-11T15:30:45Z",
+                "fps_effective": 29.97,
                 "hardware_specs": null
             }"#,
         )
@@ -2189,6 +2256,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&raw).expect("parse");
         let rec = &v.as_array().unwrap()[0];
         assert_eq!(rec["time"].as_str(), Some("05-11 15:30:45"));
+        assert_eq!(rec["fps"].as_f64(), Some(29.97));
     }
 
     #[test]
@@ -2229,5 +2297,141 @@ mod tests {
         let rec = &v.as_array().unwrap()[0];
         // Epoch is 1970-01-01T00:00:00Z; frame offset 0 → that exact instant.
         assert_eq!(rec["time"].as_str(), Some("01-01 00:00:00"));
+        // PRD `fps` falls back to 0.0 when metadata is missing.
+        assert_eq!(rec["fps"].as_f64(), Some(0.0));
+    }
+
+    // ------------------------------------ PRD Audit K P0: `fps` field
+
+    #[test]
+    fn action_camera_record_has_prd_fps_field() {
+        // PRD page 4 requires `fps` on every action_camera record. It
+        // must serialize as a top-level numeric key. Verifies the
+        // buyer's plugin won't fail a missing-key check on this field.
+        let inputs = vec![input_row(1000.0, "START", serde_json::json!([]))];
+        let frames = vec![frame_row(0, 0)];
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), 30.0);
+        let v = serde_json::to_value(&recs[0]).expect("serialize");
+        let obj = v.as_object().expect("record is object");
+        assert!(obj.contains_key("fps"), "missing PRD `fps` key: {obj:?}");
+        assert_eq!(obj["fps"].as_f64(), Some(30.0));
+    }
+
+    #[test]
+    fn fps_field_is_session_constant() {
+        // The PRD `fps` field has no per-frame variation in the writer —
+        // it's the session-level scalar resolved once from
+        // `metadata.json::fps_effective`. Every record in a session
+        // must report the same value.
+        let inputs = vec![input_row(1000.0, "START", serde_json::json!([]))];
+        let frames = vec![
+            frame_row(0, 0),
+            frame_row(1, 33_333_333),
+            frame_row(2, 66_666_666),
+        ];
+        let recs = build_records(&inputs, &frames, None, 1920, 1080, test_anchor(), 28.5);
+        assert_eq!(recs.len(), 3);
+        for (i, r) in recs.iter().enumerate() {
+            assert_eq!(r.fps, 28.5, "fps mismatch at frame {i}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn resolve_session_fps_prefers_fps_effective() {
+        // `fps_effective` is the PRD-preferred source (it's
+        // frame_count/duration from the recorder's FPS logger).
+        // `average_fps` is only consulted when `fps_effective` is None.
+        let meta = MetadataPartial {
+            fps_effective: Some(29.97),
+            average_fps: Some(60.0),
+            ..MetadataPartial::default()
+        };
+        assert_eq!(resolve_session_fps(&meta), 29.97);
+    }
+
+    #[test]
+    fn resolve_session_fps_falls_back_to_average_fps() {
+        // Older recordings only have `average_fps`. The writer must use
+        // it as a fallback so the PRD `fps` field stays populated.
+        let meta = MetadataPartial {
+            average_fps: Some(59.94),
+            ..MetadataPartial::default()
+        };
+        assert_eq!(resolve_session_fps(&meta), 59.94);
+    }
+
+    #[test]
+    fn resolve_session_fps_zero_when_both_absent() {
+        // Missing-metadata fallback: PRD `fps` must be `0.0`, not NaN
+        // (NaN is not valid JSON and would corrupt the wire format).
+        let meta = MetadataPartial::default();
+        assert_eq!(resolve_session_fps(&meta), 0.0);
+    }
+
+    #[test]
+    fn resolve_session_fps_rejects_non_finite() {
+        // Defensive: a corrupt metadata.json with NaN/Inf in fps_effective
+        // must not propagate to the JSON output. Reject and fall through
+        // to the next candidate (or 0.0 if nothing else is valid).
+        let meta = MetadataPartial {
+            fps_effective: Some(f64::NAN),
+            average_fps: Some(30.0),
+            ..MetadataPartial::default()
+        };
+        assert_eq!(resolve_session_fps(&meta), 30.0);
+
+        let meta_inf = MetadataPartial {
+            fps_effective: Some(f64::INFINITY),
+            ..MetadataPartial::default()
+        };
+        assert_eq!(resolve_session_fps(&meta_inf), 0.0);
+    }
+
+    #[test]
+    fn end_to_end_with_average_fps_only() {
+        // Older recordings without `fps_effective` should still get a
+        // populated PRD `fps` field via the `average_fps` fallback.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(constants::filename::recording::METADATA),
+            r#"{
+                "game_exe": "javaw.exe",
+                "session_id": "s2",
+                "hardware_id": "h2",
+                "start_timestamp": 0.0,
+                "end_timestamp": 0.0,
+                "duration": 0.0,
+                "average_fps": 59.94,
+                "hardware_specs": null
+            }"#,
+        )
+        .expect("write metadata");
+        std::fs::write(
+            dir.path().join(constants::filename::recording::INPUTS),
+            "{\"timestamp\":1000.0,\"event_type\":\"START\",\"event_args\":[]}\n",
+        )
+        .expect("write inputs");
+        std::fs::write(
+            dir.path()
+                .join(constants::filename::recording::FRAMES_JSONL),
+            "{\"idx\":0,\"t_ns\":0}\n",
+        )
+        .expect("write frames");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        rt.block_on(write_action_camera_json(dir.path(), 1920, 1080))
+            .expect("write");
+
+        let raw = std::fs::read_to_string(
+            dir.path()
+                .join(constants::filename::recording::ACTION_CAMERA_JSON),
+        )
+        .expect("read");
+        let v: serde_json::Value = serde_json::from_str(&raw).expect("parse");
+        let rec = &v.as_array().unwrap()[0];
+        assert_eq!(rec["fps"].as_f64(), Some(59.94));
     }
 }
