@@ -7,6 +7,10 @@ mod obs_embedded_recorder;
 mod obs_socket_recorder;
 mod recorder;
 mod recording;
+/// Stream BN (rc17.2): post-session lint v3 self-validation hook.
+/// Re-runs the 32-criteria PRD lint after `Recording::stop()` and
+/// writes `lint_result.json` + toast on FAIL. See module docs.
+pub mod validation;
 
 // LEM format modules
 pub mod lem_input_recorder;
