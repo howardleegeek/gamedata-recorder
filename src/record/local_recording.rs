@@ -481,6 +481,11 @@ impl LocalRecording {
         let uploaded_file_path = path.join(constants::filename::recording::UPLOADED);
         let upload_progress_file_path = path.join(constants::filename::recording::UPLOAD_PROGRESS);
         let metadata_path = path.join(constants::filename::recording::METADATA);
+        // `metadata.json.tmp` is the temp sibling written by `durable_write`
+        // before the atomic rename to `metadata.json`. Its presence without
+        // the final file means we crashed mid-write.
+        let metadata_tmp_path =
+            path.join(format!("{}.tmp", constants::filename::recording::METADATA));
 
         // Get the folder name
         let folder_name = path
@@ -513,7 +518,7 @@ impl LocalRecording {
             })
         } else {
             // Not uploaded yet (and not invalid)
-            let metadata: Option<Box<Metadata>> = std::fs::read_to_string(metadata_path)
+            let metadata: Option<Box<Metadata>> = std::fs::read_to_string(&metadata_path)
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .map(Box::new);
@@ -563,6 +568,70 @@ impl LocalRecording {
                         );
                         Some(LocalRecording::Unuploaded { info, metadata })
                     }
+                }
+            } else if !metadata_path.is_file() {
+                // Audit H-P1-1: reboot / crash recovery classification.
+                //
+                // A clean stop ALWAYS writes `metadata.json` (via
+                // `write_metadata_and_validate`). If we got here it means
+                // there is no `.uploaded`, no `.invalid`, no `.server_invalid`,
+                // no `.upload-progress` — and ALSO no `metadata.json`.
+                //
+                // The only way this state arises is mid-recording death:
+                //   * OS reboot / power loss between video chunks
+                //   * Process kill (taskmgr / OOM / crash) before finalize
+                //   * Mid-write crash leaving `metadata.json.tmp` behind
+                //
+                // Without metadata we have no `session_id`, no `duration`,
+                // no `hardware_id`, no `frame_count` — the buyer-facing
+                // schema is unsatisfiable. Uploading the partial mp4 anyway
+                // would ship a corrupt session to the customer and get
+                // rejected on ingest.
+                //
+                // Truly empty directories (the create_at race where we
+                // created the folder but no files landed yet) get a
+                // soft pass: they're empty so they're not uploaded, and
+                // a follow-up sweep can garbage-collect them.
+                let is_empty = path
+                    .read_dir()
+                    .map(|mut it| it.next().is_none())
+                    .unwrap_or(false);
+
+                if is_empty {
+                    // Empty session dir: nothing to upload, nothing to flag.
+                    // Mark Invalid with an empty-state reason so the UI can
+                    // present "Delete" without queueing for upload.
+                    Some(LocalRecording::Invalid {
+                        info,
+                        metadata,
+                        error_reasons: vec![
+                            "Empty session directory: no recording artifacts present".to_string(),
+                        ],
+                        by_server: false,
+                    })
+                } else {
+                    let reason = if metadata_tmp_path.is_file() {
+                        // Strongest evidence: we crashed BETWEEN writing the
+                        // temp file and renaming it into place.
+                        "Crash during metadata finalize: metadata.json.tmp present without metadata.json"
+                            .to_string()
+                    } else {
+                        // General reboot / process-kill case: video chunks
+                        // and/or input logs landed on disk but the clean-stop
+                        // path never ran.
+                        "Recording interrupted before clean stop: metadata.json missing (reboot / crash)"
+                            .to_string()
+                    };
+                    tracing::warn!(
+                        "Classifying recording {} as Invalid due to missing metadata.json (reboot/crash recovery)",
+                        info.folder_name
+                    );
+                    Some(LocalRecording::Invalid {
+                        info,
+                        metadata,
+                        error_reasons: vec![reason],
+                        by_server: false,
+                    })
                 }
             } else {
                 Some(LocalRecording::Unuploaded { info, metadata })
@@ -862,5 +931,211 @@ mod durability_tests {
             new,
             "atomic write must fully replace the file, not merge"
         );
+    }
+}
+
+#[cfg(test)]
+mod classification_tests {
+    //! Audit H-P1-1 coverage: `LocalRecording::from_path` MUST classify a
+    //! session directory with no `metadata.json` as `Invalid` rather than
+    //! `Unuploaded`.
+    //!
+    //! Without this guard, a session whose recording was interrupted by an
+    //! OS reboot, power loss, or process kill — and therefore never reached
+    //! `write_metadata_and_validate` — would be picked up by `scan_directory`,
+    //! classified `Unuploaded`, and queued for upload. The buyer ingest path
+    //! requires a populated metadata.json (session_id, hardware_id, duration,
+    //! frame_count, …); a partial mp4 without those fields gets rejected and
+    //! we burn customer trust on every reboot.
+
+    use super::LocalRecording;
+    use tempfile::TempDir;
+
+    /// Build a session dir that looks like the create_at output:
+    /// a folder named with a parseable session timestamp.
+    fn make_session_dir() -> TempDir {
+        // Use a parent tempdir + a named session subdir so the folder
+        // name parses through `parse_session_timestamp`. We don't strictly
+        // need that for classification to work but it mirrors production.
+        let parent = TempDir::new().expect("parent tempdir");
+        let session_path = parent.path().join("session_20260115_143022_deadbeef");
+        std::fs::create_dir_all(&session_path).expect("create session dir");
+        // Trick: leak the path inside the parent TempDir; the parent guards
+        // cleanup. We return the parent so the drop chain cleans everything.
+        parent
+    }
+
+    fn session_path(parent: &TempDir) -> std::path::PathBuf {
+        parent.path().join("session_20260115_143022_deadbeef")
+    }
+
+    #[test]
+    fn metadata_less_session_with_partial_mp4_is_invalid_not_unuploaded() {
+        // The reboot scenario: video file was being written, OS rebooted,
+        // metadata.json was never produced.
+        let parent = make_session_dir();
+        let session = session_path(&parent);
+        // Simulate a partial recording artifact: an mp4 with some bytes
+        // (could be torn, but we don't care — the point is it's not empty).
+        std::fs::write(
+            session.join(constants::filename::recording::VIDEO),
+            b"\x00\x00\x00\x20ftypisom partial mp4 bytes from before reboot",
+        )
+        .expect("write partial mp4");
+
+        let recording = LocalRecording::from_path(&session)
+            .expect("from_path should classify the dir, not return None");
+
+        match recording {
+            LocalRecording::Invalid {
+                error_reasons,
+                by_server,
+                ..
+            } => {
+                assert!(
+                    !by_server,
+                    "reboot recovery must NOT be flagged as a server-side rejection"
+                );
+                assert!(
+                    !error_reasons.is_empty(),
+                    "Invalid recording must carry at least one error reason"
+                );
+                assert!(
+                    error_reasons.iter().any(|r| r.contains("metadata.json")
+                        || r.contains("reboot")
+                        || r.contains("crash")),
+                    "error reasons should mention the metadata-missing root cause, got {:?}",
+                    error_reasons
+                );
+            }
+            other => panic!(
+                "expected LocalRecording::Invalid for metadata-less session, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn metadata_tmp_without_final_is_invalid_with_finalize_crash_reason() {
+        // The mid-write crash scenario: `durable_write` wrote `metadata.json.tmp`
+        // and crashed before the atomic rename to `metadata.json`.
+        let parent = make_session_dir();
+        let session = session_path(&parent);
+        std::fs::write(
+            session.join(constants::filename::recording::VIDEO),
+            b"partial mp4",
+        )
+        .unwrap();
+        std::fs::write(
+            session.join(format!("{}.tmp", constants::filename::recording::METADATA)),
+            br#"{"partial":"yes"}"#,
+        )
+        .unwrap();
+
+        let recording = LocalRecording::from_path(&session).expect("classified");
+        match recording {
+            LocalRecording::Invalid { error_reasons, .. } => {
+                assert!(
+                    error_reasons.iter().any(|r| r.contains("finalize")
+                        || r.contains(".tmp")
+                        || r.contains("metadata.json.tmp")),
+                    "should distinguish mid-finalize crash from generic reboot, got {:?}",
+                    error_reasons
+                );
+            }
+            other => panic!(
+                "expected Invalid for metadata.json.tmp-only session, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn empty_session_dir_is_invalid_but_marked_empty() {
+        // The benign race: `create_at` made the dir but no recording artifacts
+        // ever landed. We still want to classify Invalid (so it isn't queued
+        // for upload) but the reason should signal "empty" so the UI / a
+        // future GC sweep can clean it up without alarm.
+        let parent = make_session_dir();
+        let session = session_path(&parent);
+        // Note: do NOT write any files.
+
+        let recording = LocalRecording::from_path(&session).expect("classified");
+        match recording {
+            LocalRecording::Invalid { error_reasons, .. } => {
+                assert!(
+                    error_reasons
+                        .iter()
+                        .any(|r| r.to_lowercase().contains("empty")),
+                    "empty dir reason should mention emptiness, got {:?}",
+                    error_reasons
+                );
+            }
+            other => panic!("expected Invalid for empty session dir, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn metadata_json_present_with_no_markers_is_unuploaded() {
+        // Sanity / regression: the happy path still works — a clean-stop
+        // recording with metadata.json and no markers must classify
+        // `Unuploaded` so it CAN be uploaded.
+        let parent = make_session_dir();
+        let session = session_path(&parent);
+        std::fs::write(
+            session.join(constants::filename::recording::VIDEO),
+            b"clean mp4",
+        )
+        .unwrap();
+        std::fs::write(
+            session.join(constants::filename::recording::METADATA),
+            // Minimal but parseable Metadata isn't required here — `from_path`
+            // tolerates non-deserializable metadata by carrying `None`. What
+            // matters is that the file is present so we DON'T flip to Invalid.
+            br#"{"game_exe":"x.exe"}"#,
+        )
+        .unwrap();
+
+        let recording = LocalRecording::from_path(&session).expect("classified");
+        assert!(
+            matches!(recording, LocalRecording::Unuploaded { .. }),
+            "session with metadata.json and no markers must be Unuploaded, got {:?}",
+            recording
+        );
+    }
+
+    #[test]
+    fn invalid_marker_overrides_missing_metadata() {
+        // Edge case: if the `.invalid` sidecar exists, that classification
+        // wins even if metadata.json is also missing (we shouldn't double-
+        // report the reboot reason on a recording the validator already
+        // flagged).
+        let parent = make_session_dir();
+        let session = session_path(&parent);
+        std::fs::write(
+            session.join(constants::filename::recording::INVALID),
+            b"validator: too short\nvalidator: no inputs",
+        )
+        .unwrap();
+
+        let recording = LocalRecording::from_path(&session).expect("classified");
+        match recording {
+            LocalRecording::Invalid {
+                error_reasons,
+                by_server,
+                ..
+            } => {
+                assert!(!by_server);
+                assert_eq!(
+                    error_reasons,
+                    vec![
+                        "validator: too short".to_string(),
+                        "validator: no inputs".to_string(),
+                    ],
+                    ".invalid sidecar reasons must be passed through verbatim"
+                );
+            }
+            other => panic!("expected Invalid from .invalid marker, got {:?}", other),
+        }
     }
 }
