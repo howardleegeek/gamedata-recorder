@@ -29,7 +29,7 @@ use std::{
     collections::HashSet,
     sync::{
         Arc, Mutex, MutexGuard, OnceLock,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
         mpsc::{Receiver, SyncSender, sync_channel},
     },
 };
@@ -42,11 +42,13 @@ use color_eyre::{
 use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
-        System::LibraryLoader::GetModuleHandleA,
+        System::{LibraryLoader::GetModuleHandleA, Threading::GetCurrentThreadId},
         UI::{
             Input::{
                 self, GetRawInputData, HRAWINPUT,
-                KeyboardAndMouse::{VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2},
+                KeyboardAndMouse::{
+                    VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2,
+                },
                 MOUSE_MOVE_ABSOLUTE, MOUSE_VIRTUAL_DESKTOP, RAWINPUT, RAWINPUTDEVICE,
                 RAWINPUTDEVICE_FLAGS, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK,
                 RegisterRawInputDevices,
@@ -54,15 +56,18 @@ use windows::{
             WindowsAndMessaging::{
                 self, CallNextHookEx, CreateWindowExA, DefWindowProcA, DestroyWindow,
                 DispatchMessageA, GetMessageA, GetSystemMetrics, HHOOK, KBDLLHOOKSTRUCT, MSG,
-                PostQuitMessage, RI_KEY_BREAK, RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP,
-                RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_BUTTON_5_UP, RI_MOUSE_LEFT_BUTTON_DOWN,
-                RI_MOUSE_LEFT_BUTTON_UP, RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP,
+                MSLLHOOKSTRUCT, PostQuitMessage, PostThreadMessageW, RI_KEY_BREAK,
+                RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
+                RI_MOUSE_BUTTON_5_UP, RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP,
+                RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP,
                 RI_MOUSE_RIGHT_BUTTON_DOWN, RI_MOUSE_RIGHT_BUTTON_UP, RI_MOUSE_WHEEL,
                 RegisterClassA, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
                 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SetWindowsHookExW, ShowWindow,
                 TranslateMessage, UnhookWindowsHookEx, UnregisterClassA, WH_KEYBOARD_LL,
-                WINDOW_EX_STYLE, WINDOW_STYLE, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
-                WNDCLASSA, WS_EX_TOOLWINDOW,
+                WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+                WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER,
+                WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSA, WS_EX_TOOLWINDOW,
             },
         },
     },
@@ -283,6 +288,52 @@ static HOOK_ACTIVE_KEYS: OnceLock<Mutex<Option<Arc<Mutex<ActiveKeys>>>>> = OnceL
 /// installed but no keys pressed" from "hook silently dropped".
 static HOOK_METRICS: OnceLock<Mutex<Option<Arc<CaptureMetrics>>>> = OnceLock::new();
 
+/// rc17.2 (Stream BG): thread id of the message-pump thread that owns
+/// the LL hooks. Set by [`KbmCapture::initialize`] (which runs on the
+/// pump thread) and read by the hook callbacks so they can
+/// `PostThreadMessageW(tid, HOOK_WAKE_MSG, 0, 0)` to break the pump
+/// out of its `GetMessageA` block.
+///
+/// Why this exists: low-level hooks (`WH_KEYBOARD_LL` / `WH_MOUSE_LL`)
+/// fire inside `GetMessage`-style calls on the hook-installing thread,
+/// but firing the hook does NOT cause `GetMessage` itself to return —
+/// it only runs the callback as a side effect of message dispatch.
+/// On a hidden, zero-size message-only window with no UI, no actual
+/// `MSG`s arrive, so the pump blocks forever inside `GetMessageA` and
+/// `hook_rx` is never drained. Posting a synthetic `HOOK_WAKE_MSG`
+/// from inside the callback wakes the pump once per event so the
+/// drain loop in `run_queue` runs and the event reaches the writer.
+///
+/// `0` means "not yet initialized" — no Win32 thread id is ever 0, so
+/// the hook callback can use `0` as a sentinel to skip the post.
+/// Read with `Ordering::Relaxed` — we accept a one-iteration stale
+/// read; the worst case is the wake post is missed and the next hook
+/// firing wakes the pump for both events.
+static PUMP_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+
+/// rc17.2 (Stream BG): custom wake message posted to the pump thread
+/// from inside LL hook callbacks. Picked from the `WM_USER` range
+/// (0x0400–0x7FFF) so it can never collide with a system-defined
+/// message. The pump's `GetMessageA` returns when this is posted;
+/// the loop body then drains `hook_rx` and continues.
+const HOOK_WAKE_MSG: u32 = WM_USER;
+
+/// rc17.2 (Stream BG): last mouse-cursor position seen by
+/// [`mouse_ll_proc`], packed `(x: i32, y: i32)` into a `u64`. Used to
+/// compute relative movement deltas from the absolute screen
+/// coordinates Windows passes in `MSLLHOOKSTRUCT::pt`. Lock-free
+/// atomic so the callback can read+write without a mutex; we accept
+/// the small race window where two simultaneous callbacks could see
+/// each other's mid-update value (the resulting delta would be off by
+/// a sub-pixel for one event, which is below the noise floor of
+/// downstream consumers).
+///
+/// Sentinel: `0` (representing the unlikely real position `(0, 0)`) is
+/// treated as "no previous sample yet" so the first move after install
+/// emits a zero delta rather than jumping from `(0, 0)` to wherever
+/// the cursor actually is.
+static LAST_MOUSE_POS: AtomicU64 = AtomicU64::new(0);
+
 /// Low-level keyboard hook callback. Invoked by Windows on the thread
 /// that installed the hook (our message-pump thread) for every system-
 /// wide keyboard event.
@@ -389,6 +440,187 @@ unsafe extern "system" fn keyboard_ll_proc(
         CallNextHookEx(None, code, wparam, lparam)
     }
 }
+
+
+/// Low-level mouse hook procedure (`WH_MOUSE_LL`).
+///
+/// Safety: the function signature is dictated by Win32 (`HOOKPROC`).
+/// `code < 0` means "do not process; pass straight through" per MSDN;
+/// we honor that. For `code >= 0` we examine `wparam` for the event
+/// type and `lparam` for the `MSLLHOOKSTRUCT` containing mouse data.
+///
+/// Return value: we must call `CallNextHookEx` to let other hooks in
+/// the chain run. Returning a non-zero value would BLOCK the mouse
+/// event from reaching the active application.
+unsafe extern "system" fn mouse_ll_proc(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // SAFETY: Win32 callback boundary. All unsafe blocks below have
+    // their preconditions documented.
+    unsafe {
+        if code < 0 {
+            // MSDN: if code < 0, we MUST chain through without doing
+            // any work. Skipping CallNextHookEx is a documented bug.
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
+
+        // SAFETY: per MSDN, when this hook is installed, lparam is a
+        // pointer to a `MSLLHOOKSTRUCT` that lives at least until the
+        // callback returns. Read but do not retain the pointer.
+        let mouse = lparam.0 as *const MSLLHOOKSTRUCT;
+        if mouse.is_null() {
+            // Defensive — never seen in the wild, but a null lparam
+            // here would be a Windows bug. Chain through.
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
+
+        let hook_struct = *mouse;
+        let timestamp = std::time::Instant::now();
+
+        // Bump the event-observed counter
+        if let Some(slot) = HOOK_METRICS.get()
+            && let Ok(guard) = slot.lock()
+            && let Some(metrics) = guard.as_ref()
+        {
+            metrics.wm_input_total.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Process different mouse events
+        match wparam.0 as u32 {
+            WM_MOUSEMOVE => {
+                let x = hook_struct.pt.x;
+                let y = hook_struct.pt.y;
+                
+                // Compute delta from last position
+                let last_pos = LAST_MOUSE_POS.load(Ordering::Relaxed);
+                let last_x = (last_pos >> 32) as i32;
+                let last_y = (last_pos & 0xFFFFFFFF) as i32;
+                
+                // Store new position
+                let new_pos = ((x as u64) << 32) | (y as u32 as u64);
+                LAST_MOUSE_POS.store(new_pos, Ordering::Relaxed);
+                
+                // Only send event if we have a previous position (not first event)
+                if last_pos != 0 {
+                    let dx = x - last_x;
+                    let dy = y - last_y;
+                    
+                    if dx != 0 || dy != 0 {
+                        // Send mouse move event
+                        if let Some(slot) = HOOK_EVENT_TX.get()
+                            && let Ok(guard) = slot.lock()
+                            && let Some(tx) = guard.as_ref()
+                        {
+                            let _ = tx.try_send(Event::MouseMove([dx, dy]));
+                            
+                            // Wake the message pump so GetMessageA returns and drain runs
+                            let pump_tid = PUMP_THREAD_ID.load(Ordering::Relaxed);
+                            if pump_tid != 0 {
+                                let _ = PostThreadMessageW(pump_tid, HOOK_WAKE_MSG, WPARAM(0), LPARAM(0));
+                            }
+                        }
+                    }
+                }
+            }
+            WM_LBUTTONDOWN | WM_LBUTTONUP => {
+                let press_state = if wparam.0 as u32 == WM_LBUTTONDOWN {
+                    PressState::Pressed
+                } else {
+                    PressState::Released
+                };
+                
+                if let Some(slot) = HOOK_EVENT_TX.get()
+                    && let Ok(guard) = slot.lock()
+                    && let Some(tx) = guard.as_ref()
+                {
+                    let _ = tx.try_send(Event::MousePress {
+                        key: VK_LBUTTON.0,
+                        press_state,
+                    });
+                    
+                    // Wake the message pump
+                    let pump_tid = PUMP_THREAD_ID.load(Ordering::Relaxed);
+                    if pump_tid != 0 {
+                        let _ = PostThreadMessageW(pump_tid, HOOK_WAKE_MSG, WPARAM(0), LPARAM(0));
+                    }
+                }
+            }
+            WM_RBUTTONDOWN | WM_RBUTTONUP => {
+                let press_state = if wparam.0 as u32 == WM_RBUTTONDOWN {
+                    PressState::Pressed
+                } else {
+                    PressState::Released
+                };
+                
+                if let Some(slot) = HOOK_EVENT_TX.get()
+                    && let Ok(guard) = slot.lock()
+                    && let Some(tx) = guard.as_ref()
+                {
+                    let _ = tx.try_send(Event::MousePress {
+                        key: VK_RBUTTON.0,
+                        press_state,
+                    });
+                    
+                    // Wake the message pump
+                    let pump_tid = PUMP_THREAD_ID.load(Ordering::Relaxed);
+                    if pump_tid != 0 {
+                        let _ = PostThreadMessageW(pump_tid, HOOK_WAKE_MSG, WPARAM(0), LPARAM(0));
+                    }
+                }
+            }
+            WM_MBUTTONDOWN | WM_MBUTTONUP => {
+                let press_state = if wparam.0 as u32 == WM_MBUTTONDOWN {
+                    PressState::Pressed
+                } else {
+                    PressState::Released
+                };
+                
+                if let Some(slot) = HOOK_EVENT_TX.get()
+                    && let Ok(guard) = slot.lock()
+                    && let Some(tx) = guard.as_ref()
+                {
+                    let _ = tx.try_send(Event::MousePress {
+                        key: VK_MBUTTON.0,
+                        press_state,
+                    });
+                    
+                    // Wake the message pump
+                    let pump_tid = PUMP_THREAD_ID.load(Ordering::Relaxed);
+                    if pump_tid != 0 {
+                        let _ = PostThreadMessageW(pump_tid, HOOK_WAKE_MSG, WPARAM(0), LPARAM(0));
+                    }
+                }
+            }
+            WM_MOUSEWHEEL => {
+                // Extract wheel delta from high word of mouseData
+                let wheel_delta = (hook_struct.mouseData as i32 >> 16) as i16;
+                
+                if let Some(slot) = HOOK_EVENT_TX.get()
+                    && let Ok(guard) = slot.lock()
+                    && let Some(tx) = guard.as_ref()
+                {
+                    let _ = tx.try_send(Event::MouseScroll {
+                        scroll_amount: wheel_delta,
+                    });
+                    
+                    // Wake the message pump
+                    let pump_tid = PUMP_THREAD_ID.load(Ordering::Relaxed);
+                    if pump_tid != 0 {
+                        let _ = PostThreadMessageW(pump_tid, HOOK_WAKE_MSG, WPARAM(0), LPARAM(0));
+                    }
+                }
+            }
+            _ => {
+                // Other mouse events (XBUTTON, etc.) - chain through
+            }
+        }
+
+        CallNextHookEx(None, code, wparam, lparam)
+    }
+}
+
 
 pub struct KbmCapture {
     hwnd: HWND,
@@ -519,6 +751,9 @@ impl KbmCapture {
 
             tracing::debug!("RawInput window created: {hwnd:?}");
 
+            // Set the pump thread ID for hook callbacks to wake us
+            let pump_tid = GetCurrentThreadId();
+            PUMP_THREAD_ID.store(pump_tid, Ordering::Relaxed);
             // v2.5.13 — Win11 26100 ERROR_INVALID_PARAMETER (0x80070057) fix.
             //
             // Background: on Windows 11 build 26100 (and some earlier 24H2
