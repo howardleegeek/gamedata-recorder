@@ -513,6 +513,17 @@ impl Recording {
         // wired below.
         let session_dir_for_lint = self.recording_location.clone();
 
+        // rc17.2.2 / Stream BJ — extra clones for the gameinfo.xlsx
+        // writer and the per-frame depth EXR writer. Both run AFTER
+        // metadata flush but BEFORE the lint v3 hook, so lint can
+        // verify both outputs exist (criteria #23-26). gameinfo is
+        // awaited (cheap, <1s); depth is fire-and-forget tokio::spawn
+        // because DepthAnything V2 at 1Hz for ~300 frames takes
+        // minutes on CPU/DML and must not block the user from quitting
+        // the recorder.
+        let session_dir_for_xlsx = self.recording_location.clone();
+        let session_dir_for_depth = self.recording_location.clone();
+
         LocalRecording::write_metadata_and_validate(
             self.recording_location,
             self.game_exe,
@@ -531,6 +542,32 @@ impl Recording {
             record_dpi,
         )
         .await?;
+
+        // Stream BJ (rc17.2.2): generate gameinfo.xlsx + spawn depth-EXR
+        // background job. Both run AFTER metadata flush so they can read
+        // metadata.json / frames.jsonl. gameinfo is small + cheap, await
+        // it; depth EXR at 1080p × 1Hz × DepthAnything V2 takes minutes
+        // and must NOT block the user from closing the recorder — fire
+        // and forget. Both writers log their own errors via tracing and
+        // never propagate failures here (advisory output: missing xlsx
+        // / depth files only affect lint v3 criteria #23-26 and are
+        // surfaced to the user via BN's toast, not a hard error).
+        match super::gameinfo_writer::write_gameinfo_xlsx(&session_dir_for_xlsx).await {
+            Ok(rows) => tracing::info!(rows = rows, "Recording::stop: gameinfo.xlsx written"),
+            Err(e) => tracing::warn!(error = %e, "gameinfo_writer failed (advisory)"),
+        }
+        tokio::spawn(async move {
+            match super::depth_exr_writer::write_depth_exr(
+                &session_dir_for_depth,
+                Some((1920, 1080)),
+                Some("auto".to_string()),
+            )
+            .await
+            {
+                Ok(n) => tracing::info!(frames = n, "depth EXR background job complete"),
+                Err(e) => tracing::warn!(error = %e, "depth_exr_writer failed (advisory)"),
+            }
+        });
 
         // Stream BN (rc17.2): automatic post-session lint v3.
         //
