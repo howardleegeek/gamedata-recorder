@@ -495,6 +495,12 @@ impl Recording {
             "Raw Input capture summary at recording stop"
         );
 
+        // Stream BN (rc17.2): keep a copy of the session directory so we
+        // can re-lint after metadata flush. `write_metadata_and_validate`
+        // consumes the original `self.recording_location`, so the clone
+        // is the only handle we have left for the post-finalize hook.
+        let session_dir_for_lint = self.recording_location.clone();
+
         LocalRecording::write_metadata_and_validate(
             self.recording_location,
             self.game_exe,
@@ -512,6 +518,47 @@ impl Recording {
             input_capture_diagnostics,
         )
         .await?;
+
+        // Stream BN (rc17.2): automatic post-session lint v3.
+        //
+        // EVERY recorded session self-verifies against the 32 PRD
+        // criteria BEFORE entering the upload pipeline. This catches
+        // the regression Howard's tester reported on 2026-05-11
+        // ("yesterday's data had many nulls"): null `camera_position`,
+        // null rotations, null `player_*`, marker-only inputs.jsonl,
+        // missing gameinfo.xlsx, missing depth EXR. Streams BG / BH /
+        // BJ are fixing the root causes upstream, but until those
+        // land, lint v3 is the safety net that ensures we never
+        // silently ship a bad session.
+        //
+        // Failure isolation: lint runs are advisory only — a failed
+        // or errored lint MUST NOT invalidate the session here. The
+        // `lint_result.json` file we write next to metadata.json is
+        // the contract the uploader / Stream T pre-upload gate reads
+        // to make the gating decision. See
+        // `src/record/validation.rs` for the full rationale.
+        match super::validation::run_lint_v3(session_dir_for_lint).await {
+            Ok(lint_result) => {
+                tracing::info!(
+                    status = %lint_result.overall_status,
+                    passed = lint_result.passed,
+                    failed = lint_result.failed,
+                    "Recording::stop: post-session lint v3 finished"
+                );
+            }
+            Err(e) => {
+                // `run_lint_v3` itself returns `Ok(_)` even on lint
+                // errors (it materializes an ERROR-status
+                // LintResult); reaching this arm means a genuine I/O
+                // error somewhere in the result-write path. Log and
+                // continue — Recording::stop has already produced a
+                // valid session on disk.
+                tracing::warn!(
+                    error = %e,
+                    "Recording::stop: post-session lint v3 raised I/O error (session NOT invalidated)"
+                );
+            }
+        }
 
         Ok(())
     }

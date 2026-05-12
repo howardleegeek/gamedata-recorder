@@ -7,6 +7,10 @@ members = [
     "crates/depth-hook",
     "crates/action-camera-tests",
     "crates/engine-telemetry",
+    # Stream BN (rc17.2): cross-platform compile + unit-test shim around
+    # `src/record/validation.rs` (post-session lint v3 hook). Mirrors the
+    # `action-camera-tests` pattern — see crates/validation-tests/Cargo.toml.
+    "crates/validation-tests",
 ]
 exclude = ["tools/vm", "test_game"]
 default-members = ["."]
