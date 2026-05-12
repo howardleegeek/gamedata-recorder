@@ -325,6 +325,7 @@ fn action_camera_record_serializes_with_correct_field_names() {
         frame_number: 7,
         timestamp: 0.123,
         timestamp_ns: 123_000_000,
+        time: "01-01 00:00:00".to_string(),
         input_modality: InputModality::KeyboardMouse,
         mouse_x: Some(0.5),
         mouse_y: Some(0.5),

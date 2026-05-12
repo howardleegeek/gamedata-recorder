@@ -22,6 +22,11 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 color-eyre = { workspace = true }
 constants = { workspace = true }
+# The PRD `time` field formats a wall-clock per frame as "MM-DD HH:MM:SS",
+# derived from `metadata.json::wall_clock_start` (RFC 3339) + the frame's
+# `t_ns` offset. Pinned to the same version the top-level recorder crate
+# uses so the source-included writer compiles in this crate's CI too.
+chrono = { version = "0.4.42", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3"
