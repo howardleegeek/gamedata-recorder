@@ -405,10 +405,25 @@ impl Recording {
                 .recording_location
                 .join(constants::filename::recording::INVALID);
             let reason = e.to_string().into_bytes();
+            let reason_for_sidecar = reason.clone();
             let write_result = tokio::task::spawn_blocking(move || {
                 durable_write::write_atomic(&invalid_path, &reason)
             })
             .await;
+
+            // Audit H P0 — ENOSPC INVALID sidecar fallback.
+            //
+            // If the in-dir INVALID marker write failed (typical cause:
+            // ENOSPC — the session dir's filesystem is full), try a fallback
+            // write to the PARENT directory under the name `<session_id>.invalid`.
+            // The parent dir may live on a different drive/partition that
+            // still has space (multi-disk rigs, RAM-disk session dirs, etc.).
+            //
+            // Without this fallback, `LocalRecording::scan_directory` can
+            // mis-classify a truncated session as `Unuploaded` and the
+            // corrupt MP4 ships to the customer. Primary write remains the
+            // in-dir marker; the sidecar is a safety net only.
+            let primary_write_failed = !matches!(&write_result, Ok(Ok(())));
             match write_result {
                 Ok(Ok(())) => {}
                 Ok(Err(write_err)) => {
@@ -416,6 +431,47 @@ impl Recording {
                 }
                 Err(join_err) => {
                     tracing::error!("Failed to join INVALID marker write task: {join_err}");
+                }
+            }
+
+            if primary_write_failed {
+                if let (Some(parent), Some(session_name)) = (
+                    self.recording_location.parent(),
+                    self.recording_location.file_name(),
+                ) {
+                    let mut sidecar_name = session_name.to_os_string();
+                    sidecar_name.push(constants::filename::recording::INVALID);
+                    let sidecar_path = parent.join(sidecar_name);
+                    let sidecar_path_for_log = sidecar_path.clone();
+                    let sidecar_result = tokio::task::spawn_blocking(move || {
+                        durable_write::write_atomic(&sidecar_path, &reason_for_sidecar)
+                    })
+                    .await;
+                    match sidecar_result {
+                        Ok(Ok(())) => {
+                            tracing::warn!(
+                                "Wrote INVALID sidecar to parent dir as fallback: {}",
+                                sidecar_path_for_log.display()
+                            );
+                        }
+                        Ok(Err(sidecar_err)) => {
+                            tracing::error!(
+                                "DISK FULL — cannot mark session invalid, manual cleanup required \
+                                 (in-dir + parent-dir writes both failed; parent err={sidecar_err})"
+                            );
+                        }
+                        Err(join_err) => {
+                            tracing::error!(
+                                "DISK FULL — cannot mark session invalid, manual cleanup required \
+                                 (parent-dir write task failed to join: {join_err})"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::error!(
+                        "DISK FULL — cannot mark session invalid, manual cleanup required \
+                         (recording_location has no parent / session name)"
+                    );
                 }
             }
             return Ok(());
