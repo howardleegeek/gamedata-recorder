@@ -25,6 +25,33 @@ use crate::{
     ui::{components, util},
 };
 
+/// PRD-100 — env var that suppresses the recorder's in-game overlay (HUD)
+/// while a recording is active.
+///
+/// Why this exists: Display Capture (rc16.2 default + rc16.3 adaptive Monitor
+/// tier) reads the composited monitor framebuffer, so anything drawn on top
+/// of the game — including this recorder's "Recording @ N FPS" HUD — appears
+/// in the captured MP4. The PRD's final-video requirement forbids overlays
+/// in the captured frames. When `OYSTER_HIDE_OVERLAY` is set, we hide the
+/// glfw overlay window while `RecordingStatus::Recording` so the tester sees
+/// no recorder UI in the final video.
+///
+/// Accepted values (case-insensitive, surrounding whitespace ignored):
+///   `1` / `true` / `yes` / `on` → hide overlay during recording
+///   everything else / unset      → keep current behaviour (overlay visible
+///                                  subject to opacity preference)
+///
+/// Convention matches `OYSTER_PY_RECORDER` and `OYSTER_ADAPTIVE_CAPTURE`.
+const OYSTER_HIDE_OVERLAY_ENV: &str = "OYSTER_HIDE_OVERLAY";
+
+fn read_hide_overlay_env() -> bool {
+    let Ok(raw) = std::env::var(OYSTER_HIDE_OVERLAY_ENV) else {
+        return false;
+    };
+    let value = raw.trim().to_ascii_lowercase();
+    matches!(value.as_str(), "1" | "true" | "yes" | "on")
+}
+
 pub struct OverlayApp {
     initialized: bool,
     app_state: Arc<AppState>,
@@ -41,6 +68,16 @@ pub struct OverlayApp {
 
     /// track the last window content size to avoid unnecessary resizing
     last_content_size: Option<Vec2>,
+
+    /// PRD-100 — whether `OYSTER_HIDE_OVERLAY` is set. Read once at startup
+    /// so we don't pay a `getenv` syscall per frame. When true, the overlay
+    /// window is hidden via `ShowWindow(SW_HIDE)` whenever
+    /// `RecordingStatus::Recording` is observed.
+    hide_overlay_during_recording: bool,
+    /// PRD-100 — tracks the last visibility we asserted on the window so we
+    /// only call `ShowWindow` on transitions (idempotent + cheap).
+    /// `None` means "untouched by hide-overlay logic since init".
+    hide_overlay_last_applied: Option<bool>,
 }
 impl OverlayApp {
     pub fn new(app_state: Arc<AppState>, stopped_rx: tokio::sync::broadcast::Receiver<()>) -> Self {
@@ -60,6 +97,13 @@ impl OverlayApp {
             .read_safe()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let hide_overlay_during_recording = read_hide_overlay_env();
+        if hide_overlay_during_recording {
+            tracing::info!(
+                "{OYSTER_HIDE_OVERLAY_ENV}=1 — overlay HUD will be hidden while \
+                 RecordingStatus::Recording (PRD-100: no overlays in captured video)"
+            );
+        }
         tracing::debug!("OverlayApp::new() complete");
         Self {
             initialized: false,
@@ -72,6 +116,8 @@ impl OverlayApp {
             last_paint_time: Instant::now(),
             stopped_rx,
             last_content_size: None,
+            hide_overlay_during_recording,
+            hide_overlay_last_applied: None,
         }
     }
 }
@@ -219,6 +265,32 @@ impl EguiOverlay for OverlayApp {
             self.rec_status = curr_state;
             self.last_paint_time = Instant::now();
             egui_context.request_repaint();
+        }
+
+        // PRD-100 — `OYSTER_HIDE_OVERLAY` suppresses the HUD while recording
+        // so it doesn't appear in the captured MP4 (Display Capture / WGC /
+        // GameHook all composite this glfw overlay window into the frame).
+        //
+        // We override the opacity-based visibility above: while
+        // `RecordingStatus::Recording`, force the window hidden; otherwise
+        // restore it to "visible iff opacity > 0" (the preference-driven
+        // baseline). Transitions only — never call ShowWindow per frame.
+        if self.hide_overlay_during_recording {
+            let should_hide_now = self.rec_status.is_recording();
+            let want_visible = !should_hide_now && self.overlay_opacity > 0;
+            let need_apply = match self.hide_overlay_last_applied {
+                Some(prev) => prev != want_visible,
+                None => true,
+            };
+            if need_apply {
+                self.set_window_visible(glfw_backend, want_visible);
+                self.hide_overlay_last_applied = Some(want_visible);
+                tracing::info!(
+                    "{OYSTER_HIDE_OVERLAY_ENV}: overlay visibility -> {want_visible} \
+                     (recording={should_hide_now}, opacity={})",
+                    self.overlay_opacity
+                );
+            }
         }
 
         let window_response = Window::new("recording overlay")
