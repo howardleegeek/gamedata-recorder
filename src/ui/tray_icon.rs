@@ -66,11 +66,33 @@ impl TrayIconState {
         };
 
         tracing::debug!("Building tray icon");
+        // rc17.0.3: tray icon build can fail with E_FAIL (0x80004005) when
+        // the OS session lacks a desktop / message pump (Session 0,
+        // SSH-launched processes, Defender-locked-down rigs). Without this
+        // fallback the entire recorder crashes BEFORE any logging or
+        // recording. Fallback path: try with full menu+tooltip, then with
+        // just icon, propagating only if both fail.
         let tray_icon = TrayIconBuilder::new()
             .with_icon(default_tray_icon_data.clone())
             .with_tooltip("GameData Recorder \u{2014} F9 to record")
             .with_menu(Box::new(tray_menu))
-            .build()?;
+            .build()
+            .or_else(|primary_err| {
+                tracing::warn!(
+                    "Tray icon build with menu failed ({primary_err}); retrying minimal"
+                );
+                TrayIconBuilder::new()
+                    .with_icon(default_tray_icon_data.clone())
+                    .build()
+                    .map_err(|fallback_err| {
+                        tracing::error!(
+                            "Tray icon fallback build also failed: {fallback_err}. \
+                             OS session may have no desktop/message pump. \
+                             Set OYSTER_PY_RECORDER=1 to use Python fallback."
+                        );
+                        primary_err
+                    })
+            })?;
         tracing::debug!("Tray icon built successfully");
 
         tracing::debug!("TrayIconState::new() complete");
