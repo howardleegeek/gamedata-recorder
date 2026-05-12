@@ -533,11 +533,87 @@ fn default_honk_volume() -> u8 {
     255
 }
 fn default_recording_location() -> std::path::PathBuf {
-    // Use the system-standard local data directory (e.g. C:\Users\<user>\AppData\Local\GameData Recorder\recordings)
-    // Falls back to ./data_dump/games if the system directory can't be determined
+    // AUDIT-N-3: product is now "OysterRecorder" — old branding was
+    // "GameData Recorder" (rc16 and earlier). The legacy path is handled
+    // by migrate_recording_location_if_needed() below.
+    //
+    // Use the system-standard local data directory
+    // (e.g. C:\Users\<user>\AppData\Local\OysterRecorder\recordings).
+    // Falls back to ./data_dump/games if the system directory can't be
+    // determined.
     dirs::data_local_dir()
-        .map(|d| d.join("GameData Recorder").join("recordings"))
+        .map(|d| d.join("OysterRecorder").join("recordings"))
         .unwrap_or_else(|| std::path::PathBuf::from("./data_dump/games"))
+}
+
+/// Old branding's recording root. Used only by
+/// `migrate_recording_location_if_needed` to detect rc16-era installs.
+fn legacy_recording_location() -> Option<std::path::PathBuf> {
+    dirs::data_local_dir().map(|d| d.join("GameData Recorder").join("recordings"))
+}
+
+/// Symlink the legacy `GameData Recorder/recordings` directory to the new
+/// `OysterRecorder/recordings` location so rc16 users upgrading to rc17+
+/// see their existing sessions in-place rather than starting over with an
+/// empty directory.
+///
+/// We deliberately do NOT move files — the symlink approach preserves
+/// the old path for any external tools that might still reference it
+/// (manual user shortcuts, ad-hoc PowerShell scripts in the QA pipeline)
+/// while making the new path the canonical one. If the user has already
+/// set a custom `recording_location`, or the new path already exists
+/// (fresh install or prior migration), the function is a no-op.
+///
+/// Symlink creation on Windows requires either Developer Mode enabled or
+/// SeCreateSymbolicLinkPrivilege. If the call fails (e.g. no privilege),
+/// we log and continue — the recorder still works, the user just keeps
+/// two separate session directories.
+pub fn migrate_recording_location_if_needed(config: &Config) {
+    let Some(legacy) = legacy_recording_location() else {
+        return;
+    };
+    let current = &config.preferences.recording_location;
+
+    // User has an rc16-style data directory but hasn't recorded to the
+    // new path yet. Symlink old → new so their sessions are visible.
+    if legacy.exists() && !current.exists() && current != &legacy {
+        if let Some(parent) = current.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(
+                    error = ?e,
+                    parent = %parent.display(),
+                    "Failed to create parent directory for recording location migration"
+                );
+                return;
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            match std::os::windows::fs::symlink_dir(&legacy, current) {
+                Ok(()) => tracing::info!(
+                    legacy = %legacy.display(),
+                    current = %current.display(),
+                    "Migrated recording location from GameData Recorder to OysterRecorder (symlink)"
+                ),
+                Err(e) => tracing::warn!(
+                    error = ?e,
+                    legacy = %legacy.display(),
+                    current = %current.display(),
+                    "Failed to symlink legacy recording location; rc16 sessions will remain at old path"
+                ),
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Symbolic-link-based migration is only meaningful for the
+            // Windows production target; on macOS/Linux the recorder is
+            // dev-only and there is no rc16 user base to migrate.
+            let _ = current; // suppress unused-variable warning on non-Windows
+            tracing::debug!(
+                "Skipping recording location migration on non-Windows target"
+            );
+        }
+    }
 }
 
 /// Return the directory that `recording_location` is allowed to live under.
@@ -941,7 +1017,7 @@ pub fn consent_guard_from_config(config: &Config) -> ConsentGuard {
 /// * treats any foreground window with a non-null HWND as a recordable game,
 ///   bypassing `GAME_WHITELIST` and `is_process_game_shaped`
 /// * if `GAMEDATA_OUTPUT_DIR` is also set, redirects recordings there
-///   instead of `%LocalAppData%\GameData Recorder\recordings`
+///   instead of `%LocalAppData%\OysterRecorder\recordings`
 ///
 /// Production builds with neither variable set behave exactly as before.
 pub fn ci_mode() -> bool {
@@ -1336,6 +1412,15 @@ impl Config {
                 }
             }
         }
+
+        // AUDIT-N-3: if the user has rc16-era sessions under the old
+        // "GameData Recorder" path and hasn't recorded under the new
+        // "OysterRecorder" path yet, symlink old -> new so the existing
+        // sessions remain visible after the upgrade. No-op if the user
+        // already has a custom path, or has already recorded under the
+        // new path. See migrate_recording_location_if_needed for the
+        // exact preconditions.
+        migrate_recording_location_if_needed(&config);
 
         tracing::debug!("Config::load() complete");
         Ok(config)
