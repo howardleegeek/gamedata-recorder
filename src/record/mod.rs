@@ -1,4 +1,5 @@
 mod action_camera_writer;
+pub(crate) mod adaptive_capture;
 pub(crate) mod fps_logger;
 mod input_recorder;
 mod local_recording;
