@@ -78,6 +78,26 @@ pub struct Metadata {
     /// older recordings. See [`InputCaptureDiagnostics`] for fields.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub input_capture_diagnostics: Option<InputCaptureDiagnostics>,
+    /// PRD page 3 / BUYER_SPEC_V1.md systeminfo.json: OS scaling factor
+    /// (`recordDpi`). Wire name is camelCase to match the buyer's canonical
+    /// schema (`systeminfo.json`); we also accept the snake_case alias on
+    /// deserialize so historical recordings still round-trip. Populated on
+    /// Windows from `GetDpiForSystem()`, where `dpi/96.0` gives the scale
+    /// factor (1.0 = 100%, 1.5 = 150%, 2.0 = 200%). `None` on non-Windows
+    /// platforms (the recorder is Windows-only, but the metadata struct is
+    /// shared with the cross-platform validation harness — emitting None
+    /// is more honest than fabricating 1.0).
+    ///
+    /// Required by Stream BC `lint_v3_prd_grounded.py` criterion 22 which
+    /// reads `metadata.json["recordDpi"]` (or alias `record_dpi` / `dpi`).
+    #[serde(
+        rename = "recordDpi",
+        alias = "record_dpi",
+        alias = "dpi",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub record_dpi: Option<f64>,
 }
 
 /// rc16.4 — Raw Input capture-thread diagnostics, written to

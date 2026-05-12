@@ -495,6 +495,17 @@ impl Recording {
             "Raw Input capture summary at recording stop"
         );
 
+        // rc17.2 / Stream BD — detect system DPI for systeminfo.json /
+        // metadata.json `recordDpi`. PRD page 3 wants the OS scaling factor
+        // (1.0 / 1.5 / 2.0), so we convert the raw DPI to a scale relative
+        // to the Windows 96-DPI baseline. `GetDpiForSystem` is the
+        // process-wide value; per-monitor V2 awareness is declared in
+        // build.rs (see log_monitor_dpi_scale in obs_embedded_recorder.rs).
+        // Detection is a pure read-only Win32 call and cannot fail, but we
+        // guard it behind a cfg so non-Windows builds (test harness on Mac)
+        // emit None rather than fabricating a value.
+        let record_dpi = detect_system_dpi_scale();
+
         LocalRecording::write_metadata_and_validate(
             self.recording_location,
             self.game_exe,
@@ -510,10 +521,44 @@ impl Recording {
             frame_count,
             dropped_input_events,
             input_capture_diagnostics,
+            record_dpi,
         )
         .await?;
 
         Ok(())
+    }
+}
+
+/// System DPI scale factor relative to the 96-DPI Windows baseline.
+///
+/// `1.0` = 100% (default), `1.5` = 150%, `2.0` = 200%. Maps directly to the
+/// PRD `recordDpi` field in `systeminfo.json` (BUYER_SPEC_V1.md §1). Returns
+/// `None` on non-Windows builds (the recorder is Windows-only in
+/// production, but lint runs cross-platform and the metadata schema is
+/// shared).
+fn detect_system_dpi_scale() -> Option<f64> {
+    #[cfg(windows)]
+    {
+        // SAFETY: `GetDpiForSystem` is a parameter-free, side-effect-free
+        // Win32 query that returns the process-wide system DPI. Available
+        // since Windows 10 1607; build.rs declares per-monitor V2 DPI
+        // awareness so this returns the unscaled physical DPI of the
+        // primary monitor (not a virtualized 96).
+        use windows::Win32::UI::HiDpi::GetDpiForSystem;
+        let dpi = unsafe { GetDpiForSystem() };
+        if dpi == 0 {
+            // Defensive: docs don't list 0 as a return but check anyway —
+            // we'd rather emit None than divide by 0 / propagate a bogus
+            // scale.
+            tracing::warn!("GetDpiForSystem returned 0; omitting recordDpi");
+            None
+        } else {
+            Some(dpi as f64 / 96.0)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        None
     }
 }
 

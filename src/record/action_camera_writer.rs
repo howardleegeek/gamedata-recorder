@@ -52,6 +52,7 @@
 //!   "frame_number": <u64>,   // PRD alias for frame_index
 //!   "timestamp": <f64 seconds>,
 //!   "timestamp_ns": <u64>,   // PRD: same instant as `timestamp`, in ns
+//!   "route_type": 1,         // 1=normal / 2=special / 3=loop (PRD §4.1)
 //!   "input_modality": "keyboard_mouse" | "gamepad" | "mixed",
 //!   "mouseX": <f64 in [0, 1]> | null,
 //!   "mouseY": <f64 in [0, 1]> | null,
@@ -68,12 +69,12 @@
 //!   "camera_position": {"x": f64, "y": f64, "z": f64} | null,
 //!   "rotation_oula":   {"x": pitch_deg, "y": yaw_deg, "z": roll_deg} | null,
 //!   "rotation_quaternion": {"x": f64, "y": f64, "z": f64, "w": f64} | null,
-//!   "camera_rotation_quaternion": [w, x, y, z] | null,  // legacy
+//!   "camera_rotation_quaternion": [x, y, z, w] | null,  // PRD: xyzw order
 //!   "Follow_Offset": {"x": f64, "y": f64, "z": f64} | null,
-//!   "intrinsics": {"fx": f64, "fy": f64, "cx": f64, "cy": f64},
+//!   "camera_intrinsics": {"fx": f64, "fy": f64, "cx": f64, "cy": f64},
 //!   "speed": <f64>,                                  // camera-frame speed
 //!   "player_position": {"x": f64, "y": f64, "z": f64} | null,
-//!   "player_rotation_quaternion": {"x": f64, "y": f64, "z": f64, "w": f64} | null,
+//!   "player_rotation_quaternion": [x, y, z, w] | null,  // PRD: xyzw order
 //!   "player_speed": <f64>,
 //!   "metric_scale": 1.0
 //! }
@@ -147,11 +148,12 @@ pub struct Vec3 {
 
 /// Customer PRD: quaternion serialized as
 /// `{"x": .., "y": .., "z": .., "w": ..}` (vector-first; `w` last).
-/// This is the convention the buyer plugin documents. The recorder's
-/// legacy `camera_rotation_quaternion` array uses `[w, x, y, z]` —
-/// both representations are emitted side-by-side from the same source
-/// rotation so downstream tools can pick whichever they understand
-/// without having to detect the layout.
+/// This is the convention the buyer plugin documents for the
+/// `rotation_quaternion` field. The PRD `camera_rotation_quaternion`
+/// and `player_rotation_quaternion` fields are emitted as `[x, y, z, w]`
+/// arrays (also vector-first; see BUYER_SPEC_V1.md §"action_camera.json").
+/// Both shapes derive from the same source rotation so downstream tools
+/// can pick whichever the model consumes without detecting the layout.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 pub struct Quat {
     pub x: f64,
@@ -183,6 +185,13 @@ pub struct Intrinsics {
 /// mod may publish the real FOV in a later schema bump — when it does,
 /// extend `GameStateRow` to carry it and prefer the runtime value.
 const DEFAULT_MC_FOV_DEG: f64 = 70.0;
+
+/// PRD §4.1 default route classification when the session has not
+/// declared one — `1` = "natural movement". Lint criterion 11
+/// requires `route_type ∈ {1, 2, 3}` on every per-frame record; a
+/// session-level override field can be wired through `RecordingParams`
+/// later, but every frame in a single recording shares one value.
+const DEFAULT_ROUTE_TYPE: u8 = 1;
 
 /// Compute pinhole intrinsics from vertical FOV + frame resolution.
 ///
@@ -285,6 +294,16 @@ pub struct ActionCameraRecord {
     /// the frame's `t_ns` so the buyer's plugin can avoid a float
     /// multiply and avoid the precision loss inherent in `f64` seconds.
     pub timestamp_ns: u64,
+    /// PRD §4.1 route classification: `1=normal` / `2=special` / `3=loop`.
+    /// The route is a session-level property (set by whoever scripts the
+    /// recording), not a per-frame property — but the buyer's wire schema
+    /// stamps it on every frame anyway so single-frame inspection tools can
+    /// read it without re-joining against a session header. Default `1`
+    /// here covers the common "natural movement" recording; a future
+    /// configurable session-route field can override this at construction
+    /// time. Required by Stream BC `lint_v3_prd_grounded.py` criterion 11
+    /// which reads `route_type ∈ {1, 2, 3}`.
+    pub route_type: u8,
     pub input_modality: InputModality,
     #[serde(rename = "mouseX")]
     pub mouse_x: Option<f64>,
@@ -319,11 +338,16 @@ pub struct ActionCameraRecord {
     /// roll, so z is always 0.0. `None` when no game_state is available.
     pub rotation_oula: Option<Vec3>,
     /// PRD: quaternion form of `rotation_oula`, in customer's frame.
-    /// Vector-first serialization: `{"x", "y", "z", "w"}`.
+    /// Vector-first serialization: `{"x", "y", "z", "w"}`. Retained as
+    /// the object form because legacy buyer-plugin builds key off the
+    /// `rotation_quaternion` name and expect an object — the xyzw-ordered
+    /// array form lives in `camera_rotation_quaternion`.
     pub rotation_quaternion: Option<Quat>,
-    /// Legacy `[w, x, y, z]` (scalar-first) array form of
-    /// `rotation_quaternion`. Older buyer-plugin builds parse this
-    /// shape; we emit both for compatibility during the transition.
+    /// PRD `[x, y, z, w]` array form (BUYER_SPEC_V1.md §"action_camera.json
+    /// — 20 fields per frame"). This is the canonical wire shape lint
+    /// criterion 13/14 read (`isinstance(q, list) and len(q) == 4`, with
+    /// xyzw heuristic = largest |component| at index 3 for non-identity
+    /// orientations and L2 norm in [0.99, 1.01]).
     pub camera_rotation_quaternion: Option<[f64; 4]>,
     /// PRD: offset from player to camera. First-person MC: zero vector.
     /// Reserved for future third-person modes / replay cinematics where
@@ -332,7 +356,11 @@ pub struct ActionCameraRecord {
     pub follow_offset: Option<Vec3>,
     /// PRD: pinhole intrinsics derived from FOV + screen resolution.
     /// Always populated — these depend only on recorder settings, not
-    /// on game state.
+    /// on game state. Wire name is `camera_intrinsics` per
+    /// BUYER_SPEC_V1.md and Stream BC `lint_v3_prd_grounded.py`
+    /// criterion 12 (`r.get("camera_intrinsics")`); the Rust field name
+    /// stays `intrinsics` for backward compat with internal callers.
+    #[serde(rename = "camera_intrinsics")]
     pub intrinsics: Intrinsics,
     /// PRD: camera speed magnitude (blocks/s = m/s). When game_state is
     /// available, this is `||(vx, vy, vz)||`. When absent, `0.0`. The
@@ -344,9 +372,13 @@ pub struct ActionCameraRecord {
     /// (the camera *is* the player's eye). `None` when no game_state
     /// is available.
     pub player_position: Option<Vec3>,
-    /// PRD: player rotation quaternion in customer's frame. In first-
-    /// person MC this equals `rotation_quaternion`.
-    pub player_rotation_quaternion: Option<Quat>,
+    /// PRD `[x, y, z, w]` array (BUYER_SPEC_V1.md §"action_camera.json").
+    /// In first-person MC this equals `camera_rotation_quaternion` (the
+    /// camera *is* the player's eye); the recorder emits both so the
+    /// buyer plugin's per-frame inspection logic doesn't have to
+    /// short-circuit on equality. Required for lint criterion 13/14 to
+    /// vote xyzw + verify normalization on the player axis.
+    pub player_rotation_quaternion: Option<[f64; 4]>,
     /// PRD: player speed magnitude (blocks/s = m/s). Computed from the
     /// nearest game_state tick's velocity vector; `0.0` when no
     /// game_state is available.
@@ -726,11 +758,18 @@ fn build_records(
                 + gs.velocity_y * gs.velocity_y
                 + gs.velocity_z * gs.velocity_z)
                 .sqrt();
+            // PRD §"Quaternion order [x, y, z, w]" — vector-first array
+            // form. Stream BC lint criterion 13's rest-state heuristic
+            // requires the largest |component| at index 3 (w) for
+            // non-identity orientations, and criterion 14 checks the L2
+            // norm. Both array fields share the same source quaternion
+            // since first-person MC keeps the camera and player aligned.
+            let quat_xyzw: [f64; 4] = [quat.x, quat.y, quat.z, quat.w];
             (
                 Some(cam_pos),
                 Some(euler),
                 Some(quat),
-                Some([quat.w, quat.x, quat.y, quat.z]),
+                Some(quat_xyzw),
                 // First-person MC: camera == player, zero follow offset.
                 Some(Vec3 {
                     x: 0.0,
@@ -739,7 +778,7 @@ fn build_records(
                 }),
                 speed,
                 Some(cam_pos),
-                Some(quat),
+                Some(quat_xyzw),
                 speed,
             )
         } else {
@@ -757,6 +796,13 @@ fn build_records(
             frame_number: frame.idx,
             timestamp: frame_t_session_sec,
             timestamp_ns,
+            // PRD §4.1 default route classification: 1 = "natural movement"
+            // (50% required share). This is a session-level constant; a
+            // future change can plumb a configurable session route through
+            // `RecordingParams` and override here. For now every frame in
+            // a single session shares the same route_type, which is what
+            // Stream BC lint criterion 11 expects.
+            route_type: DEFAULT_ROUTE_TYPE,
             input_modality: modality,
             mouse_x: if has_kbm {
                 Some(cursor_x / screen_w_f)
@@ -1171,6 +1217,7 @@ mod tests {
             frame_number: 1,
             timestamp: 0.0333,
             timestamp_ns: 33_333_333,
+            route_type: DEFAULT_ROUTE_TYPE,
             input_modality: InputModality::KeyboardMouse,
             mouse_x: Some(0.506),
             mouse_y: Some(0.507),
@@ -1208,6 +1255,7 @@ mod tests {
         assert!(obj.contains_key("frame_number"));
         assert!(obj.contains_key("timestamp"));
         assert!(obj.contains_key("timestamp_ns"));
+        assert!(obj.contains_key("route_type"));
         assert!(obj.contains_key("input_modality"));
         assert!(obj.contains_key("mouseX"));
         assert!(obj.contains_key("mouseY"));
@@ -1226,7 +1274,10 @@ mod tests {
         assert!(obj.contains_key("rotation_quaternion"));
         assert!(obj.contains_key("camera_rotation_quaternion"));
         assert!(obj.contains_key("Follow_Offset"));
-        assert!(obj.contains_key("intrinsics"));
+        // PRD wire field name is `camera_intrinsics`; Rust field stays
+        // `intrinsics` and is renamed at serde time. Stream BC lint
+        // criterion 12 reads this exact key.
+        assert!(obj.contains_key("camera_intrinsics"));
         assert!(obj.contains_key("speed"));
         assert!(obj.contains_key("player_position"));
         assert!(obj.contains_key("player_rotation_quaternion"));
@@ -1234,11 +1285,15 @@ mod tests {
         assert!(obj.contains_key("metric_scale"));
         // input_modality renders as snake_case string.
         assert_eq!(obj["input_modality"].as_str(), Some("keyboard_mouse"));
+        // route_type renders as the bare integer (default = 1).
+        assert_eq!(obj["route_type"].as_u64(), Some(1));
         // Nullable camera fields render as JSON null (NOT omitted).
         assert!(obj["camera_position"].is_null());
         assert!(obj["camera_rotation_quaternion"].is_null());
-        // intrinsics is always populated; check the sub-object shape.
-        let intr = obj["intrinsics"].as_object().expect("intrinsics is object");
+        // camera_intrinsics is always populated; check the sub-object shape.
+        let intr = obj["camera_intrinsics"]
+            .as_object()
+            .expect("camera_intrinsics is object");
         assert!(intr.contains_key("fx"));
         assert!(intr.contains_key("fy"));
         assert!(intr.contains_key("cx"));
@@ -1736,12 +1791,17 @@ mod tests {
         let q = r.rotation_quaternion.expect("rotation_quaternion");
         let mag2 = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
         assert!((mag2 - 1.0).abs() < 1e-9);
-        // Legacy `[w, x, y, z]` array form matches.
-        let q_arr = r.camera_rotation_quaternion.expect("legacy array");
-        assert_eq!(q_arr[0], q.w);
-        assert_eq!(q_arr[1], q.x);
-        assert_eq!(q_arr[2], q.y);
-        assert_eq!(q_arr[3], q.z);
+        // PRD `[x, y, z, w]` (vector-first) array form matches the
+        // object form's components. Stream BC lint criterion 13 uses
+        // this exact shape and ordering.
+        let q_arr = r.camera_rotation_quaternion.expect("xyzw array");
+        assert_eq!(q_arr[0], q.x);
+        assert_eq!(q_arr[1], q.y);
+        assert_eq!(q_arr[2], q.z);
+        assert_eq!(q_arr[3], q.w);
+        // player_rotation_quaternion is the same xyzw array (first-person MC).
+        let pq_arr = r.player_rotation_quaternion.expect("player xyzw array");
+        assert_eq!(pq_arr, q_arr);
         // First-person follow offset is zero.
         let fo = r.follow_offset.expect("follow_offset");
         assert_eq!(fo.x, 0.0);

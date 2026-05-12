@@ -621,6 +621,12 @@ impl LocalRecording {
         // rc16.4 — capture-thread diagnostics, surfaced so we can tell
         // "hook never installed" from "hook installed but no events".
         input_capture_diagnostics: Option<crate::output_types::InputCaptureDiagnostics>,
+        // rc17.2 / Stream BD — PRD page 3 `recordDpi`: OS scaling factor at
+        // recording start. Caller measures via `GetDpiForSystem()` on Windows
+        // and passes `dpi/96.0` here so the wire field is the scale factor
+        // (1.0/1.5/2.0), matching `BUYER_SPEC_V1.md` systeminfo.json. Pass
+        // `None` if detection failed; the writer will then omit the field.
+        record_dpi: Option<f64>,
     ) -> Result<()> {
         // Resolve metadata path from recording location
         let metadata_path = recording_location.join(constants::filename::recording::METADATA);
@@ -717,6 +723,8 @@ impl LocalRecording {
             wall_clock_start: Some(wall_clock_start),
             wall_clock_end: Some(wall_clock_end),
             input_capture_diagnostics,
+            // rc17.2 / Stream BD — see field doc on Metadata.record_dpi.
+            record_dpi,
         };
 
         // Write metadata to disk using atomic + fsync'd write.

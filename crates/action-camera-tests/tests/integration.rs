@@ -325,6 +325,9 @@ fn action_camera_record_serializes_with_correct_field_names() {
         frame_number: 7,
         timestamp: 0.123,
         timestamp_ns: 123_000_000,
+        // rc17.2 / Stream BD — PRD §4.1 default route classification.
+        // Required by Stream BC lint_v3_prd_grounded.py criterion 11.
+        route_type: 1,
         input_modality: InputModality::KeyboardMouse,
         mouse_x: Some(0.5),
         mouse_y: Some(0.5),
@@ -371,8 +374,12 @@ fn action_camera_record_serializes_with_correct_field_names() {
     assert!(obj["rotation_quaternion"].is_null());
     assert!(obj["Follow_Offset"].is_null());
     assert!(obj["player_position"].is_null());
-    // intrinsics is always populated (depends only on FOV + resolution).
-    assert!(obj["intrinsics"].is_object());
+    // camera_intrinsics is always populated (depends only on FOV + resolution).
+    // PRD wire name is `camera_intrinsics` (Rust field name `intrinsics` is
+    // renamed at serde time so Stream BC lint criterion 12 can read it).
+    assert!(obj["camera_intrinsics"].is_object());
+    // route_type renders as the bare integer.
+    assert_eq!(obj["route_type"].as_u64(), Some(1));
     assert_eq!(obj["metric_scale"].as_f64(), Some(1.0));
     let codes: Vec<u64> = obj["keyCode"]
         .as_array()
