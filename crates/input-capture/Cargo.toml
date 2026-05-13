@@ -36,3 +36,4 @@ gilrs-wgi = { package = "gilrs", version = "0.11.0", default-features = false, f
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+serde_json.workspace = true
