@@ -384,6 +384,20 @@ unsafe extern "system" fn keyboard_ll_proc(
                 key: vk,
                 press_state,
             });
+
+            // rc18.0.6 (Howard 2026-05-12 Bug 1 fix): wake the message
+            // pump so GetMessageA returns and the drain loop in
+            // `run_queue` runs. Without this post, GetMessageA blocks
+            // forever — LL hook firing is a thread-dispatch side
+            // effect, NOT a queued MSG — so all 957 keyboard events in
+            // Howard's test session piled into the 10k-bounded
+            // hook_rx and the drain never executed. The mouse path
+            // already does this at 5 sites; keyboard was missing it.
+            // Mirror the exact pattern.
+            let pump_tid = PUMP_THREAD_ID.load(Ordering::Relaxed);
+            if pump_tid != 0 {
+                let _ = PostThreadMessageW(pump_tid, HOOK_WAKE_MSG, WPARAM(0), LPARAM(0));
+            }
         }
 
         CallNextHookEx(None, code, wparam, lparam)
