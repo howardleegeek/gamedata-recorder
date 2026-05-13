@@ -91,6 +91,19 @@ pub struct Preferences {
     /// file from the other artifacts at any time.
     #[serde(default)]
     pub disable_action_camera_output: bool,
+    /// Enable F1/F2/F3 hotkey tagging that sets `route_type ∈ {1,2,3}` per
+    /// recording. Default: `false`. When `false`, F1/F2/F3 are ignored by the
+    /// recorder's input loop and no `route_type` is ever written into
+    /// `metadata.json` / `session.json` — the legacy recording path is
+    /// untouched.
+    ///
+    /// Buyer-spec acceptance: the downstream `gameinfo` schema requires a
+    /// per-clip `route_type ∈ {1,2,3}` annotation (常规漫游 / 特殊路线 /
+    /// 循环录制). The tag is operator-set, sticky per clip, and remembered
+    /// across the start of the next recording. See
+    /// `docs/RECORDER_BUYER_SPEC_FEATURES.md` §2.
+    #[serde(default)]
+    pub enable_route_type_tagging: bool,
     /// Enable the UI-element refusal detector. When `true`, an independent
     /// 1Hz tokio task inspects window/foreground state during recording and
     /// aborts the in-progress clip if a buyer-rejected UI condition is
@@ -181,6 +194,7 @@ impl Default for Preferences {
             audio_cues: Default::default(),
             record_microphone: false,
             disable_action_camera_output: false,
+            enable_route_type_tagging: false,
             enable_ui_refusal_detector: false,
             refusal_check_interval_sec: default_refusal_check_interval_sec(),
             recording_backend: Default::default(),
@@ -1809,5 +1823,48 @@ mod consent_tests {
         // With consent at the current binary version: guard permits.
         cfg.credentials.record_consent(current_pkg_version());
         assert!(consent_guard_from_config(&cfg).is_granted());
+    }
+
+    /// `Preferences::enable_route_type_tagging` MUST default to `false` so
+    /// existing installations don't suddenly start tagging clips after an
+    /// upgrade. The buyer-spec hotkeys are opt-in until the operator
+    /// enables them in the preferences UI.
+    #[test]
+    fn enable_route_type_tagging_defaults_to_false() {
+        let prefs = Preferences::default();
+        assert!(
+            !prefs.enable_route_type_tagging,
+            "route_type tagging must be opt-in, not on by default"
+        );
+    }
+
+    /// Wire-format compatibility: a legacy `config.json` that predates the
+    /// `enable_route_type_tagging` field must still deserialize. The field
+    /// is declared `#[serde(default)]`, so absence ⇒ `false` ⇒ tagging
+    /// stays off.
+    #[test]
+    fn preferences_deserializes_legacy_config_without_route_type_field() {
+        let legacy = r#"{
+            "startRecordingKey": "F9",
+            "stopRecordingKey": "F9",
+            "stopHotkeyEnabled": false,
+            "unreliableConnection": false,
+            "overlayLocation": "TopLeft",
+            "overlayOpacity": 200,
+            "deleteUploadedFiles": false,
+            "autoUploadOnCompletion": false,
+            "honk": false,
+            "honkVolume": 100,
+            "audioCues": {"startRecording": "", "stopRecording": ""},
+            "recordingBackend": "Embedded",
+            "encoder": {"encoder": "X264"},
+            "recordingLocation": "C:/temp"
+        }"#;
+        let prefs: Preferences =
+            serde_json::from_str(legacy).expect("legacy preferences must still deserialize");
+        assert!(
+            !prefs.enable_route_type_tagging,
+            "missing field ⇒ default false"
+        );
     }
 }

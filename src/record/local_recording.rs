@@ -622,6 +622,7 @@ impl LocalRecording {
         recorder_extra: Option<serde_json::Value>,
         frame_count: Option<u64>,
         dropped_input_events: u64,
+        route_type: Option<u8>,
         recording_bitrate_kbps: u32,
     ) -> Result<()> {
         // Resolve metadata path from recording location
@@ -726,6 +727,12 @@ impl LocalRecording {
             capture_resolution: Some(capture_resolution),
             wall_clock_start: Some(wall_clock_start),
             wall_clock_end: Some(wall_clock_end),
+            // Only persist a tag the operator actually set (1..=3). Defensive
+            // filter against malformed input (e.g. a future code path that
+            // writes 4 / 255) — buyer's schema only accepts {1,2,3}, so we
+            // would rather omit the field than ship a poison value the
+            // pipeline can't reject without a separate validation pass.
+            route_type: route_type.filter(|n| (1..=3).contains(n)),
             // R2.10: stamp the effective (clamped) encoder bitrate so the
             // buyer ingest can audit per-session bitrate against the
             // 6–12 Mbps band.

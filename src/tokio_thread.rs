@@ -1202,6 +1202,19 @@ enum RecordingState {
     /// application to detect if it closes while paused.
     Paused { pid: game_process::Pid },
 }
+
+impl RecordingState {
+    /// Returns true when a recording is in flight or paused (i.e. there's an
+    /// active clip whose tag has already been captured). Used by the
+    /// F1/F2/F3 route_type handler to distinguish "tag the next clip" (Idle)
+    /// from "tag will apply to next clip" (Recording / Paused).
+    fn is_recording(&self) -> bool {
+        matches!(
+            self,
+            RecordingState::Recording | RecordingState::Paused { .. }
+        )
+    }
+}
 struct State {
     recording_state: RecordingState,
     recorder: Recorder,
@@ -1293,18 +1306,104 @@ const AUTO_RECORD_TEST_GAME_STEM: &str = "test_game";
 /// transition completes before another one can start.
 const HOTKEY_TRANSITION_THROTTLE_MS: u64 = 200;
 
+/// Map an F1/F2/F3 virtual-key code to its `route_type` value:
+/// - `F1` (`0x70`) → 1 (常规漫游, regular roaming)
+/// - `F2` (`0x71`) → 2 (特殊路线, special route)
+/// - `F3` (`0x72`) → 3 (循环录制, loop recording)
+///
+/// Returns `None` for any other key. Keycodes match the table in
+/// `src/system/keycode.rs`. We hard-code them here (rather than calling
+/// `name_to_virtual_keycode` per keypress) because (a) F1-F3 are not
+/// user-rebindable for this feature — the hotkey identity is part of the
+/// buyer spec — and (b) the input loop is hot and we want zero allocation
+/// per keypress.
+fn route_type_for_key(key: u16) -> Option<u8> {
+    match key {
+        0x70 => Some(1),
+        0x71 => Some(2),
+        0x72 => Some(3),
+        _ => None,
+    }
+}
+
+/// Human-readable label for a `route_type` value, used only in tracing
+/// breadcrumbs. Matches the labels in
+/// `docs/RECORDER_BUYER_SPEC_FEATURES.md` §2 so operators can correlate
+/// log lines with the buyer's schema documentation.
+fn route_type_label(tag: u8) -> &'static str {
+    match tag {
+        1 => "regular roaming (常规漫游)",
+        2 => "special route (特殊路线)",
+        3 => "loop recording (循环录制)",
+        _ => "unknown",
+    }
+}
+
 impl State {
     async fn on_input(&mut self, e: Event) {
-        let (start_key, stop_key) = match self.app_state.config.read() {
+        let (start_key, stop_key, route_type_tagging_enabled) = match self.app_state.config.read() {
             Ok(cfg) => (
                 name_to_virtual_keycode(cfg.preferences.start_recording_key()),
                 name_to_virtual_keycode(cfg.preferences.stop_recording_key()),
+                cfg.preferences.enable_route_type_tagging,
             ),
             Err(_) => {
                 tracing::error!("Config RwLock poisoned in on_input, using F9 defaults");
-                (name_to_virtual_keycode("F9"), name_to_virtual_keycode("F9"))
+                (
+                    name_to_virtual_keycode("F9"),
+                    name_to_virtual_keycode("F9"),
+                    false,
+                )
             }
         };
+
+        // F1/F2/F3 → route_type ∈ {1,2,3} tagging. Gated behind
+        // `Preferences::enable_route_type_tagging` (default false) so the
+        // legacy recording path is byte-for-byte unaffected when disabled.
+        //
+        // Pressed BEFORE recording: tag remembered for the next clip
+        // (consumed atomically by `Recorder::start`).
+        // Pressed DURING recording: tag still recorded for the NEXT clip;
+        // we log a warn-level breadcrumb so the operator can see in the
+        // log that their press only takes effect after the current clip
+        // stops. The current clip's tag is captured at start and never
+        // re-written.
+        if route_type_tagging_enabled
+            && let Some(key) = e.key_press_keycode()
+            && let Some(tag) = route_type_for_key(key)
+        {
+            self.app_state.next_route_type.store(tag, Ordering::Release);
+            let label = route_type_label(tag);
+            if self.recording_state.is_recording() {
+                tracing::warn!(
+                    route_type = tag,
+                    label,
+                    "route_type hotkey pressed during active recording; \
+                     tag will apply to the NEXT recording, current clip's \
+                     tag is unchanged"
+                );
+            } else {
+                tracing::info!(
+                    route_type = tag,
+                    label,
+                    "route_type hotkey set; will apply to next recording"
+                );
+            }
+            // Treat F1/F2/F3 as fully consumed — do NOT fall through to
+            // the start/stop hotkey arms below. The user has explicitly
+            // bound F1-F3 to tagging in the preferences UI; reusing them
+            // for start/stop would silently double-fire. Note that the
+            // user must rebind start/stop off F1-F3 themselves; defaults
+            // are F9 so the conflict never arises in practice, and we
+            // still call `seen_input` below so the keypress is recorded
+            // in `inputs.csv`.
+            if let Err(e) = self.recorder.seen_input(e).await {
+                tracing::error!(e=?e, "Failed to seen input after route_type hotkey");
+            }
+            self.last_active = Instant::now();
+            return;
+        }
+
         if let Err(e) = self.recorder.seen_input(e).await {
             tracing::error!(e=?e, "Failed to seen input");
         }
@@ -2949,5 +3048,61 @@ mod session_dir_name_tests {
             parts[3].chars().all(|c| c.is_ascii_hexdigit()),
             "suffix must be hex"
         );
+    }
+}
+
+#[cfg(test)]
+mod route_type_tests {
+    use super::{route_type_for_key, route_type_label};
+
+    /// F1 (`0x70`) maps to 1 (常规漫游).
+    #[test]
+    fn f1_keycode_maps_to_1() {
+        assert_eq!(route_type_for_key(0x70), Some(1));
+    }
+
+    /// F2 (`0x71`) maps to 2 (特殊路线).
+    #[test]
+    fn f2_keycode_maps_to_2() {
+        assert_eq!(route_type_for_key(0x71), Some(2));
+    }
+
+    /// F3 (`0x72`) maps to 3 (循环录制).
+    #[test]
+    fn f3_keycode_maps_to_3() {
+        assert_eq!(route_type_for_key(0x72), Some(3));
+    }
+
+    /// Any other key code must return `None` so non-tag keys (including
+    /// the start/stop hotkey F9 at `0x78` and F4 at `0x73` sitting right
+    /// after F3 in the table) never accidentally trigger a tag.
+    #[test]
+    fn non_tag_keycodes_return_none() {
+        for non_tag in [0x00u16, 0x0D, 0x73, 0x74, 0x78, 0xFF, 0xFFFF] {
+            assert_eq!(
+                route_type_for_key(non_tag),
+                None,
+                "keycode {non_tag:#06X} must not map to a route_type"
+            );
+        }
+    }
+
+    /// Labels exist for every valid tag — used in tracing breadcrumbs
+    /// so operators can correlate log lines with the buyer's docs.
+    #[test]
+    fn labels_cover_all_valid_tags() {
+        for tag in 1u8..=3 {
+            let label = route_type_label(tag);
+            assert!(
+                !label.is_empty() && label != "unknown",
+                "tag {tag} must have a real label, got `{label}`"
+            );
+        }
+        // Sentinel values get a defensive "unknown" — we never want a
+        // panic in the input loop just because a future code path
+        // misroutes a value.
+        assert_eq!(route_type_label(0), "unknown");
+        assert_eq!(route_type_label(4), "unknown");
+        assert_eq!(route_type_label(255), "unknown");
     }
 }
