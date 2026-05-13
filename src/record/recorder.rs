@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
     time::Instant,
 };
 
@@ -246,6 +246,22 @@ impl Recorder {
                 .config
                 .read_safe()
                 .unwrap_or_else(|e| e.into_inner());
+            // Atomically consume the pending route_type tag. We swap to 0
+            // so the next recording starts fresh — even if the user
+            // forgets to retag, we won't reuse a stale value.
+            //
+            // Only honour the tag when the feature flag is on AND the value
+            // is in the documented {1,2,3} domain. When the flag is off, we
+            // still clear the slot (defensive: if the flag is toggled mid-
+            // session, the recorder must NOT smuggle a previously-set tag
+            // through after the flag is disabled).
+            let raw_pending = self.app_state.next_route_type.swap(0, Ordering::AcqRel);
+            let route_type =
+                if config.preferences.enable_route_type_tagging && (1..=3).contains(&raw_pending) {
+                    Some(raw_pending)
+                } else {
+                    None
+                };
             let params = RecordingParams {
                 recording_location: recording_location.clone(),
                 game_exe: game_exe.clone(),
@@ -260,6 +276,7 @@ impl Recorder {
                     .unwrap_or_default(),
                 record_microphone: config.preferences.record_microphone,
                 disable_action_camera_output: config.preferences.disable_action_camera_output,
+                route_type,
             };
             // Compute the guard again under the same lock snapshot so we
             // don't race with the user revoking consent between the top-of-
@@ -279,6 +296,16 @@ impl Recorder {
         };
 
         delete_recording_on_exit.disarm();
+
+        // Publish the in-flight clip's tag for UI / overlay readers. Mirrors
+        // the `Recording::route_type` we just snapshotted into the recorder
+        // params. We do this AFTER the `Recording::start` succeeds so a
+        // failed start (e.g. OBS init error) doesn't leave a stale tag
+        // visible to the UI for the next attempt.
+        let started_route_type = recording.route_type();
+        if let Ok(mut slot) = self.app_state.current_recording_route_type.write_safe() {
+            *slot = started_route_type;
+        }
 
         self.recording = Some(recording);
         *self
@@ -333,6 +360,13 @@ impl Recorder {
             .state
             .write_safe()
             .unwrap_or_else(|e| e.into_inner()) = RecordingStatus::Stopped;
+
+        // Clear the in-flight tag. The pending slot (`next_route_type`) is
+        // independent and was already consumed at start, so the next
+        // recording will require a fresh F1/F2/F3 press to set a tag.
+        if let Ok(mut slot) = self.app_state.current_recording_route_type.write_safe() {
+            *slot = None;
+        }
 
         tracing::info!("Recording stopped");
         Ok(Some(session_path))

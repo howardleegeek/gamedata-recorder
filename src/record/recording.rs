@@ -40,6 +40,16 @@ pub(crate) struct RecordingParams {
     /// Suppress the additive `action_camera.json` sink. Default `false`
     /// (sink enabled). See `crate::config::Preferences::disable_action_camera_output`.
     pub disable_action_camera_output: bool,
+    /// Operator-set per-clip route tag, captured from the pending slot in
+    /// `AppState::next_route_type` at the moment this recording starts.
+    /// `1` = 常规漫游, `2` = 特殊路线, `3` = 循环录制. `None` means the
+    /// operator pressed no tag hotkey before this recording started, or the
+    /// feature flag `Preferences::enable_route_type_tagging` is disabled.
+    /// Persisted into `metadata.json` and (when LEM is enabled) into
+    /// `metadata/session.json` so the buyer's downstream pipeline can route
+    /// the clip without re-deriving the tag. See
+    /// `docs/RECORDER_BUYER_SPEC_FEATURES.md` §2.
+    pub route_type: Option<u8>,
 }
 
 pub(crate) struct Recording {
@@ -57,6 +67,11 @@ pub(crate) struct Recording {
     /// Mirrors `RecordingParams::disable_action_camera_output` — read at
     /// session-stop time to decide whether to emit the additive sink.
     disable_action_camera_output: bool,
+    /// Mirrors `RecordingParams::route_type` — captured at start, written
+    /// into `metadata.json` at stop. `None` ⇒ operator did not tag the
+    /// clip via F1/F2/F3 before recording began, or the feature flag was
+    /// disabled.
+    route_type: Option<u8>,
 
     pid: Pid,
     hwnd: HWND,
@@ -83,6 +98,7 @@ impl Recording {
             game_config,
             record_microphone,
             disable_action_camera_output,
+            route_type,
         } = params;
 
         let start_time = SystemTime::now();
@@ -182,6 +198,7 @@ impl Recording {
             average_fps: None,
             fps_sample_count: 0,
             disable_action_camera_output,
+            route_type,
 
             pid,
             hwnd,
@@ -224,6 +241,14 @@ impl Recording {
 
     pub(crate) fn game_resolution(&self) -> (u32, u32) {
         self.game_resolution
+    }
+
+    /// Operator-set per-clip route tag captured at `Recording::start`. Used
+    /// by the UI / overlay (via `AppState::current_recording_route_type`)
+    /// and persisted into `metadata.json` at stop time. `None` ⇒ no tag
+    /// (feature flag off, or operator did not press F1/F2/F3 before start).
+    pub(crate) fn route_type(&self) -> Option<u8> {
+        self.route_type
     }
 
     pub(crate) fn get_window_name(&self) -> Option<String> {
@@ -481,6 +506,7 @@ impl Recording {
             result.as_ref().ok().cloned(),
             frame_count,
             dropped_input_events,
+            self.route_type,
         )
         .await?;
 
