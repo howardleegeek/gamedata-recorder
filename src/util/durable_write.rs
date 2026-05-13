@@ -15,35 +15,38 @@
 //! treated the write as "done" there's no retry.
 //!
 //! The fix is the standard write-tmp → fsync → rename dance:
-//!   a. Write bytes to `<path>.tmp`.
+//!   a. Write bytes to a uniquely-named tempfile in the SAME directory as
+//!      the destination (`tempfile::NamedTempFile::new_in`). Same-directory
+//!      placement is critical: `rename(2)` is only atomic when source and
+//!      destination are on the same filesystem, and a per-call unique
+//!      filename prevents two concurrent atomic writes from colliding on a
+//!      shared `<path>.tmp` sibling.
 //!   b. `File::sync_all()` on the temp file so the data is durable on the
 //!      physical medium, not just in the page cache.
-//!   c. `rename(<path>.tmp, <path>)` — this is the atomic commit point.
+//!   c. `rename(tempfile, <path>)` — this is the atomic commit point.
+//!      `NamedTempFile::persist()` performs the rename and disarms its
+//!      RAII drop guard so the file isn't deleted if persist succeeds. On
+//!      failure the drop guard *will* unlink the tempfile, so we can't end
+//!      up with orphan tmp files after a failed commit.
 //!   d. (POSIX) `fsync` the containing directory so the rename is also
 //!      durable and can't be rolled back after a crash.
 //!
 //! On Windows step (d) errors because opening a directory as a `File` isn't
 //! supported the same way; we silently ignore that error — step (c) is
 //! already atomic on NTFS via `MoveFileExW(MOVEFILE_WRITE_THROUGH)` semantics
-//! that `std::fs::rename` inherits, and a full directory handle sync is not
-//! generally available without `OpenDirectoryHandle` / `FlushFileBuffers`.
+//! that `std::fs::rename` (and `NamedTempFile::persist`) inherits, and a
+//! full directory handle sync is not generally available without
+//! `OpenDirectoryHandle` / `FlushFileBuffers`.
 
-use std::{
-    io::Write as _,
-    path::{Path, PathBuf},
-};
+use std::{io::Write as _, path::Path};
 
-/// Extension used for the temporary file during atomic write. Chosen so that
-/// leftover temp files from a crash are obvious on disk and don't collide
-/// with normal output files. We append `.tmp` to whatever extension the
-/// final path has (so `metadata.json` → `metadata.json.tmp`). This preserves
-/// the existing convention already used by
-/// [`crate::record::local_recording::write_metadata_and_validate`].
-fn temp_path_for(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_os_string();
-    s.push(".tmp");
-    PathBuf::from(s)
-}
+/// Extension used for the temporary file during atomic write. Historical
+/// callers in the codebase look for the `<path>.tmp` convention when
+/// detecting crashed sessions; we keep that as the *prefix* of the unique
+/// tempfile name (e.g. `metadata.json.tmp.AbC123`) so existing
+/// crash-recovery scans still match while concurrent writers can't collide
+/// on a shared name.
+const TMP_PREFIX_SUFFIX: &str = ".tmp.";
 
 /// Blocking atomic write with fsync. Safe to call from sync code or from a
 /// `tokio::task::spawn_blocking` closure.
@@ -51,13 +54,40 @@ fn temp_path_for(path: &Path) -> PathBuf {
 /// Writes `contents` to `path` such that after a crash either the old file
 /// (or none, if the path didn't exist) or the complete new file is visible
 /// — never a torn, truncated, or empty file.
+///
+/// Failure modes:
+///   - Tempfile creation fails (out of space, permissions): returns
+///     `io::Error`, no tempfile remains.
+///   - Write or fsync to tempfile fails: tempfile is removed by
+///     `NamedTempFile`'s RAII drop, returns `io::Error`.
+///   - Rename to final path fails: tempfile is removed by
+///     `NamedTempFile`'s RAII drop, returns `io::Error`. The destination
+///     keeps its prior contents (or stays absent if it didn't exist).
+///   - Rename succeeds but directory fsync fails: best-effort, error is
+///     swallowed — the data is already durable on the medium.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let tmp = temp_path_for(path);
+    // Same-directory placement. If `path` has no parent we fall back to the
+    // current dir — but every metadata path the recorder writes has a
+    // session-directory parent, so this is just defensive.
+    let parent = path.parent().unwrap_or(Path::new("."));
 
-    // Scope the file handle so it's closed before we rename; some platforms
-    // (notably older Windows filesystems) refuse `rename` over an open handle.
+    // Prefix the tempfile name with the final file's name so a leftover
+    // tmp after a crash is obvious on disk (e.g. `metadata.json.tmp.AbC123`
+    // sits next to `metadata.json`). Same-directory placement is critical
+    // for `rename(2)` atomicity.
+    let file_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "out".to_string());
+    let prefix = format!("{file_name}{TMP_PREFIX_SUFFIX}");
+    let mut named = tempfile::Builder::new()
+        .prefix(prefix.as_str())
+        .tempfile_in(parent)?;
+
+    // Write all the contents. Use a separate Write block so the buffer is
+    // flushed before we sync — flush() is a no-op on `File` but doc-clear.
     {
-        let mut f = std::fs::File::create(&tmp)?;
+        let f = named.as_file_mut();
         f.write_all(contents)?;
         // Make data durable on the physical medium before we swing the name.
         // Without this, a power loss between `write_all` (page-cache only)
@@ -66,24 +96,28 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         f.sync_all()?;
     }
 
-    // Atomic commit. If this fails (permissions, cross-device, file locked),
-    // remove the orphan tmp file so a retry starts clean.
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        std::fs::remove_file(&tmp).ok();
-        return Err(e);
-    }
+    // Atomic commit. `persist` renames the tempfile to `path`, disarms the
+    // drop-time unlink, and returns the underlying `File` (which we don't
+    // need). If this fails (cross-device, permissions, file locked), the
+    // `PersistError` returned wraps both the `io::Error` and the (still
+    // RAII-managed) `NamedTempFile` — letting the latter drop reverts to
+    // unlinking the tempfile, so no orphan remains.
+    named.persist(path).map_err(|persist_err| {
+        // The PersistError already carries the original io::Error; surface
+        // it verbatim. Drop of `persist_err` releases the tempfile back to
+        // its RAII guard which then unlinks it.
+        persist_err.error
+    })?;
 
     // Best-effort: fsync the containing directory so the rename itself
     // survives a crash. On POSIX this is necessary; on Windows opening a
     // directory as a `File` errors, and we accept that — the rename we just
     // issued is already durable on NTFS via MoveFile semantics.
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            // Ignore the error — on Windows this will often fail with
-            // "Access is denied" because a directory handle isn't a writable
-            // file handle. That's fine; the rename is already durable.
-            let _ = dir.sync_all();
-        }
+    if let Ok(dir) = std::fs::File::open(parent) {
+        // Ignore the error — on Windows this will often fail with
+        // "Access is denied" because a directory handle isn't a writable
+        // file handle. That's fine; the rename is already durable.
+        let _ = dir.sync_all();
     }
 
     Ok(())
@@ -96,7 +130,7 @@ pub async fn write_atomic_async(path: &Path, contents: Vec<u8>) -> std::io::Resu
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || write_atomic(&path, &contents))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        .map_err(std::io::Error::other)?
 }
 
 /// Best-effort fsync of a directory — surfaces to the durability of the

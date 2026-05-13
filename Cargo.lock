@@ -465,6 +465,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "auto-cap"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -582,6 +589,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2261d10cca569e4643e526d8dc2e62e433cc8aba21ab764233731f8d369bf394"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "bitrate-precision-tests"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2121,6 +2138,7 @@ name = "gamedata-recorder"
 version = "2.6.0"
 dependencies = [
  "async-trait",
+ "auto-cap",
  "backoff",
  "catppuccin-egui",
  "chrono",
@@ -3177,6 +3195,7 @@ dependencies = [
  "gilrs 0.11.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "gilrs 0.11.0 (git+https://gitlab.com/gilrs-project/gilrs.git)",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3662,6 +3681,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "metadata-polish-tests"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "constants",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -6765,6 +6798,13 @@ dependencies = [
  "memoffset",
  "tempfile",
  "winapi",
+]
+
+[[package]]
+name = "ui-refusal-tests"
+version = "0.1.0"
+dependencies = [
+ "game-process",
 ]
 
 [[package]]

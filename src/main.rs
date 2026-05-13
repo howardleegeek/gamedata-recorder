@@ -8,6 +8,7 @@ mod api;
 mod app_state;
 mod assets;
 mod config;
+mod config_bitrate;
 mod output_types;
 mod play_time;
 mod record;

@@ -1,3 +1,4 @@
+pub mod fps_stats;
 pub mod lem_metadata;
 pub mod lem_types;
 
@@ -73,6 +74,19 @@ pub struct Metadata {
     /// Wall-clock end in RFC 3339.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub wall_clock_end: Option<String>,
+    /// Effective video encoder bitrate, in kilobits per second (PRD R2.10).
+    ///
+    /// This is the *clamped* value actually fed to the OBS encoder
+    /// (`Preferences::recording_bitrate_kbps` after
+    /// `clamp_recording_bitrate_kbps`), not the raw user preference. The
+    /// buyer ingest reads this back to audit per-session bitrate against
+    /// the 6–12 Mbps R2.10 band.
+    ///
+    /// `Option<u32>` for backward compatibility: recordings produced before
+    /// this field existed don't have it in their `metadata.json`, and
+    /// `#[serde(default)]` makes those files parse cleanly with `None`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub encoder_bitrate_kbps: Option<u32>,
 }
 
 #[derive(Debug)]

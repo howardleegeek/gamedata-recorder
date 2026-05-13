@@ -3,6 +3,7 @@ use std::path::Path;
 use color_eyre::Result;
 use serde::Serialize;
 
+use crate::output_types::fps_stats::FpsStats;
 use crate::util::durable_write;
 
 /// Per-second FPS statistics entry (buyer spec requirement).
@@ -153,8 +154,9 @@ impl FpsLogger {
         self.entries.last().map(|e| e.fps as f64)
     }
 
-    /// Finalize and persist both `fps_log.json` (per-second aggregate) and
-    /// `frames.jsonl` (per-frame timestamps) to the session directory.
+    /// Finalize and persist `fps_log.json` (per-second aggregate),
+    /// `frames.jsonl` (per-frame timestamps), and `fps_stats.json` (R5.3
+    /// percentile aggregate over the whole session) to the session directory.
     ///
     /// Returns the total number of frames observed, so callers can populate
     /// `frame_count` in the session metadata without a second pass.
@@ -176,6 +178,26 @@ impl FpsLogger {
             "FPS log saved: {} entries to {:?}",
             self.entries.len(),
             fps_log_path
+        );
+
+        // R5.3: compute the percentile aggregate from REAL per-frame timestamps
+        // BEFORE we move `frame_timestamps` into the JSONL serializer below.
+        // The percentiles answer the buyer's "did the recording stutter?"
+        // question that the 1 Hz heartbeat in `fps_log.json` can't answer
+        // because it smears single-frame stalls across a whole second.
+        let stats_ns: Vec<u64> = self.frame_timestamps.iter().map(|ft| ft.t_ns).collect();
+        let stats = FpsStats::from_frame_timestamps_ns(&stats_ns);
+        let stats_path = session_dir.join(constants::filename::recording::FPS_STATS);
+        let stats_json = serde_json::to_string_pretty(&stats)?;
+        durable_write::write_atomic_async(&stats_path, stats_json.into_bytes()).await?;
+        tracing::info!(
+            frame_count = stats.frame_count,
+            duration_ns = stats.duration_ns,
+            median = ?stats.median,
+            p1 = ?stats.p1,
+            p99 = ?stats.p99,
+            "FPS stats saved to {:?}",
+            stats_path,
         );
 
         // Write frames.jsonl — one JSON object per line, no pretty-printing.
