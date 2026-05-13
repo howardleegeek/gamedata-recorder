@@ -1,3 +1,4 @@
+pub mod fps_stats;
 pub mod lem_metadata;
 pub mod lem_types;
 

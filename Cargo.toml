@@ -7,6 +7,7 @@ members = [
     "crates/depth-hook",
     "crates/action-camera-tests",
     "crates/engine-telemetry",
+    "crates/metadata-polish-tests",
 ]
 exclude = ["tools/vm", "test_game"]
 default-members = ["."]
@@ -62,6 +63,11 @@ git-version = "0.3"
 sysinfo = "0.32.1"
 steamlocate = "2.0.1"
 tracing-appender = "0.2"
+# tempfile is used by the atomic-write helper in src/util/durable_write.rs
+# (R5.6: tempfile + rename + fsync for metadata finalization). Same version
+# already used in dev-dependencies and the action-camera-tests crate so the
+# workspace lockfile stays single-versioned.
+tempfile = "3"
 
 # test-app dependencies
 anyhow = "1.0"
@@ -147,9 +153,10 @@ sha2 = "0.10"
 backoff = { version = "0.4", features = ["tokio"] }
 rfd = "0.14"
 steamlocate.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 
 [build-dependencies]
 embed-manifest = "1.3.1"

@@ -22,7 +22,10 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 color-eyre = { workspace = true }
 constants = { workspace = true }
+# tempfile is used by src/util/durable_write.rs (source-included from the
+# top-level crate via #[path = ...]). Has to be a regular dep — not just
+# dev — because the source-included module compiles as part of this lib.
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
