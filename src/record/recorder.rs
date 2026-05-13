@@ -44,6 +44,12 @@ pub trait VideoRecorder {
     /// alongside desktop audio in monitor-capture mode. Recorders that use
     /// OBS's game-capture hook (or the socket backend's window-capture)
     /// ignore this — the hook already taps game/desktop audio directly.
+    /// `recording_bitrate_kbps`: effective (clamped) recording bitrate in
+    /// kbps. PRD R2.10. Recorders that drive a real encoder (the embedded
+    /// OBS recorder) must pass this through to the encoder `bitrate`
+    /// setting. The socket recorder ignores it: that backend talks to a
+    /// user-managed OBS process whose encoder settings are owned by the
+    /// user's OBS config and out of our scope.
     #[allow(clippy::too_many_arguments)]
     async fn start_recording(
         &mut self,
@@ -54,6 +60,7 @@ pub trait VideoRecorder {
         video_settings: EncoderSettings,
         game_config: GameConfig,
         record_microphone: bool,
+        recording_bitrate_kbps: u32,
         game_resolution: (u32, u32),
         event_stream: InputEventStream,
         consent: ConsentGuard,
@@ -260,6 +267,12 @@ impl Recorder {
                     .unwrap_or_default(),
                 record_microphone: config.preferences.record_microphone,
                 disable_action_camera_output: config.preferences.disable_action_camera_output,
+                // R2.10: read the raw user value and clamp to the buyer
+                // band exactly once here. Downstream (`Recording`, the
+                // video recorder, `metadata.json`) sees only the clamped
+                // value, which keeps the warning one-shot per recording
+                // start rather than per encoder-data update.
+                recording_bitrate_kbps: config.preferences.effective_recording_bitrate_kbps(),
             };
             // Compute the guard again under the same lock snapshot so we
             // don't race with the user revoking consent between the top-of-
