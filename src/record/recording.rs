@@ -50,6 +50,14 @@ pub(crate) struct RecordingParams {
     /// the clip without re-deriving the tag. See
     /// `docs/RECORDER_BUYER_SPEC_FEATURES.md` §2.
     pub route_type: Option<u8>,
+    /// Effective recording bitrate in kbps (already clamped to the buyer
+    /// band — see `crate::config::clamp_recording_bitrate_kbps`).
+    ///
+    /// Threaded all the way to the OBS encoder so the `bitrate` key on the
+    /// encoder `ObsData` matches what the user (or default) chose, and
+    /// surfaced into `metadata.json` so downstream tooling can audit the
+    /// effective value per session. PRD R2.10.
+    pub recording_bitrate_kbps: u32,
 }
 
 pub(crate) struct Recording {
@@ -72,6 +80,11 @@ pub(crate) struct Recording {
     /// clip via F1/F2/F3 before recording began, or the feature flag was
     /// disabled.
     route_type: Option<u8>,
+    /// Mirrors `RecordingParams::recording_bitrate_kbps` — the clamped,
+    /// effective bitrate handed to OBS at start. Held here so the
+    /// `stop` path can stamp it into `metadata.json` (PRD R2.10) without
+    /// having to re-read `Preferences` and re-clamp.
+    recording_bitrate_kbps: u32,
 
     pid: Pid,
     hwnd: HWND,
@@ -99,6 +112,7 @@ impl Recording {
             record_microphone,
             disable_action_camera_output,
             route_type,
+            recording_bitrate_kbps,
         } = params;
 
         let start_time = SystemTime::now();
@@ -180,6 +194,7 @@ impl Recording {
                 video_settings,
                 game_config,
                 record_microphone,
+                recording_bitrate_kbps,
                 game_resolution,
                 input_stream.clone(),
                 consent,
@@ -199,6 +214,7 @@ impl Recording {
             fps_sample_count: 0,
             disable_action_camera_output,
             route_type,
+            recording_bitrate_kbps,
 
             pid,
             hwnd,
@@ -507,6 +523,7 @@ impl Recording {
             frame_count,
             dropped_input_events,
             self.route_type,
+            self.recording_bitrate_kbps,
         )
         .await?;
 

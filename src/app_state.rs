@@ -2,7 +2,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, OnceLock, RwLock,
-        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -72,6 +72,15 @@ pub struct AppState {
     /// touching the pending slot. `None` ⇒ no active recording, OR the
     /// active recording started before any F1/F2/F3 press.
     pub current_recording_route_type: RwLock<Option<u8>>,
+    /// Wall-clock instant the **current** recording started — `Some`
+    /// only while a recording is live (`RecordingState::Recording` in
+    /// `tokio_thread.rs`), `None` otherwise. Used by auto-cap policy.
+    pub recording_start_time: RwLock<Option<Instant>>,
+    /// Win32 HWND of the currently-recording game window, stored as an
+    /// `isize`. Zero means "no active recording". Read by the
+    /// UI-refusal detector task once per tick (1 Hz). Written by
+    /// `Recorder::start`/`stop`/`abort`.
+    pub recording_hwnd_raw: AtomicIsize,
 }
 
 /// State for offline mode and backoff retry logic
@@ -163,6 +172,10 @@ impl AppState {
             upload_filters: RwLock::new(UploadFilters::default()),
             next_route_type: AtomicU8::new(0),
             current_recording_route_type: RwLock::new(None),
+            recording_start_time: RwLock::new(None),
+            // Zero ⇒ no active recording. Updated by Recorder::start /
+            // ::stop / ::abort, read by the ui-refusal detector task.
+            recording_hwnd_raw: AtomicIsize::new(0),
         };
         tracing::debug!("AppState::new() complete");
         state

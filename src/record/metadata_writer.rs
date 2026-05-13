@@ -242,10 +242,15 @@ impl MetadataWriter {
             Some(info) => vec![GpuSpecs {
                 name: info.name.clone(),
                 vendor: info.vendor.clone(),
+                // driver_version is enriched post-call via EnumDisplayDevices
+                // (Windows-only). Initialize as None; populated by
+                // hardware_specs::enrich_gpu_specs_with_driver_version().
+                driver_version: None,
             }],
             None => vec![GpuSpecs {
                 name: "Unknown".to_string(),
                 vendor: "Unknown".to_string(),
+                driver_version: None,
             }],
         };
 

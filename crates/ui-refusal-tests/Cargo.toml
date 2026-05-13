@@ -1,0 +1,34 @@
+[package]
+name = "ui-refusal-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Cross-platform shim around `src/record/ui_refusal_detector.rs`.
+#
+# This crate exists ONLY to compile the pure-logic parts of the detector
+# on non-Windows hosts (macOS / Linux CI) so we can run its unit tests +
+# integration tests without dragging in libobs-wrapper, glfw, tray-icon,
+# egui_overlay (the Windows-only deps of the top-level
+# `gamedata-recorder` crate).
+#
+# The detector source file is source-included via `#[path = ...]` from
+# `src/lib.rs`. On Windows builds the same file is compiled into the
+# top-level crate as `crate::record::ui_refusal_detector`; on macOS
+# / Linux builds this crate compiles it standalone and exercises it via
+# the integration tests in `tests/ui_refusal.rs`.
+#
+# Pattern mirrors `crates/action-camera-tests/` which does the same for
+# the action-camera writer.
+
+[dependencies]
+# No runtime deps — the pure-logic detector uses only `std`. We bring
+# in `game-process` ONLY on Windows, where the detector's
+# `#[cfg(target_os = "windows")]` block imports Win32 symbols through
+# it. On non-Windows targets we don't compile that block, so we don't
+# need the dep.
+
+[target.'cfg(target_os = "windows")'.dependencies]
+game-process = { workspace = true }
+
+[dev-dependencies]
