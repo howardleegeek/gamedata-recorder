@@ -645,6 +645,12 @@ pub struct KbmCapture {
     /// INPUTSINK tiers failed). `None` for the preferred RawInput
     /// paths.
     hook: Option<HHOOK>,
+    /// Optional LL mouse hook handle (rc19.0.1, Bug 1 sibling fix).
+    /// Installed alongside `hook` when the Hook fallback tier is taken,
+    /// so mouse events also flow through `mouse_ll_proc` into the same
+    /// crossbeam channel. Independent `Option` so we can install one
+    /// without the other if a future failure mode requires it.
+    mouse_hook: Option<HHOOK>,
     /// Receiver end of the LL hook channel. The hook callback pushes
     /// events into the matching `SyncSender` (stored in the global
     /// `HOOK_EVENT_TX`) and `run_queue` drains via `try_recv` between
@@ -664,6 +670,14 @@ impl Drop for KbmCapture {
                 && let Err(e) = UnhookWindowsHookEx(hook)
             {
                 tracing::error!("Failed to unhook WH_KEYBOARD_LL: {:?}", e);
+            }
+            // rc19.0.1 (Bug 1 sibling): also unhook the WH_MOUSE_LL
+            // handle so future KbmCapture instances can install fresh
+            // mouse hooks cleanly.
+            if let Some(mouse_hook) = self.mouse_hook.take()
+                && let Err(e) = UnhookWindowsHookEx(mouse_hook)
+            {
+                tracing::error!("Failed to unhook WH_MOUSE_LL: {:?}", e);
             }
             // Drop the sender side so future hook firings (after
             // unhook but before the OS fully tears down) silently
@@ -909,7 +923,7 @@ impl KbmCapture {
             //   - The hook chain must always be forwarded (we return
             //     `CallNextHookEx(...)`) so games still receive
             //     keystrokes.
-            let (tier, hook_handle, hook_rx) = if matches!(tier, RegistrationTier::None) {
+            let (tier, hook_handle, mouse_hook_handle, hook_rx) = if matches!(tier, RegistrationTier::None) {
                 let (tx, rx) = sync_channel::<Event>(10_000);
                 // Park the sender / active_keys / metrics in process-
                 // wide slots that the static hook callback can reach
@@ -948,13 +962,36 @@ impl KbmCapture {
                     .wrap_err("tier 3: SetWindowsHookExW(WH_KEYBOARD_LL)")
                 {
                     Ok(h) => {
-                        tracing::info!(
-                            tier = RegistrationTier::Hook.as_str(),
-                            "INPUTSINK tiers exhausted; installed WH_KEYBOARD_LL hook \
-                             as keyboard-only fallback. Mouse capture is DEAD for this \
-                             session (no WH_MOUSE_LL hook installed)."
-                        );
-                        (RegistrationTier::Hook, Some(h), Some(rx))
+                        // rc19.0.1 (Bug 1 sibling, 2026-05-13): also install
+                        // WH_MOUSE_LL so mouse_ll_proc (already defined with
+                        // wake posts at all 5 sites) actually fires. Before
+                        // this, mouse_ll_proc was dead code on tier-3
+                        // systems — keyboard worked but mouse was 100%
+                        // silent on AMD Radeon 780M and other LL-fallback
+                        // hardware. Mirrors the keyboard install pattern.
+                        let mouse_hook = match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_ll_proc), None, 0)
+                            .wrap_err("tier 3: SetWindowsHookExW(WH_MOUSE_LL)")
+                        {
+                            Ok(mh) => {
+                                tracing::info!(
+                                    tier = RegistrationTier::Hook.as_str(),
+                                    "INPUTSINK tiers exhausted; installed WH_KEYBOARD_LL + \
+                                     WH_MOUSE_LL hooks. Both keyboard and mouse events will \
+                                     flow through the LL hook fallback."
+                                );
+                                Some(mh)
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = ?e,
+                                    "tier 3: WH_MOUSE_LL install FAILED but WH_KEYBOARD_LL \
+                                     succeeded. Continuing with keyboard-only fallback — \
+                                     mouse capture will be DEAD for this session."
+                                );
+                                None
+                            }
+                        };
+                        (RegistrationTier::Hook, Some(h), mouse_hook, Some(rx))
                     }
                     Err(e) => {
                         tracing::error!(
@@ -980,11 +1017,11 @@ impl KbmCapture {
                         {
                             *g = None;
                         }
-                        (RegistrationTier::None, None, None)
+                        (RegistrationTier::None, None, None, None)
                     }
                 }
             } else {
-                (tier, None, None)
+                (tier, None, None, None)
             };
 
             // Publish the tier so the host can read it. Done before we
@@ -1015,6 +1052,7 @@ impl KbmCapture {
                 active_keys,
                 metrics,
                 hook: hook_handle,
+                mouse_hook: mouse_hook_handle,
                 hook_rx,
             })
         }
