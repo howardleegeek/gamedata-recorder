@@ -1,12 +1,22 @@
 //! Integration tests for `engine-telemetry`.
 //!
 //! These exercise the public surface (`EngineFrame`, `EngineHook`,
-//! `CyberpunkHook`, `write_telemetry_sidecar`) end-to-end on a real
-//! tmpdir. They deliberately live outside any `cfg(windows)` gate so
-//! they run on the Mac developer box and Linux CI — the whole point of
-//! splitting `engine-telemetry` from the eventual Windows-only RTTI
-//! walker is so the JSON contract and the in-memory plumbing are
-//! validated independently of the hook itself.
+//! `CyberpunkHook`, `GtaVHook`, `write_telemetry_sidecar`) end-to-end
+//! on a real tmpdir. They deliberately live outside any `cfg(windows)`
+//! gate so they run on the Mac developer box and Linux CI — the whole
+//! point of splitting `engine-telemetry` from the eventual Windows-only
+//! RTTI / ScriptHookV walker is so the JSON contract and the in-memory
+//! plumbing are validated independently of the hook itself.
+
+// `0.7071` (≈ sqrt(2)/2) shows up in this file as a deliberate wire-
+// format test fixture — it's the conventional human-readable quaternion
+// component for a 90° rotation, and the buyer's sample data files cite
+// the same literal. Substituting `FRAC_1_SQRT_2` would obscure the wire
+// contract; the value is load-bearing exactly as written. Suppress
+// `clippy::approx_constant` at the file level so the spec's
+// `-D warnings` clippy gate stays clean without changing test
+// assertions. Pattern mirrored from `feat/cyberpunk-hook-cluster`.
+#![allow(clippy::approx_constant)]
 
 use engine_telemetry::{
     CyberpunkHook, EngineFrame, EngineHook, GtaVHook, HookError, write_telemetry_sidecar,
@@ -270,10 +280,25 @@ fn gta_v_hook_is_constructible() {
     // Smoke test: the per-title scaffold pattern generalises past
     // CyberpunkHook. A new title should require no more than `Hook::new()`
     // + `impl EngineHook` to plug into the rest of the recorder.
+    // Runs on every platform — even on Windows the construction path
+    // is documented to be `LoadLibrary`-free (lazy attach on first
+    // `capture_frame`).
     let _hook = GtaVHook::new();
     let _default_hook = GtaVHook::default();
 }
 
+// The mock-specific assertions below (walking-along-+Y, FOV=50°, etc.)
+// only hold for the cross-platform `gtav_mock` body. The Windows
+// `gtav_windows` build returns `NotAttached` from `capture_frame`
+// when no real ScriptHookV.dll is loaded into the test process —
+// which is the documented production behaviour, but means the mock
+// assertions don't apply. Equivalent Windows coverage lives in
+// `src/gtav_windows.rs#tests::happy_path_returns_unit_quaternion_frame`
+// against an injected MockRegistry. Mirrors the gating in
+// `crates/engine-telemetry/tests/integration.rs` Cyberpunk section
+// (`mock_hook_*` cfg-gates), per `feat/cyberpunk-hook-cluster`.
+
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn gta_v_hook_captures_default_frame() {
     // The mock implementation must produce a fully-populated EngineFrame
@@ -311,6 +336,7 @@ fn gta_v_hook_captures_default_frame() {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn gta_v_hook_respects_metric_scale_one() {
     // RAGE world units are meters (validated empirically — see the
@@ -326,6 +352,7 @@ fn gta_v_hook_respects_metric_scale_one() {
     assert_eq!(trait_scale, frame_scale);
 }
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn gta_v_hook_frame_serde_round_trip() {
     // End-to-end serde round-trip on a captured GtaVHook frame. This is
@@ -348,4 +375,151 @@ fn gta_v_hook_frame_serde_round_trip() {
     let raw = std::fs::read_to_string(&path).expect("read sidecar");
     let reparsed: Vec<EngineFrame> = serde_json::from_str(&raw).expect("parse sidecar");
     assert_eq!(reparsed, frames);
+}
+
+// ---------------------------------------------------------------------------
+// Windows-only: GtaVHook with default registry returns NotAttached on a
+// system without ScriptHookV.dll loaded.
+// ---------------------------------------------------------------------------
+//
+// This is the integration-level counterpart to the unit tests in
+// `src/gtav_windows.rs#tests`. The unit tests use a `MockRegistry` to
+// inject simulated native-table responses; this integration test
+// exercises the production `ScriptHookVDllRegistry` path on a CI box
+// that does *not* have `ScriptHookV.dll` loaded into the test process,
+// validating that the failure mode is the documented
+// `HookError::NotAttached` (transient, recorder skips frame, no panic).
+//
+// Built and run only on `target_os = "windows"`. On Mac/Linux this
+// configuration is impossible by definition (the Windows-only crate
+// surface isn't even compiled). Mirrors the sibling
+// `windows_cyberpunk_hook_returns_not_attached_without_red4ext` test
+// on `feat/cyberpunk-hook-cluster`.
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_gtav_hook_returns_not_attached_without_scripthookv() {
+    use engine_telemetry::GtaVHook;
+
+    // Construct the production hook. `GtaVHook::new()` defers all I/O —
+    // no `LoadLibrary` happens here.
+    let mut hook = GtaVHook::new();
+
+    // Call capture_frame. The test process is not GTA V Enhanced and
+    // does not have ScriptHookV.dll loaded, so we expect NotAttached.
+    let res = hook.capture_frame();
+    assert!(
+        matches!(res, Err(HookError::NotAttached(_))),
+        "expected NotAttached on a system without ScriptHookV, got {res:?}"
+    );
+
+    // The hook should not panic across consecutive failed calls — the
+    // recorder's per-frame tick will call us 60x/second and we MUST
+    // remain stable.
+    for _ in 0..16 {
+        let r = hook.capture_frame();
+        assert!(matches!(r, Err(HookError::NotAttached(_))));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows-only: trait-injected registry produces a fully-populated frame.
+// ---------------------------------------------------------------------------
+//
+// Exercises the `with_registry(Box<dyn ScriptHookVRegistry>)` API
+// surface — the same seam unit tests use, but at the integration-test
+// boundary to lock in the public API contract. Uses an in-line trivial
+// implementation rather than re-importing `MockRegistry` (which is
+// `pub(super)` and not exposed beyond the `gtav_windows` module).
+// Mirrors `windows_cyberpunk_hook_with_injected_registry_emits_engine_frame`
+// on `feat/cyberpunk-hook-cluster`.
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_gtav_hook_with_injected_registry_emits_engine_frame() {
+    use engine_telemetry::{GtaVHook, RageEulerDeg, RageVector3, ScriptHookVRegistry};
+
+    struct AlwaysOriginRegistry;
+
+    impl ScriptHookVRegistry for AlwaysOriginRegistry {
+        fn is_attached(&self) -> bool {
+            true
+        }
+        fn attach_blocker(&self) -> Option<String> {
+            None
+        }
+        fn player_world_position(&self) -> Result<RageVector3, HookError> {
+            Ok(RageVector3 {
+                x: 7.0,
+                y: 8.0,
+                z: 9.0,
+            })
+        }
+        fn player_world_rotation(&self) -> Result<RageEulerDeg, HookError> {
+            // Identity rotation so the follow_offset derivation
+            // simplifies to (camera - player) in [right, up, back]
+            // with yaw=0: local_north = dy, so back = -dy.
+            Ok(RageEulerDeg {
+                pitch: 0.0,
+                roll: 0.0,
+                yaw: 0.0,
+            })
+        }
+        fn camera_world_position(&self) -> Result<RageVector3, HookError> {
+            // 3m behind player (player at y=8, camera at y=5), 1.7m up.
+            Ok(RageVector3 {
+                x: 7.0,
+                y: 5.0,
+                z: 10.7,
+            })
+        }
+        fn camera_world_rotation(&self) -> Result<RageEulerDeg, HookError> {
+            Ok(RageEulerDeg {
+                pitch: 0.0,
+                roll: 0.0,
+                yaw: 0.0,
+            })
+        }
+        fn camera_fov_degrees(&self) -> Result<f64, HookError> {
+            Ok(80.0)
+        }
+        fn world_id(&self) -> String {
+            "test::story::open_world".to_string()
+        }
+    }
+
+    let mut hook = GtaVHook::with_registry(Box::new(AlwaysOriginRegistry));
+    let frame = hook.capture_frame().expect("trait-injected capture");
+
+    // Player position passthrough: RAGE units = meters, X east, Y
+    // north, Z up.
+    assert_eq!(frame.player_position, [7.0, 8.0, 9.0]);
+    // Camera position passthrough.
+    assert_eq!(frame.camera_position, [7.0, 5.0, 10.7]);
+    // FOV passthrough.
+    assert_eq!(frame.fov_degrees, 80.0);
+    // METRIC_SCALE is the const 1.0 — never read from the trait.
+    assert_eq!(frame.metric_scale, 1.0);
+    // Frame index started at 0 and only one frame was captured.
+    assert_eq!(frame.frame_index, 0);
+    // Identity rotation -> identity quaternion.
+    assert_eq!(frame.player_rotation_quaternion, [0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(frame.camera_rotation_quaternion, [0.0, 0.0, 0.0, 1.0]);
+    // Follow-offset derivation with yaw=0:
+    //   dx = 0,  dy = -3,  dz = 1.7
+    //   local_right = 0, local_north = -3, local_up = 1.7
+    //   wire [right, up, back] = [0, 1.7, 3.0]
+    let off = frame.camera_follow_offset;
+    assert!(off[0].abs() < 1e-9, "right: {off:?}");
+    assert!((off[1] - 1.7).abs() < 1e-9, "up: {off:?}");
+    assert!((off[2] - 3.0).abs() < 1e-9, "back: {off:?}");
+
+    // Sidecar round-trip on the trait-produced frame, mirroring the
+    // mock-body integration test
+    // (`sidecar_writer_round_trips_a_full_recording`) so the Windows
+    // path has equivalent end-to-end JSON contract coverage.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("engine_telemetry.json");
+    write_telemetry_sidecar(std::slice::from_ref(&frame), &path).expect("write sidecar");
+    let raw = std::fs::read_to_string(&path).expect("read sidecar");
+    let parsed: Vec<EngineFrame> = serde_json::from_str(&raw).expect("parse");
+    assert_eq!(parsed, vec![frame]);
 }

@@ -42,28 +42,31 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 
-# Windows-only dependencies — to be added by puffydev when implementing
-# the real RTTI walker. Kept as a TODO comment so reviewers see the seam.
+# Windows-only dependencies for the real ScriptHookV bridge implemented
+# in `src/gtav_windows.rs`. On Mac/Linux this block is inert and the
+# crate stays pure-Rust so `cargo test --target aarch64-apple-darwin`
+# does not need any system libraries.
 #
-# When the Windows engineer picks this up, the block below becomes:
-#
-#     [target.'cfg(windows)'.dependencies]
-#     windows = { workspace = true, features = [
-#         "Win32_System_Diagnostics_Debug",     # ReadProcessMemory
-#         "Win32_System_ProcessStatus",         # K32EnumProcessModules
-#         "Win32_System_Threading",             # OpenProcess
-#         "Win32_System_LibraryLoader",         # GetModuleHandleW
-#         "Win32_Graphics_Direct3D12",          # swap-chain present sync
-#     ] }
-#     # Optional in-process adapter (preferred over OOP RPM where allowed):
-#     # red4ext-rs = "0.8"   # only if RED4ext is the chosen attach surface.
-#
-# TODO(puffydev): add the windows feature block above + the RTTI walker
-#                 module in src/rtti.rs with #[cfg(windows)] gating.
-# TODO(puffydev): if/when this crate needs to cross-check exe stems
-#                 against the recorder's whitelist, add
-#                 `constants = { workspace = true }` here — it's
-#                 cross-platform and already a workspace dependency.
+# - `libloading` is the cross-platform dynamic-link wrapper we use to
+#   `LoadLibrary("ScriptHookV.dll")` and resolve exported C symbols
+#   (`nativeInit`, `nativePush64`, `nativeCall`, `getGlobalPtr`, …)
+#   by name. We intentionally do NOT static-link to ScriptHookV.lib:
+#   the user installs ScriptHookV themselves into the GTA V install
+#   root, so the build must not assume it exists at link time.
+#   Missing-DLL is a runtime fallback (logged + skip-frame), not a
+#   build failure. See the failure-mode table on the `gtav_windows`
+#   module docs.
+# - `windows` pulls from the workspace declaration so the
+#   `windows-sys` transitive stays at one version across the tree. We
+#   ride on the workspace feature set — no new feature flags needed
+#   for the ScriptHookV bridge since `libloading` does its own
+#   internal `LoadLibraryW` / `GetProcAddress` calls. The Present-
+#   wrapper integration lives in `crates/depth-hook`; we only
+#   piggyback on its frame counter through the recorder, never call
+#   DXGI directly from this crate.
+[target.'cfg(target_os = "windows")'.dependencies]
+libloading = "0.8"
+windows = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
