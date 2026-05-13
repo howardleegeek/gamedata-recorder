@@ -91,6 +91,24 @@ pub struct Preferences {
     /// file from the other artifacts at any time.
     #[serde(default)]
     pub disable_action_camera_output: bool,
+    /// Enable the UI-element refusal detector. When `true`, an independent
+    /// 1Hz tokio task inspects window/foreground state during recording and
+    /// aborts the in-progress clip if a buyer-rejected UI condition is
+    /// detected (modal popup, Windows toast in foreground, taskbar visible,
+    /// Discord/OBS overlay, alt-tab to desktop, or a 5s+ stalled frame which
+    /// is likely a pause menu).
+    ///
+    /// Default: `false`. False positives are expensive (a 4-minute clip
+    /// thrown away on a 1s toast hurts the operator), so this is opt-in.
+    /// The detector is conservative: when any individual check is ambiguous
+    /// it errs on the side of NOT aborting.
+    #[serde(default)]
+    pub enable_ui_refusal_detector: bool,
+    /// How often the refusal detector samples window state, in seconds.
+    /// Default: 1 (≈1Hz). Bumping this trades responsiveness for CPU
+    /// budget. Range is clamped at runtime to `[1, 30]`.
+    #[serde(default = "default_refusal_check_interval_sec")]
+    pub refusal_check_interval_sec: u32,
     #[serde(default)]
     pub recording_backend: RecordingBackend,
     #[serde(default)]
@@ -163,6 +181,8 @@ impl Default for Preferences {
             audio_cues: Default::default(),
             record_microphone: false,
             disable_action_camera_output: false,
+            enable_ui_refusal_detector: false,
+            refusal_check_interval_sec: default_refusal_check_interval_sec(),
             recording_backend: Default::default(),
             encoder: Default::default(),
             recording_location: default_recording_location(),
@@ -411,6 +431,14 @@ fn default_honk_volume() -> u8 {
 /// median of the buyer-spec 5..=6 min acceptance window).
 fn default_auto_cap_duration_sec() -> u32 {
     auto_cap::DEFAULT_AUTO_CAP_DURATION_SEC
+}
+/// Default refusal-detector sample interval. 1Hz is the spec target — fast
+/// enough to abort within a couple of seconds of a popup, slow enough that
+/// the per-tick Win32 calls (`GetForegroundWindow`, `FindWindowW`,
+/// `EnumWindows`) and the optional GDI frame downsample stay well under
+/// 1ms aggregate on a typical recording host.
+fn default_refusal_check_interval_sec() -> u32 {
+    1
 }
 fn default_recording_location() -> std::path::PathBuf {
     // Use the system-standard local data directory (e.g. C:\Users\<user>\AppData\Local\GameData Recorder\recordings)
