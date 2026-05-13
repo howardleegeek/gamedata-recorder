@@ -435,6 +435,18 @@ unsafe extern "system" fn keyboard_ll_proc(
                 key: vk,
                 press_state,
             });
+
+            // rc19.0.0 (Bug 1 fix, 2026-05-13): wake the message pump so
+            // GetMessageA returns and the drain loop in `run_queue`
+            // actually runs. Without this, keyboard events get buffered
+            // forever in the crossbeam channel and inputs.jsonl ends up
+            // empty even though the LL hook fires (957 WM_INPUT → 0
+            // written, as observed on Howard's minipc1). Mirrors the
+            // wake pattern used by mouse_ll_proc above.
+            let pump_tid = PUMP_THREAD_ID.load(Ordering::Relaxed);
+            if pump_tid != 0 {
+                let _ = PostThreadMessageW(pump_tid, HOOK_WAKE_MSG, WPARAM(0), LPARAM(0));
+            }
         }
 
         CallNextHookEx(None, code, wparam, lparam)
