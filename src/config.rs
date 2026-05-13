@@ -120,6 +120,32 @@ pub struct Preferences {
     /// Per-game configuration settings, keyed by executable name (e.g., "hl2")
     #[serde(default)]
     pub games: HashMap<String, GameConfig>,
+    /// Enables the buyer-spec 5-min auto-cap timer. **Default `false`.**
+    ///
+    /// When `true`, the tokio thread checks each `perform_checks` tick
+    /// (1 Hz) whether the active recording has run for at least
+    /// `auto_cap_duration_sec` seconds, and if so drives the same
+    /// graceful stop F9 would. The kernel of the policy lives in the
+    /// cross-platform `auto-cap` crate so it is unit-testable without
+    /// pulling in libobs / Win32 deps; see
+    /// `docs/RECORDER_BUYER_SPEC_FEATURES.md` §3 for the buyer
+    /// motivation (`5 ≤ clip duration ≤ 6 min`).
+    ///
+    /// Manual F9 between ticks cleanly cancels the cap — see
+    /// `auto_cap::evaluate` for the explicit invariant the integration
+    /// tests pin down.
+    #[serde(default)]
+    pub enable_auto_cap_5min: bool,
+    /// Cap duration in seconds. Default `330` (5:30), the median of the
+    /// buyer's 5..=6 min acceptance window. `0` is treated identically
+    /// to `enable_auto_cap_5min == false` (operator opt-out).
+    ///
+    /// Field is only consulted when `enable_auto_cap_5min == true`, but
+    /// we keep the default at `DEFAULT_AUTO_CAP_DURATION_SEC` so old
+    /// configs that don't carry this key still project to a sane
+    /// duration if the user toggles the flag on later.
+    #[serde(default = "default_auto_cap_duration_sec")]
+    pub auto_cap_duration_sec: u32,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -142,6 +168,8 @@ impl Default for Preferences {
             recording_location: default_recording_location(),
             recording_bitrate_kbps: default_recording_bitrate_kbps(),
             games: Default::default(),
+            enable_auto_cap_5min: false,
+            auto_cap_duration_sec: default_auto_cap_duration_sec(),
         }
     }
 }
@@ -374,6 +402,15 @@ fn default_opacity() -> u8 {
 }
 fn default_honk_volume() -> u8 {
     255
+}
+/// Default cap duration for the 5-min auto-cap timer.
+///
+/// Sourced from the cross-platform policy kernel (`auto_cap` crate) so
+/// the value lives in exactly one place. See
+/// `auto_cap::DEFAULT_AUTO_CAP_DURATION_SEC` for the rationale (5:30
+/// median of the buyer-spec 5..=6 min acceptance window).
+fn default_auto_cap_duration_sec() -> u32 {
+    auto_cap::DEFAULT_AUTO_CAP_DURATION_SEC
 }
 fn default_recording_location() -> std::path::PathBuf {
     // Use the system-standard local data directory (e.g. C:\Users\<user>\AppData\Local\GameData Recorder\recordings)

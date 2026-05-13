@@ -9,6 +9,7 @@ members = [
     "crates/bitrate-precision-tests",
     "crates/engine-telemetry",
     "crates/metadata-polish-tests",
+    "crates/auto-cap",
 ]
 exclude = ["tools/vm", "test_game"]
 default-members = ["."]
@@ -20,6 +21,7 @@ version = "2.6.0"
 input-capture = { path = "crates/input-capture" }
 game-process = { path = "crates/game-process" }
 constants = { path = "crates/constants" }
+auto-cap = { path = "crates/auto-cap" }
 clap = { version = "4.5.39", features = ["derive"] }
 dunce = "1.0.5"
 tracing = "0.1.41"
@@ -97,6 +99,7 @@ constants.workspace = true
 input-capture.workspace = true
 git-version.workspace = true
 game-process.workspace = true
+auto-cap.workspace = true
 clap.workspace = true
 dunce.workspace = true
 tracing.workspace = true

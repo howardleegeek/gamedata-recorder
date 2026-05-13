@@ -52,6 +52,31 @@ pub struct AppState {
     pub offline: OfflineState,
     /// Upload filters for date range filtering
     pub upload_filters: RwLock<UploadFilters>,
+    /// Wall-clock instant the **current** recording started — `Some`
+    /// only while a recording is live (`RecordingState::Recording` in
+    /// `tokio_thread.rs`), `None` otherwise.
+    ///
+    /// Driven exclusively by `tokio_thread::State::handle_transition`:
+    /// set to `Some(Instant::now())` on `Idle/Paused -> Recording` and
+    /// on the same-state `Recording -> Recording` restart; cleared to
+    /// `None` on every transition back to `Idle` / `Paused`. The 1 Hz
+    /// `perform_checks` tick reads it and feeds it into
+    /// `auto_cap::evaluate` to decide whether the 5-min auto-cap should
+    /// fire. Because both the writes and the read happen on the same
+    /// tokio thread there is no fast-path race, but the field is held
+    /// behind a `RwLock` anyway so the UI thread can read the elapsed
+    /// time for display without taking a write lock on the recording
+    /// status.
+    ///
+    /// **Why not reuse `RecordingStatus::Recording.start_time`?** That
+    /// timestamp lives behind the same lock the recorder uses to
+    /// publish FPS updates — making the auto-cap read it would cross
+    /// the recorder boundary and contend with the encoder hot path.
+    /// A dedicated `RwLock<Option<Instant>>` is the smallest possible
+    /// seam for the new policy and keeps `RecordingStatus` exactly as
+    /// it was (so the overlay / UI / play-time tracker code paths are
+    /// completely untouched).
+    pub recording_start_time: RwLock<Option<Instant>>,
 }
 
 /// State for offline mode and backoff retry logic
@@ -141,6 +166,7 @@ impl AppState {
             unsupported_games: RwLock::new(UnsupportedGames::load_from_embedded()),
             offline: OfflineState::default(),
             upload_filters: RwLock::new(UploadFilters::default()),
+            recording_start_time: RwLock::new(None),
         };
         tracing::debug!("AppState::new() complete");
         state

@@ -899,6 +899,52 @@ async fn main(
                 }
                 *app_state.last_foregrounded_game.write_safe()
                     .unwrap_or_else(|e| e.into_inner()) = foregrounded;
+                // 5-min auto-cap timer (buyer-spec, default-off).
+                //
+                // Evaluate the cross-platform policy kernel before the
+                // generic tick state machine: if the cap fires we want
+                // the resulting `Recording -> Idle` transition to win
+                // over any conflicting tick decision (e.g. a workstation
+                // lock pause), since landing inside the 5..=6 min
+                // acceptance window is the buyer's hard requirement.
+                //
+                // The clear-on-transition discipline in
+                // `handle_transition` guarantees:
+                //   * `start.is_none()` outside an active recording, so
+                //     this branch is dormant when there is no clip to cap;
+                //   * the post-transition `recording_start_time` is `None`
+                //     again, so a subsequent tick cannot double-fire.
+                {
+                    let auto_cap_cfg = match app_state.config.read_safe() {
+                        Ok(cfg) => auto_cap::Config {
+                            enabled: cfg.preferences.enable_auto_cap_5min,
+                            duration_sec: cfg.preferences.auto_cap_duration_sec,
+                        },
+                        Err(_) => {
+                            tracing::warn!(
+                                "config RwLock poisoned during auto-cap tick; treating cap as disabled"
+                            );
+                            auto_cap::Config::disabled_default()
+                        }
+                    };
+                    let recording_start = app_state
+                        .recording_start_time
+                        .read_safe()
+                        .map(|guard| *guard)
+                        .unwrap_or(None);
+                    if let auto_cap::ShouldStop::Yes =
+                        auto_cap::evaluate(auto_cap_cfg, recording_start, Instant::now())
+                    {
+                        // The kernel already logged at info level — drive
+                        // the same graceful stop F9 takes.
+                        if let Err(e) = state.handle_transition(RecordingState::Idle).await {
+                            tracing::error!(
+                                e = ?e,
+                                "Failed to drive auto-cap stop transition"
+                            );
+                        }
+                    }
+                }
                 // Tick state machine
                 if let Some((to_state, task)) = state.tick().await {
                     if let Err(e) = state.handle_transition(to_state).await {
@@ -1525,6 +1571,18 @@ impl State {
                     self.actively_recording_window
                 );
                 self.last_active = Instant::now();
+                // Auto-cap timer: stamp the start instant so the 1 Hz
+                // perform_checks tick can decide whether the configured
+                // duration has elapsed. We always write `Some(now)`
+                // unconditionally — the policy itself short-circuits
+                // when the feature is disabled, so leaving a stale
+                // timestamp in place would not fire it. Writing
+                // explicitly here is still the right discipline so a
+                // future toggle of `enable_auto_cap_5min` mid-recording
+                // has a fresh anchor to measure from.
+                if let Ok(mut start) = self.app_state.recording_start_time.write_safe() {
+                    *start = Some(Instant::now());
+                }
                 // Notify play time tracker of recording start
                 self.app_state
                     .play_time_state
@@ -1554,6 +1612,16 @@ impl State {
                     &mut self.cue_cache,
                 )
                 .await?;
+                // Auto-cap timer: recording is over, clear the start
+                // stamp so any subsequent perform_checks tick that
+                // observes the stale `Some(_)` cannot re-fire a stop on
+                // a recording that does not exist. This is the path the
+                // F9 hotkey takes — clearing here is what makes
+                // "manual F9 before cap fires" cleanly cancel the
+                // policy (see `auto_cap::evaluate` invariants).
+                if let Ok(mut start) = self.app_state.recording_start_time.write_safe() {
+                    *start = None;
+                }
                 // Notify play time tracker of recording stop
                 self.app_state
                     .play_time_state
@@ -1585,6 +1653,16 @@ impl State {
                     &mut self.cue_cache,
                 )
                 .await?;
+                // Auto-cap timer: while paused no clip is accruing, so
+                // we clear the start instant. When the recording later
+                // resumes (Paused -> Recording branch above) it will be
+                // re-stamped — the buyer's `5 ≤ duration ≤ 6 min` rule
+                // is per-clip, so a pause-resume cycle is the right
+                // moment to restart the timer rather than letting paused
+                // wall-clock time count against the cap.
+                if let Ok(mut start) = self.app_state.recording_start_time.write_safe() {
+                    *start = None;
+                }
                 *self
                     .app_state
                     .state
@@ -1611,6 +1689,15 @@ impl State {
                     .unwrap_or_else(|e| e.into_inner())
                     .preferences
                     .honk;
+                // Defensive: clear the auto-cap start stamp on the
+                // Paused -> Idle leg too. In practice Paused already
+                // zeroed it on the prior Recording -> Paused
+                // transition, but keeping the write here means every
+                // path that lands in Idle leaves the field cleared,
+                // which is the invariant the policy relies on.
+                if let Ok(mut start) = self.app_state.recording_start_time.write_safe() {
+                    *start = None;
+                }
                 // When user stop keys recording while paused, or when the paused app closes
                 *self
                     .app_state
@@ -1677,6 +1764,13 @@ impl State {
                 )
                 .await?;
                 self.last_active = Instant::now();
+                // Auto-cap timer: a Recording -> Recording restart
+                // produces a new clip, so the cap window resets. The
+                // "second recording resets timer" invariant in
+                // `tests/auto_cap.rs` is the regression check.
+                if let Ok(mut start) = self.app_state.recording_start_time.write_safe() {
+                    *start = Some(Instant::now());
+                }
                 RecordingState::Recording
             }
             (old_state, new_state) => {
