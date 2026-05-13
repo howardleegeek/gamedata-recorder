@@ -68,6 +68,11 @@ impl VideoRecorder for ObsSocketRecorder {
         // application audio via the hook. Microphone capture is a monitor-
         // capture-only concept, so the flag is inert for this backend.
         _record_microphone: bool,
+        // PRD R2.10: socket backend leaves encoder configuration to the
+        // user's OBS instance. We accept the value to match the trait
+        // shape but don't push it down — the user's OBS profile owns
+        // `bitrate` here.
+        _recording_bitrate_kbps: u32,
         (base_width, base_height): (u32, u32),
         // TODO: hook / start events
         _event_stream: InputEventStream,

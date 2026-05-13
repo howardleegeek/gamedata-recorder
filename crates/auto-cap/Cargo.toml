@@ -1,0 +1,34 @@
+[package]
+name = "auto-cap"
+version = "0.1.0"
+edition = "2024"
+description = "5-min auto-cap timer for gamedata-recorder (HHH buyer-spec, default-off)"
+
+# ───────────────────────────────────────────────────────────────────────────
+# What this crate is — and what it is NOT.
+#
+# This is the **timer policy** kernel for the buyer-spec 5-min auto-cap.
+# It does *not* talk to OBS, raw input, or any OS API — it is a pure
+# function over (`start: Option<Instant>`, `now: Instant`, `enabled: bool`,
+# `duration: Duration`) → "should we stop the recording?".
+#
+# The main `gamedata-recorder` crate (Windows-only) calls into this
+# kernel from the tokio `perform_checks` 1 Hz tick. Keeping the policy
+# here means:
+#   1. It is unit-testable on macOS / Linux without dragging in libobs
+#      or the Win32 input-capture hooks.
+#   2. The Windows-only main crate gains exactly one read-only dependency
+#      arrow and no new transitive native deps.
+#   3. Future tweaks (different default, hysteresis, soft-warn) live in
+#      one file with one test surface.
+#
+# Default-off by design: the policy returns `ShouldStop::No` unless the
+# caller explicitly enables it AND there is a live recording start
+# timestamp AND the elapsed time has reached the configured duration.
+# ───────────────────────────────────────────────────────────────────────────
+
+[dependencies]
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Intentionally empty — the public API is pure logic over std::time::Instant.

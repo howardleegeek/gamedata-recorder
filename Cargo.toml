@@ -6,7 +6,11 @@ members = [
     "crates/input-capture",
     "crates/depth-hook",
     "crates/action-camera-tests",
+    "crates/bitrate-precision-tests",
     "crates/engine-telemetry",
+    "crates/metadata-polish-tests",
+    "crates/auto-cap",
+    "crates/ui-refusal-tests",
 ]
 exclude = ["tools/vm", "test_game"]
 default-members = ["."]
@@ -18,6 +22,7 @@ version = "2.6.0"
 input-capture = { path = "crates/input-capture" }
 game-process = { path = "crates/game-process" }
 constants = { path = "crates/constants" }
+auto-cap = { path = "crates/auto-cap" }
 clap = { version = "4.5.39", features = ["derive"] }
 dunce = "1.0.5"
 tracing = "0.1.41"
@@ -62,6 +67,11 @@ git-version = "0.3"
 sysinfo = "0.32.1"
 steamlocate = "2.0.1"
 tracing-appender = "0.2"
+# tempfile is used by the atomic-write helper in src/util/durable_write.rs
+# (R5.6: tempfile + rename + fsync for metadata finalization). Same version
+# already used in dev-dependencies and the action-camera-tests crate so the
+# workspace lockfile stays single-versioned.
+tempfile = "3"
 
 # test-app dependencies
 anyhow = "1.0"
@@ -90,6 +100,7 @@ constants.workspace = true
 input-capture.workspace = true
 git-version.workspace = true
 game-process.workspace = true
+auto-cap.workspace = true
 clap.workspace = true
 dunce.workspace = true
 tracing.workspace = true
@@ -147,9 +158,10 @@ sha2 = "0.10"
 backoff = { version = "0.4", features = ["tokio"] }
 rfd = "0.14"
 steamlocate.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 
 [build-dependencies]
 embed-manifest = "1.3.1"

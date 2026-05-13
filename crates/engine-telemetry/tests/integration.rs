@@ -18,9 +18,12 @@
 // assertions. Pattern mirrored from `feat/cyberpunk-hook-cluster`.
 #![allow(clippy::approx_constant)]
 
-use engine_telemetry::{
-    CyberpunkHook, EngineFrame, EngineHook, GtaVHook, HookError, write_telemetry_sidecar,
-};
+// `CyberpunkHook` is referenced only by the mock-body tests (which are
+// gated to `not(target_os = "windows")`). On Windows the import would be
+// unused, so we cfg-gate the import to match the gating of its uses.
+#[cfg(not(target_os = "windows"))]
+use engine_telemetry::CyberpunkHook;
+use engine_telemetry::{EngineFrame, EngineHook, GtaVHook, HookError, write_telemetry_sidecar};
 
 // ---------------------------------------------------------------------------
 // EngineFrame: serde round-trip
@@ -100,6 +103,14 @@ fn engine_frame_quaternion_array_order_is_xyzw() {
 // Sidecar writer: round-trip on disk
 // ---------------------------------------------------------------------------
 
+// The CyberpunkHook-driven sidecar round-trip uses the mock body's
+// deterministic frames. On Windows, `CyberpunkHook::new()` returns a
+// hook backed by the production `Red4ExtDllRegistry` which yields
+// `NotAttached` until the operator wires up a specific RED4ext SDK
+// signature against a running game. The equivalent end-to-end coverage
+// for Windows lives in `src/cyberpunk_windows.rs#tests` using
+// `CyberpunkHook::with_registry(MockRegistry::happy())`.
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn sidecar_writer_round_trips_a_full_recording() {
     // End-to-end: write 5 frames -> read back -> deep-equals the inputs.
@@ -183,7 +194,16 @@ fn sidecar_writer_errors_on_unwritable_path() {
 // ---------------------------------------------------------------------------
 // Mock CyberpunkHook produces valid frames
 // ---------------------------------------------------------------------------
+//
+// All `mock_hook_*` tests below assert on the deterministic mock body's
+// specific values (walking along +X, FOV = 70°, etc.). They run on
+// Mac/Linux/non-Windows targets only — Windows uses a real RED4ext
+// registry backend that doesn't (and shouldn't) match these literals.
+// Equivalent Windows coverage lives in
+// `src/cyberpunk_windows.rs#tests::happy_path_returns_unit_quaternion_frame`
+// against a mock RED4ext registry.
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn mock_hook_produces_unit_quaternions() {
     // Even though the values are deterministic, validate they actually
@@ -203,6 +223,7 @@ fn mock_hook_produces_unit_quaternions() {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn mock_hook_frame_index_matches_iteration_order() {
     // `frame_index` is the buyer plugin's join key against `frames.jsonl`.
@@ -215,6 +236,7 @@ fn mock_hook_frame_index_matches_iteration_order() {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn mock_hook_metric_scale_matches_redengine_convention() {
     // REDengine units ARE meters. The mock and the trait both report `1.0`.
@@ -228,6 +250,7 @@ fn mock_hook_metric_scale_matches_redengine_convention() {
     assert_eq!(trait_scale, frame_scale);
 }
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn mock_hook_camera_offset_matches_third_person_convention() {
     // Mock simulates a third-person follow camera at +1.7m up, -3m back.
@@ -241,6 +264,7 @@ fn mock_hook_camera_offset_matches_third_person_convention() {
     assert!(f.camera_follow_offset[2] < 0.0); // back (negative -> behind)
 }
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn mock_hook_player_walks_along_x_axis() {
     // Sanity: the deterministic mock advances player_position[0] per frame
@@ -256,6 +280,7 @@ fn mock_hook_player_walks_along_x_axis() {
     assert_eq!(f1.player_position[2], 0.0);
 }
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn default_cyberpunk_hook_equals_new() {
     // Default impl should be observationally identical to `new()`. Catches
@@ -378,6 +403,48 @@ fn gta_v_hook_frame_serde_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
+// Windows-only: CyberpunkHook with default registry returns NotAttached on a
+// system without RED4ext loaded.
+// ---------------------------------------------------------------------------
+//
+// This is the integration-level counterpart to the unit tests in
+// `src/cyberpunk_windows.rs#tests`. The unit tests use a `MockRegistry`
+// to inject simulated RTTI responses; this integration test exercises
+// the production `Red4ExtDllRegistry` path on a CI box that does *not*
+// have `red4ext.dll` loaded into the test process, validating that the
+// failure mode is the documented `HookError::NotAttached` (transient,
+// recorder skips frame, no panic).
+//
+// Built and run only on `target_os = "windows"`. On Mac/Linux this
+// configuration is impossible by definition (the Windows-only crate
+// surface isn't even compiled).
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_cyberpunk_hook_returns_not_attached_without_red4ext() {
+    use engine_telemetry::CyberpunkHook;
+
+    // Construct the production hook. `CyberpunkHook::new()` defers all
+    // I/O — no `LoadLibrary` happens here.
+    let mut hook = CyberpunkHook::new();
+
+    // Call capture_frame. The test process is not Cyberpunk 2077 and
+    // does not have red4ext.dll loaded, so we expect NotAttached.
+    let res = hook.capture_frame();
+    assert!(
+        matches!(res, Err(HookError::NotAttached(_))),
+        "expected NotAttached on a system without RED4ext, got {res:?}"
+    );
+
+    // The hook should not panic across consecutive failed calls — the
+    // recorder's per-frame tick will call us 60x/second and we MUST
+    // remain stable.
+    for _ in 0..16 {
+        let r = hook.capture_frame();
+        assert!(matches!(r, Err(HookError::NotAttached(_))));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Windows-only: GtaVHook with default registry returns NotAttached on a
 // system without ScriptHookV.dll loaded.
 // ---------------------------------------------------------------------------
@@ -422,7 +489,96 @@ fn windows_gtav_hook_returns_not_attached_without_scripthookv() {
 }
 
 // ---------------------------------------------------------------------------
-// Windows-only: trait-injected registry produces a fully-populated frame.
+// Windows-only: trait-injected CyberpunkHook produces a fully-populated frame.
+// ---------------------------------------------------------------------------
+//
+// Exercises the `with_registry(Box<dyn Red4ExtRegistry>)` API surface
+// — the same seam unit tests use, but at the integration-test boundary
+// to lock in the public API contract. Uses an in-line trivial
+// implementation rather than re-importing `MockRegistry` (which is
+// `pub(super)` and not exposed beyond the cyberpunk_windows module).
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_cyberpunk_hook_with_injected_registry_emits_engine_frame() {
+    use engine_telemetry::{CyberpunkHook, Red4ExtRegistry, Red4Quaternion, Red4Vector4};
+
+    struct AlwaysOriginRegistry;
+
+    impl Red4ExtRegistry for AlwaysOriginRegistry {
+        fn is_attached(&self) -> bool {
+            true
+        }
+        fn player_world_position(&self) -> Result<Red4Vector4, HookError> {
+            Ok(Red4Vector4 {
+                x: 7.0,
+                y: 8.0,
+                z: 9.0,
+                w: 0.0,
+            })
+        }
+        fn player_world_orientation(&self) -> Result<Red4Quaternion, HookError> {
+            Ok(Red4Quaternion::identity())
+        }
+        fn camera_world_position(&self) -> Result<Red4Vector4, HookError> {
+            Ok(Red4Vector4 {
+                x: 7.0,
+                y: 9.7,
+                z: 6.0,
+                w: 0.0,
+            })
+        }
+        fn camera_world_orientation(&self) -> Result<Red4Quaternion, HookError> {
+            Ok(Red4Quaternion::identity())
+        }
+        fn camera_follow_offset(&self) -> Result<Red4Vector4, HookError> {
+            // REDengine convention: z = -forward (positive value means
+            // camera is behind avatar). Hook must negate this on the
+            // way out to produce the wire format [right, up, back].
+            Ok(Red4Vector4 {
+                x: 0.0,
+                y: 1.7,
+                z: 3.0,
+                w: 0.0,
+            })
+        }
+        fn camera_fov_degrees(&self) -> Result<f64, HookError> {
+            Ok(80.0)
+        }
+        fn world_id(&self) -> String {
+            "test::open_world".to_string()
+        }
+    }
+
+    let mut hook = CyberpunkHook::with_registry(Box::new(AlwaysOriginRegistry));
+    let frame = hook.capture_frame().expect("trait-injected capture");
+
+    // Player position passthrough: REDengine units = meters, X east, Y north, Z up.
+    assert_eq!(frame.player_position, [7.0, 8.0, 9.0]);
+    // Camera position passthrough.
+    assert_eq!(frame.camera_position, [7.0, 9.7, 6.0]);
+    // Follow offset Z is negated (REDengine `-forward` -> wire `back`).
+    assert_eq!(frame.camera_follow_offset, [0.0, 1.7, -3.0]);
+    // FOV passthrough.
+    assert_eq!(frame.fov_degrees, 80.0);
+    // METRIC_SCALE is the const 1.0 — never read from the trait.
+    assert_eq!(frame.metric_scale, 1.0);
+    // Frame index started at 0 and only one frame was captured.
+    assert_eq!(frame.frame_index, 0);
+
+    // Sidecar round-trip on the trait-produced frame, mirroring the
+    // mock-body integration test (`sidecar_writer_round_trips_a_full_recording`)
+    // so the Windows path has equivalent end-to-end JSON contract
+    // coverage.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("engine_telemetry.json");
+    write_telemetry_sidecar(std::slice::from_ref(&frame), &path).expect("write sidecar");
+    let raw = std::fs::read_to_string(&path).expect("read sidecar");
+    let parsed: Vec<EngineFrame> = serde_json::from_str(&raw).expect("parse");
+    assert_eq!(parsed, vec![frame]);
+}
+
+// ---------------------------------------------------------------------------
+// Windows-only: trait-injected GtaVHook produces a fully-populated frame.
 // ---------------------------------------------------------------------------
 //
 // Exercises the `with_registry(Box<dyn ScriptHookVRegistry>)` API
