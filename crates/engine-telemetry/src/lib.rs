@@ -353,90 +353,112 @@ pub use cyberpunk_mock::CyberpunkHook;
 pub mod cyberpunk_hook_docs {}
 
 // ---------------------------------------------------------------------------
-// GTA V Enhanced placeholder hook
+// GTA V Enhanced hook
 // ---------------------------------------------------------------------------
 
-/// GTA V Enhanced (RAGE engine) engine-state hook.
+// Platform split (mirrors the sibling `CyberpunkHook` split on
+// `feat/cyberpunk-hook-cluster` — see commit `4b312785`):
+//
+// - `gtav_windows` ships the real ScriptHookV-backed registry via
+//   `libloading::Library::new("ScriptHookV.dll")`, native-hash dispatch
+//   through the `ScriptHookVRegistry` trait, no static link to
+//   ScriptHookV.lib (the user installs the plugin separately), no
+//   hard-coded memory offsets (everything goes through 64-bit native
+//   hashes — `HASH_PLAYER_PED_ID`, `HASH_GET_ENTITY_COORDS`, …).
+// - `gtav_mock` ships the deterministic walking-along-`+Y` mock from
+//   the original scaffold. Identical behaviour to the pre-split body
+//   so the cross-platform tests in `tests/integration.rs` keep
+//   passing byte-for-byte.
+//
+// The selection is `#[cfg(target_os = "windows")]` so a Mac developer
+// box and Linux CI run the mock; a real Windows recorder build runs
+// the ScriptHookV bridge. Both implementations export the same
+// `GtaVHook` type name and the same public surface (`new`, `default`,
+// `METRIC_SCALE`, plus `EngineHook` impl), so the recorder can hold
+// an engine-telemetry `GtaVHook` without knowing which half it got.
+
+#[cfg(target_os = "windows")]
+mod gtav_windows;
+#[cfg(target_os = "windows")]
+pub use gtav_windows::{
+    GtaVHook, HASH_GET_ENTITY_COORDS, HASH_GET_ENTITY_ROTATION, HASH_GET_GAMEPLAY_CAM_FOV,
+    HASH_GET_GAMEPLAY_CAM_ROT, HASH_NETWORK_IS_GAME_IN_PROGRESS, HASH_PLAYER_PED_ID, RageEulerDeg,
+    RageVector3, ScriptHookVDllRegistry, ScriptHookVRegistry, euler_zyx_to_quat,
+};
+
+#[cfg(not(target_os = "windows"))]
+mod gtav_mock;
+#[cfg(not(target_os = "windows"))]
+pub use gtav_mock::GtaVHook;
+
+/// GTA V Enhanced (RAGE engine) engine-state hook — ScriptHookV bridge reference.
 ///
-/// # Status
+/// > **Note**: the canonical type is `GtaVHook`, re-exported from
+/// > either [`gtav_mock`] (on Mac / Linux) or [`gtav_windows`] (on
+/// > Windows). This module-level doc block documents the contract
+/// > both implementations honour. The Windows variant is the real
+/// > ScriptHookV native-hash dispatcher; the Mac/Linux variant is the
+/// > deterministic mock used for cross-platform testing.
 ///
-/// **Scaffold only.** Sibling to [`CyberpunkHook`] — same shape, different
-/// engine. The body emits a deterministic mock frame so the cross-platform
-/// plumbing stays unit-testable from the Mac developer box. The real
-/// implementation is the puffydev hand-off, gated behind `#[cfg(windows)]`
-/// once the ScriptHookV bridge is added.
-///
-/// # ScriptHookV native call reference (for puffydev)
+/// # ScriptHookV native call reference
 ///
 /// RAGE does not expose a typed RTTI runtime the way REDengine 4 does.
 /// Instead, the canonical attach surface is **ScriptHookV** (Alexander
 /// Blade's library), which exposes a stable, well-documented native
-/// function table indexed by hash. All paths below are **native invokes**
-/// against the ScriptHookV `nativeCall` ABI, not raw memory reads.
+/// function table indexed by 64-bit hash. All paths below are
+/// **native invokes** against the ScriptHookV `nativeCall` ABI, not
+/// raw memory reads.
 ///
 /// ## Player avatar
 ///
 /// ```text
-/// PLAYER::PLAYER_PED_ID()                       → Ped (handle)
-///   ├─> ENTITY::GET_ENTITY_COORDS(ped, alive)   → Vector3 { x, y, z }   (RAGE units ≈ meters)
-///   └─> ENTITY::GET_ENTITY_HEADING(ped)         → Float (degrees, 0..360, world-space yaw)
+/// PLAYER::PLAYER_PED_ID()                          → Ped (handle)         hash=0xD80958FC74E988A6
+///   ├─> ENTITY::GET_ENTITY_COORDS(ped, alive)      → Vector3 (meters)     hash=0x3FEF770D40960D5A
+///   └─> ENTITY::GET_ENTITY_ROTATION(ped, order=2)  → Vector3 (deg, ZYX)   hash=0xAFBD61CC738D9EB9
 /// ```
 ///
-/// - `GET_ENTITY_COORDS` returns the ped origin in world-space. The
-///   `alive` boolean argument should be `true`; if the player ped is
-///   dead, RAGE returns the last known position rather than `(0,0,0)`.
-/// - `GET_ENTITY_HEADING` returns a single yaw angle in degrees. There
-///   is no native that returns a full quaternion for a ped, so the real
-///   implementation must construct one from heading: `q = Quat::from_z_axis(deg_to_rad(heading))`,
-///   producing `[0, 0, sin(yaw/2), cos(yaw/2)]`. RAGE is right-handed
+/// - `GET_ENTITY_COORDS` returns the ped origin in world-space. Pass
+///   `alive = true`; with `alive = false`, RAGE returns `(0, 0, 0)`
+///   for ragdoll'd peds.
+/// - `GET_ENTITY_ROTATION(ped, rotation_order = 2)` returns Euler
+///   angles in `(pitch, roll, yaw)` ZYX intrinsic order. The hook
+///   converts to quaternion via the standard ZYX composition (see
+///   `gtav_windows::euler_zyx_to_quat`). RAGE is right-handed
 ///   `X=east, Y=north, Z=up` — yaw rotates around `+Z`.
 ///
 /// ## Camera
 ///
 /// ```text
-/// CAM::GET_GAMEPLAY_CAM_COORD()                 → Vector3 { x, y, z }   (world-space, meters)
-/// CAM::GET_GAMEPLAY_CAM_ROT(rotation_order=2)   → Vector3 { pitch, roll, yaw } (degrees)
-/// CAM::_GET_GAMEPLAY_CAM_FOV()                  → Float (vertical FOV degrees)
+/// CAM::GET_GAMEPLAY_CAM_ROT(rotation_order=2)      → Vector3 (deg, ZYX)   hash=0x837765A25378F0BB
+/// CAM::GET_GAMEPLAY_CAM_FOV()                      → float (deg)          hash=0x65019750A0324133
 /// ```
 ///
-/// - `GET_GAMEPLAY_CAM_ROT` returns Euler angles in `(pitch, roll, yaw)`
-///   order when `rotation_order = 2` (the default and the only order
-///   ScriptHookV's docs guarantee stable). Convert to quaternion via
-///   `Quat::from_euler(pitch, roll, yaw)` with the standard right-hand
-///   rotation. Store as `[x, y, z, w]` with `w` last to match the wire
-///   format (same convention as [`CyberpunkHook`]).
-/// - `_GET_GAMEPLAY_CAM_FOV` is an **unnamed native** (the leading
-///   underscore signals ScriptHookV community naming). Its hash is
-///   `0x5F35F6732C3FBBA0` and it is stable across all GTA V Enhanced
-///   patches as of the 2024 Enhanced Edition release. If exposing the
-///   unnamed native is a concern, the safe fallback is the constant
-///   `50.0` degrees (RAGE's default gameplay FOV) — but consumers will
-///   then see no FOV variation during sniper-zoom or first-person camera.
+/// Plus the community-stable `CAM::GET_GAMEPLAY_CAM_COORD()` (hash
+/// `0xA200EB1EE790F448`) which the operator binds alongside the five
+/// hashes above per the runbook.
 ///
-/// ## Camera follow offset
+/// ## Camera follow offset (derived, not native)
 ///
-/// RAGE's third-person camera follow offset is **not directly readable**
-/// through the public ScriptHookV native table (it lives on internal
-/// `CCamera` C++ objects). The pragmatic implementation derives it
-/// post-hoc by subtracting the player position from the camera position
-/// and rotating into the player's local frame:
+/// RAGE's third-person camera follow offset is **not directly
+/// readable** through the public ScriptHookV native table (it lives
+/// on internal `CCamera` C++ objects). The hook derives it
+/// post-hoc per runbook §5:
 ///
 /// ```text
 /// world_offset = camera_position - player_position
 /// camera_follow_offset = inverse(player_rotation) * world_offset
 /// ```
 ///
-/// This is what the buyer plugin actually wants — the relative pose, not
-/// a tuneable game-internal field. Express the result as `[right, up, back]`
-/// per the wire format documented on [`EngineFrame::camera_follow_offset`].
+/// Express the result as `[right, up, back]` per the wire format
+/// documented on [`EngineFrame::camera_follow_offset`].
 ///
 /// ## Frame index + timestamp
 ///
-/// As with [`CyberpunkHook`], the recorder owns the global `frame_index`
-/// (it must match `frames.jsonl` for the buyer plugin's join key to
-/// resolve). RAGE does expose `MISC::GET_FRAME_COUNT()`, but the value
-/// resets on save-game reload and pauses on the pause menu — do not use
-/// it for `frame_index`.
+/// As with [`CyberpunkHook`], the recorder owns the global
+/// `frame_index` (it must match `frames.jsonl` for the buyer plugin's
+/// join key to resolve). RAGE does expose `MISC::GET_FRAME_COUNT()`,
+/// but the value resets on save-game reload and pauses on the pause
+/// menu — do not use it for `frame_index`.
 ///
 /// `timestamp_ms` is the recorder's wall-clock time since recording
 /// start, not RAGE's `MISC::GET_GAME_TIMER()` (which also pauses with
@@ -444,141 +466,67 @@ pub mod cyberpunk_hook_docs {}
 ///
 /// ## Metric scale
 ///
-/// Hard-code `1.0`. RAGE world units are nominally meters — confirmed
-/// empirically by Rockstar's own physics constants (gravity = 9.81
-/// units/s², matching real-world m/s²). Validate via the operator's
-/// 100m walk test described in `docs/GTA_V_HOOK_RUNBOOK.md`. Do not
-/// derive `metric_scale` at runtime.
+/// Hard-coded `1.0`. RAGE world units are nominally meters —
+/// confirmed empirically by Rockstar's own physics constants
+/// (gravity = 9.81 units/s², matching real-world m/s²). Validate via
+/// the operator's 100m walk test described in
+/// `docs/GTA_V_HOOK_RUNBOOK.md`. Do not derive `metric_scale` at
+/// runtime.
 ///
 /// # Attach surface
 ///
-/// Two viable attach surfaces, in order of preference:
+/// On Windows: in-process load of `ScriptHookV.dll` (a third-party
+/// plugin loader the user drops into the GTA V install root). The
+/// hook does **not** inject; it `LoadLibrary`s whatever is already
+/// in the process, then resolves symbols by name. GTA V Enhanced
+/// ships BattlEye for the Online experience but **Story Mode is
+/// unprotected** — the in-process ScriptHookV path is the documented
+/// safe one. See "Anti-cheat compatibility" below.
 ///
-/// 1. **ScriptHookV (recommended).** Mature C++ library, simple `asi`
-///    plugin model, well-documented native function table. Estimated
-///    effort: 2 days for the basic hook, 1 day for the present-wrapper
-///    integration. **Single-player only** — see anti-cheat note below.
-///
-/// 2. **RAGEPluginHook.** Higher-level C# framework on top of
-///    ScriptHookV. Easier to prototype but adds a managed-runtime
-///    dependency this crate doesn't otherwise need. Skip unless puffydev
-///    is more comfortable in C# than C++.
+/// On Mac/Linux: no real attach is possible. The hook returns the
+/// deterministic mock frames from [`gtav_mock::GtaVHook`] so the
+/// cross-platform test suite can validate the JSON contract.
 ///
 /// # Anti-cheat compatibility
 ///
-/// **GTA Online rejects ScriptHookV** — the BattlEye anti-cheat shipped
-/// with GTA V Enhanced will kick (and historically ban) any session
-/// where ScriptHookV is detected. **The recorder must only attach in
-/// offline single-player mode (Story Mode).** Detect this by checking
-/// `NETWORK::NETWORK_IS_GAME_IN_PROGRESS()` at hook-install time — if
-/// it returns `true`, abort the install and surface a recorder-side
-/// error message ("GTA V Online is not supported; switch to Story Mode
-/// to record"). Do not attempt to bypass: it's both a TOS violation and
-/// a ban risk for the user.
+/// **GTA Online rejects ScriptHookV** — the BattlEye anti-cheat
+/// shipped with GTA V Enhanced will kick (and historically ban) any
+/// session where ScriptHookV is detected. **The recorder must only
+/// attach in offline single-player mode (Story Mode).** Per runbook
+/// §7, the production registry checks
+/// `NETWORK::NETWORK_IS_GAME_IN_PROGRESS()` on every frame; if it
+/// returns `true`, `is_attached()` returns `false` with a blocker
+/// string the recorder UI pattern-matches on to disable the toggle.
+/// We never spoof, scrub, or bypass — TOS violation and ban risk for
+/// the user.
 ///
-/// # DX11/DX12 swap-chain timing
+/// # DX12 swap-chain timing
 ///
 /// GTA V Enhanced uses DX12 (the Enhanced Edition's headline upgrade
-/// over the legacy DX11 build). Same hook surface as Cyberpunk — sample
-/// one `EngineFrame` per `IDXGISwapChain::Present`. Piggyback on the
-/// `crates/depth-hook` present-wrapper if depth capture is enabled, to
-/// guarantee `frame_index` parity with the captured depth buffer.
-pub struct GtaVHook {
-    /// Monotonically increasing frame index emitted by the mock body.
-    /// In the real implementation this is replaced with the recorder's
-    /// global frame counter — same lifecycle as [`CyberpunkHook`].
-    next_frame_index: u64,
-    /// Wall-clock origin for `timestamp_ms`. Set on first call to
-    /// `capture_frame`. Mock-only; the real impl reads from the
-    /// recorder's clock.
-    epoch: Option<std::time::Instant>,
-}
-
-impl GtaVHook {
-    /// Construct a hook in the not-yet-attached state.
-    ///
-    /// In the real implementation this loads the ScriptHookV native
-    /// table, verifies `NETWORK::NETWORK_IS_GAME_IN_PROGRESS()` returns
-    /// `false` (Story Mode only — see anti-cheat note on the struct
-    /// docs), and caches the FOV native hash. The mock implementation
-    /// simply zeroes the counter.
-    pub fn new() -> Self {
-        Self {
-            next_frame_index: 0,
-            epoch: None,
-        }
-    }
-
-    /// RAGE's metric scale. RAGE world units are meters (validated via
-    /// the 100m walk test — see `docs/GTA_V_HOOK_RUNBOOK.md`). Hard-coded;
-    /// do **not** derive at runtime.
-    pub const METRIC_SCALE: f64 = 1.0;
-}
-
-impl Default for GtaVHook {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl EngineHook for GtaVHook {
-    /// Mock implementation. Emits a deterministic frame so the
-    /// cross-platform tests can validate the JSON contract end-to-end
-    /// without a running game. Replace the body with the ScriptHookV
-    /// native invokes described in the struct-level docs above.
-    ///
-    /// Mock differs from [`CyberpunkHook`] in two intentional ways so
-    /// the two hooks are distinguishable in regression tests:
-    ///
-    /// - Player walks along `+Y` (north) instead of `+X` (east); RAGE
-    ///   convention is `X=east, Y=north, Z=up`, and "walking forward"
-    ///   in GTA V's default avatar orientation moves `+Y`.
-    /// - Default mock FOV is `50.0` (RAGE's gameplay default), not
-    ///   `70.0`.
-    fn capture_frame(&mut self) -> Result<EngineFrame, HookError> {
-        // Establish epoch on first frame so timestamps are relative to
-        // hook-install rather than process-start.
-        let epoch = *self.epoch.get_or_insert_with(std::time::Instant::now);
-        let timestamp_ms = epoch.elapsed().as_millis() as u64;
-
-        let i = self.next_frame_index;
-        self.next_frame_index = self.next_frame_index.wrapping_add(1);
-
-        // Deterministic mock values: a slowly-advancing player walking
-        // along +Y (RAGE convention: north). Fixed third-person follow
-        // offset, identity rotation. Picked so a serde round-trip test
-        // can assert the *exact* values without floating-point fuzz.
-        let frame = EngineFrame {
-            player_position: [0.0, i as f64 * 0.1, 0.0],
-            player_rotation_quaternion: [0.0, 0.0, 0.0, 1.0],
-            camera_position: [0.0, i as f64 * 0.1 - 3.0, 1.7],
-            camera_rotation_quaternion: [0.0, 0.0, 0.0, 1.0],
-            camera_follow_offset: [0.0, -3.0, 1.7],
-            metric_scale: Self::METRIC_SCALE,
-            fov_degrees: 50.0,
-            frame_index: i,
-            timestamp_ms,
-        };
-
-        // Sanity check the invariant "quaternion is roughly unit length".
-        // Same guard as CyberpunkHook — the real ScriptHookV path will
-        // hit this branch if the engine reports a degenerate camera
-        // orientation (rare, but observed during cutscene transitions).
-        let q = frame.camera_rotation_quaternion;
-        let norm_sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
-        if !(0.5..=1.5).contains(&norm_sq) {
-            return Err(HookError::InvariantViolation(format!(
-                "camera quaternion not unit length: norm^2 = {norm_sq}"
-            )));
-        }
-
-        Ok(frame)
-    }
-
-    fn metric_scale(&self) -> f64 {
-        Self::METRIC_SCALE
-    }
-}
+/// over the legacy DX11 build). Same hook surface as Cyberpunk —
+/// sample one `EngineFrame` per `IDXGISwapChain::Present`. Piggyback
+/// on the `crates/depth-hook` present-wrapper if depth capture is
+/// enabled, to guarantee `frame_index` parity with the captured
+/// depth buffer.
+///
+/// **Caveat**: ScriptHookV runs the script callbacks on its own
+/// thread, not on the render thread. The full production
+/// integration uses an SPSC ring buffer between the ScriptHookV
+/// script thread (drains `nativeCall` results) and the present
+/// wrapper (samples the ring at `Present` time). This adds one
+/// frame of latency to telemetry vs. depth, which is acceptable
+/// (the buyer pipeline tolerates ±1 frame of jitter).
+///
+/// # Failure mode
+///
+/// Returns `HookError::NotAttached` when ScriptHookV.dll is missing,
+/// the player ped has not yet been spawned, or the user is in GTA
+/// Online. The recorder treats this as transient and skips the
+/// frame; the hook does not panic or abort the recording. See
+/// [`HookError`] for the full enum.
+#[doc(alias = "ScriptHookV")]
+#[doc(alias = "RAGE")]
+pub mod gtav_hook_docs {}
 
 // ---------------------------------------------------------------------------
 // Sidecar writer

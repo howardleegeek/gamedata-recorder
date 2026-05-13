@@ -42,27 +42,34 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 
-# Windows-only dependencies for the real RED4ext / RTTI walker
-# implemented in `src/cyberpunk_windows.rs`. On Mac/Linux this block is
-# inert and the crate stays pure-Rust so `cargo test
-# --target aarch64-apple-darwin` does not need any system libraries.
+# Windows-only dependencies shared by BOTH per-title engine hooks:
+#   - Cyberpunk 2077 RED4ext / RTTI walker (`src/cyberpunk_windows.rs`)
+#   - GTA V ScriptHookV bridge          (`src/gtav_windows.rs`)
+# On Mac/Linux this block is inert and the crate stays pure-Rust so
+# `cargo test --target aarch64-apple-darwin` does not need any system
+# libraries.
 #
-# - `libloading` is the cross-platform dynamic-link wrapper we use to
-#   `LoadLibrary("red4ext.dll")` and resolve exported C symbols by
-#   name. We intentionally do NOT static-link to RED4ext: the user
-#   installs it themselves as a third-party plugin loader, so the
-#   build must not assume it exists at link time. Missing-DLL is a
+# - `libloading` is the cross-platform dynamic-link wrapper. Both hooks
+#   use it to `LoadLibrary` their respective third-party DLL —
+#   `red4ext.dll` for Cyberpunk, `ScriptHookV.dll` for GTA V — and
+#   resolve exported C symbols by name (e.g. `nativeInit`,
+#   `nativePush64`, `nativeCall`, `getGlobalPtr`, … for ScriptHookV).
+#   We intentionally do NOT static-link to either SDK: the user
+#   installs them themselves as third-party plugin loaders, so the
+#   build must not assume they exist at link time. Missing-DLL is a
 #   runtime fallback (logged + skip-frame), not a build failure. See
-#   the failure-mode table on the `cyberpunk_windows` module docs.
+#   the failure-mode tables on the respective `*_windows` module docs.
 # - `windows` pulls from the workspace declaration so the
-#   `windows-sys` transitive stays at one version across the tree. We
-#   ride on the workspace feature set — no new feature flags needed
-#   for the RTTI walker path since `libloading` does its own internal
-#   `LoadLibraryW` / `GetProcAddress` calls. If a future revision of
-#   the hook ever needs `Win32_System_Diagnostics_Debug`
-#   (`ReadProcessMemory`) or `Win32_Graphics_Direct3D12` (swap-chain
-#   present sync) those go here, but the spec explicitly forbids OOP
-#   RPM and the present hook lives in `crates/depth-hook` instead.
+#   `windows-sys` transitive stays at one version across the tree. Both
+#   hooks ride on the workspace feature set — no new feature flags
+#   needed since `libloading` does its own internal `LoadLibraryW` /
+#   `GetProcAddress` calls. If a future revision of either hook ever
+#   needs `Win32_System_Diagnostics_Debug` (`ReadProcessMemory`) or
+#   `Win32_Graphics_Direct3D12` (swap-chain present sync) those go
+#   here, but the spec explicitly forbids OOP RPM and the present hook
+#   lives in `crates/depth-hook` instead. The Present-wrapper
+#   integration likewise piggybacks on `depth-hook`'s frame counter
+#   through the recorder; this crate never calls DXGI directly.
 [target.'cfg(target_os = "windows")'.dependencies]
 libloading = "0.8"
 windows = { workspace = true }
