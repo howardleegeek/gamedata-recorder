@@ -4,6 +4,7 @@
 //! This crate source-includes modules from the top-level `gamedata-recorder`
 //! crate via `#[path = ...]`:
 //!
+//!   - `src/util/durable_write.rs` (atomic-write helper — R5.6)
 //!   - `src/system/hardware_specs.rs` (extended HardwareSpecs — R5.2)
 //!   - `src/output_types/fps_stats.rs` (percentile math — R5.3)
 //!
@@ -15,11 +16,11 @@
 //! the same on both targets.
 //!
 //! The fps_stats source is fully cross-platform — pure numerical code with
-//! no Win32 / OBS deps.
-//!
-//! A subsequent commit in this branch extends this lib.rs to also
-//! source-include `src/util/durable_write.rs` (R5.6) via the same
-//! `#[path = ...]` pattern.
+//! no Win32 / OBS deps. durable_write is also cross-platform; its
+//! parent-directory fsync is a no-op on Windows but compiles + runs there.
+
+#[path = "util_mod.rs"]
+pub mod util;
 
 #[path = "../../../src/system/hardware_specs.rs"]
 pub mod hardware_specs;

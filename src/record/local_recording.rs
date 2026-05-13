@@ -826,13 +826,27 @@ mod durability_tests {
             "metadata.json must exist after finalize"
         );
 
-        // (b) No `.tmp` sibling was left behind.
+        // (b) No `.tmp` sibling was left behind. Post-R5.6 the tempfile
+        // name carries a random suffix (`metadata.json.tmp.<rand>`), so
+        // the legacy `<path>.tmp` path is never even created — but we
+        // also scan the directory for ANY file whose name starts with the
+        // tempfile prefix to catch a partial cleanup.
         let tmp_sibling = session_dir
             .path()
             .join(format!("{}.tmp", constants::filename::recording::METADATA));
         assert!(
             !tmp_sibling.exists(),
             "metadata.json.tmp must not remain after successful rename"
+        );
+        let orphan_tmps: Vec<_> = std::fs::read_dir(session_dir.path())
+            .expect("read session dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(
+            orphan_tmps.is_empty(),
+            "R5.6: no `<path>.tmp.*` tempfiles must leak from a successful write, got: {orphan_tmps:?}"
         );
 
         // (c) Content round-trips through JSON.

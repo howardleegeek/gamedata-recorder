@@ -25,7 +25,11 @@ tracing = { workspace = true }
 color-eyre = { workspace = true }
 constants = { workspace = true }
 sysinfo = { workspace = true }
+# Required as a regular dep because src/util/durable_write.rs is
+# source-included from the top-level crate via #[path = ...] in
+# src/util_mod.rs (added in the R5.6 commit). The atomic-write helper
+# uses `tempfile::Builder::tempfile_in` for collision-free temp names.
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
