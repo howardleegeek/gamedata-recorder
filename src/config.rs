@@ -97,6 +97,26 @@ pub struct Preferences {
     pub encoder: EncoderSettings,
     #[serde(default = "default_recording_location")]
     pub recording_location: std::path::PathBuf,
+    /// Target video bitrate, in kilobits per second.
+    ///
+    /// PRD R2.10: at 1080p30, the buyer accepts a 6–12 Mbps band with 8 Mbps
+    /// as the target. Stored here as a `u32` of kbps to keep the wire format
+    /// JSON-friendly (no floats) and to match what OBS's encoder `bitrate`
+    /// key takes (an `i64` of kbps that we'll widen at the call site).
+    ///
+    /// The value on disk is taken at face value; the *effective* bitrate
+    /// passed to the OBS encoder is the output of
+    /// [`Preferences::clamped_recording_bitrate_kbps`], which clamps to
+    /// `[BITRATE_BAND_MIN_KBPS, BITRATE_BAND_MAX_KBPS]` and logs a one-shot
+    /// warning when the on-disk value is out of band. Storing the raw
+    /// (unclamped) value lets us surface it verbatim in debug output and
+    /// preserves the user's intent across restarts if the band ever changes.
+    ///
+    /// `#[serde(default = "default_recording_bitrate_kbps")]` keeps old
+    /// `config.json` files (which do not have this field at all) parsing
+    /// cleanly — they pick up the 8 Mbps default on next read.
+    #[serde(default = "default_recording_bitrate_kbps")]
+    pub recording_bitrate_kbps: u32,
     /// Per-game configuration settings, keyed by executable name (e.g., "hl2")
     #[serde(default)]
     pub games: HashMap<String, GameConfig>,
@@ -120,6 +140,7 @@ impl Default for Preferences {
             recording_backend: Default::default(),
             encoder: Default::default(),
             recording_location: default_recording_location(),
+            recording_bitrate_kbps: default_recording_bitrate_kbps(),
             games: Default::default(),
         }
     }
@@ -127,6 +148,15 @@ impl Default for Preferences {
 impl Preferences {
     pub fn start_recording_key(&self) -> &str {
         &self.start_recording_key
+    }
+    /// Effective recording bitrate in kbps, after band clamping.
+    ///
+    /// Wraps the free function [`clamp_recording_bitrate_kbps`] so callers can
+    /// stay inside `&Preferences` instead of reaching for the module-level
+    /// helper. The free function is the test-friendly seam (no `Preferences`
+    /// dependency); this is the convenient call-site form.
+    pub fn effective_recording_bitrate_kbps(&self) -> u32 {
+        clamp_recording_bitrate_kbps(self.recording_bitrate_kbps)
     }
     pub fn stop_recording_key(&self) -> &str {
         if self.stop_hotkey_enabled {
@@ -352,6 +382,19 @@ fn default_recording_location() -> std::path::PathBuf {
         .map(|d| d.join("GameData Recorder").join("recordings"))
         .unwrap_or_else(|| std::path::PathBuf::from("./data_dump/games"))
 }
+
+// PRD R2.10: bitrate-band constants and the clamp/default helpers live in
+// `crate::config_bitrate` so the cross-platform `bitrate-precision-tests`
+// crate can source-include them without dragging in `libobs_wrapper`,
+// `input_capture::ConsentGuard`, or any of the other Windows-only deps
+// that `config.rs` pulls in. Re-exported here so existing call sites
+// (`Preferences::default`, `EncoderSettings::apply_to_obs_data`, the
+// `Preferences::recording_bitrate_kbps` `#[serde(default)]`) can keep
+// referencing them via `crate::config::...`.
+pub use crate::config_bitrate::{
+    BITRATE_BAND_MAX_KBPS, BITRATE_BAND_MIN_KBPS, DEFAULT_RECORDING_BITRATE_KBPS,
+    clamp_recording_bitrate_kbps, default_recording_bitrate_kbps,
+};
 
 /// Return the directory that `recording_location` is allowed to live under.
 ///
@@ -1232,15 +1275,29 @@ impl Default for EncoderSettings {
     }
 }
 impl EncoderSettings {
-    /// Apply encoder settings to ObsData
+    /// Apply encoder settings to ObsData using the given effective bitrate.
+    ///
+    /// `effective_bitrate_kbps` should already be clamped to the buyer band
+    /// — pass [`Preferences::effective_recording_bitrate_kbps`] or the
+    /// output of [`clamp_recording_bitrate_kbps`]. Passing a raw user-supplied
+    /// value bypasses the warn-once safety net and may send out-of-band
+    /// bitrate to the encoder.
+    ///
+    /// PRD R2.10: this replaces the previous use of
+    /// `constants::encoding::BITRATE` (a fixed 10 Mbps) with a runtime value
+    /// so the user can dial in the 6–12 Mbps band per their workflow.
     pub fn apply_to_obs_data(
         &self,
         mut data: libobs_wrapper::data::ObsData,
+        effective_bitrate_kbps: u32,
     ) -> color_eyre::Result<libobs_wrapper::data::ObsData> {
         // Apply common settings shared by all encoders
         let mut updater = data.bulk_update();
         updater = updater
-            .set_int("bitrate", constants::encoding::BITRATE)
+            // OBS's `bitrate` key is `int` (i64). Widen the u32 here; the
+            // value is bounded by `BITRATE_BAND_MAX_KBPS` so this can't
+            // truncate.
+            .set_int("bitrate", i64::from(effective_bitrate_kbps))
             .set_string("rate_control", constants::encoding::RATE_CONTROL)
             .set_string("profile", constants::encoding::VIDEO_PROFILE)
             .set_int("bf", constants::encoding::B_FRAMES)

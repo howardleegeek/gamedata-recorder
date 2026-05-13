@@ -601,6 +601,11 @@ impl LocalRecording {
 
     /// Write metadata to disk and validate the recording.
     /// Creates a [`constants::filename::recording::INVALID`] file if validation fails.
+    ///
+    /// `recording_bitrate_kbps` is the clamped value handed to the OBS
+    /// encoder at recording start (PRD R2.10) — it ends up in the on-disk
+    /// `metadata.json` so the buyer ingest can audit per-session bitrate
+    /// against the 6–12 Mbps band without re-reading user preferences.
     #[allow(clippy::too_many_arguments)]
     // TODO: refactor all of these arguments into a single struct
     pub(crate) async fn write_metadata_and_validate(
@@ -617,6 +622,7 @@ impl LocalRecording {
         recorder_extra: Option<serde_json::Value>,
         frame_count: Option<u64>,
         dropped_input_events: u64,
+        recording_bitrate_kbps: u32,
     ) -> Result<()> {
         // Resolve metadata path from recording location
         let metadata_path = recording_location.join(constants::filename::recording::METADATA);
@@ -712,6 +718,10 @@ impl LocalRecording {
             capture_resolution: Some(capture_resolution),
             wall_clock_start: Some(wall_clock_start),
             wall_clock_end: Some(wall_clock_end),
+            // R2.10: stamp the effective (clamped) encoder bitrate so the
+            // buyer ingest can audit per-session bitrate against the
+            // 6–12 Mbps band.
+            encoder_bitrate_kbps: Some(recording_bitrate_kbps),
         };
 
         // Write metadata to disk using atomic + fsync'd write.
