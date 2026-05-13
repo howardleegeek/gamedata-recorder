@@ -6,7 +6,12 @@ use crate::{
     },
     assets::load_cue_bytes,
     play_time::PlayTimeTransition,
-    record::LocalRecording,
+    record::{
+        LocalRecording,
+        ui_refusal_detector::{
+            RefusalDetector, UiRefusalReason, capture_frame_hash, capture_window_snapshot,
+        },
+    },
     system::keycode::name_to_virtual_keycode,
     // error_message_box removed — never show popups during recording
     upload,
@@ -169,6 +174,23 @@ async fn main(
         api_client.clone(),
         upload_trigger_rx,
     ));
+
+    // UI-refusal detector channel + dedicated 1Hz task.
+    //
+    // The detector runs in its OWN tokio task (not on the game render
+    // thread, not even on the encoder-poll path) and posts a single
+    // `UiRefusalReason` over this channel on the first refusal it sees.
+    // The main loop reacts via a `select!` arm below: aborts the
+    // recording, deletes the partial clip, and surfaces a tray
+    // notification. The channel is bounded (size 4) — back-pressure on
+    // repeated refusals is fine, we only need one to fire the abort.
+    //
+    // Bounded over unbounded so an unreachable main loop can't unbounded-
+    // grow the queue. If a refusal is dropped because the main loop is
+    // stuck, the next tick will produce the same refusal a second later.
+    let (refusal_tx, mut refusal_rx) = tokio::sync::mpsc::channel::<UiRefusalReason>(4);
+    tracing::debug!("Spawning UI refusal detector task");
+    tokio::spawn(ui_refusal_detector_task(app_state.clone(), refusal_tx));
 
     let mut state = State {
         recording_state: RecordingState::Idle,
@@ -954,6 +976,36 @@ async fn main(
                 // Periodically force the UI to rerender so that it will process events, even if not visible
                 app_state.ui_update_tx.send(UiUpdate::ForceUpdate).ok();
             },
+            // UI-refusal detector: independent 1Hz task posts a `UiRefusalReason`
+            // here when it sees a buyer-rejected UI condition. We respond by
+            // aborting the in-progress recording (drops the partial clip, does
+            // NOT enqueue for upload) and surfacing a tray notification.
+            //
+            // The detector only sends when the recording is actually active
+            // AND the pref is on, so we don't need to re-check those flags
+            // here. But we DO re-check `recording_state == Recording` to
+            // guard against a race where the user manually stopped between
+            // the detector's snapshot and our receive.
+            Some(reason) = refusal_rx.recv() => {
+                if !matches!(state.recording_state, RecordingState::Recording) {
+                    tracing::debug!(
+                        ?reason,
+                        recording_state=?state.recording_state,
+                        "UI refusal received but no recording active; ignoring"
+                    );
+                    continue;
+                }
+                tracing::warn!(
+                    reason=?reason,
+                    "UI refusal detected; aborting in-progress recording"
+                );
+                if let Err(e) = state.handle_ui_refusal(reason).await {
+                    tracing::error!(
+                        e=?e,
+                        "Failed to abort recording on UI refusal"
+                    );
+                }
+            },
         }
     }
 
@@ -961,6 +1013,135 @@ async fn main(
         tracing::error!(e=?e, "Failed to stop recording on shutdown");
     }
     Ok(())
+}
+
+/// Independent 1Hz tokio task that polls window state and fires a single
+/// `UiRefusalReason` over `tx` on first detection of a buyer-rejected UI
+/// condition. Idle when the recording pref is off OR when no recording is
+/// active — the per-tick work is bounded to a config-read + a single
+/// `RecordingStatus` enum check until a recording starts.
+///
+/// Lives for the lifetime of the tokio runtime. Errors writing to `tx`
+/// (receiver dropped on shutdown) terminate the task quietly.
+///
+/// The Windows path uses Win32 APIs to read foreground/popup/overlay
+/// state. The non-Windows path is a no-op that just sleeps — the
+/// recorder itself is Windows-only in production; this stub exists only
+/// so cross-platform builds (macOS / Linux CI) compile.
+async fn ui_refusal_detector_task(
+    app_state: Arc<AppState>,
+    tx: tokio::sync::mpsc::Sender<UiRefusalReason>,
+) {
+    #[cfg(target_os = "windows")]
+    {
+        ui_refusal_detector_task_windows(app_state, tx).await;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // No-op: the detector never triggers on non-Windows. We park the
+        // task on a long sleep so it doesn't busy-wait, and drop `tx`
+        // immediately so any send attempts would fail fast (none will,
+        // because we never send).
+        let _ = (app_state, tx);
+        std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn ui_refusal_detector_task_windows(
+    app_state: Arc<AppState>,
+    tx: tokio::sync::mpsc::Sender<UiRefusalReason>,
+) {
+    // Pre-allocate the detector with a 1-second nominal interval. The
+    // ACTUAL interval is read from config each iteration (so changing
+    // `refusal_check_interval_sec` at runtime takes effect on the next
+    // tick), but the stall-window math is interval-aware so this is
+    // safe.
+    let mut detector = RefusalDetector::default();
+    let mut last_known_interval = Duration::from_secs(1);
+
+    loop {
+        // Read pref + interval once per tick. Defaults are conservative:
+        // pref off OR interval-zero ⇒ sleep 1s and loop. Clamped to
+        // [1, 30] so a typo can't wedge the task or DOS the OS APIs.
+        let (enabled, interval_secs) = match app_state.config.read_safe() {
+            Ok(cfg) => (
+                cfg.preferences.enable_ui_refusal_detector,
+                cfg.preferences.refusal_check_interval_sec,
+            ),
+            Err(poisoned) => {
+                let cfg = poisoned.into_inner();
+                (
+                    cfg.preferences.enable_ui_refusal_detector,
+                    cfg.preferences.refusal_check_interval_sec,
+                )
+            }
+        };
+        let interval = Duration::from_secs(interval_secs.clamp(1, 30) as u64);
+        if interval != last_known_interval {
+            // Rebuild the detector with the new interval so the stall-
+            // threshold math stays consistent.
+            detector = RefusalDetector::new(interval);
+            last_known_interval = interval;
+        }
+
+        tokio::time::sleep(interval).await;
+
+        if !enabled {
+            // Pref off ⇒ detector NEVER triggers. We still loop (so a
+            // runtime flip-on takes effect on the next tick), but we
+            // never call the platform shim and never read app_state
+            // beyond the config check.
+            continue;
+        }
+
+        // Only run when there's an active recording. We read the
+        // published HWND with `Acquire` so a non-zero read is guaranteed
+        // to be paired with the `RecordingStatus::Recording` write that
+        // happened-before it on the main task.
+        let raw_hwnd = app_state
+            .recording_hwnd_raw
+            .load(std::sync::atomic::Ordering::Acquire);
+        if raw_hwnd == 0 {
+            // No active recording ⇒ reset the detector's stall counter so
+            // a freshly-started recording doesn't inherit an old hash.
+            detector = RefusalDetector::new(interval);
+            continue;
+        }
+
+        // Reconstruct the HWND. Safety: the value came from a previous
+        // `hwnd.0 as isize` Release-store on the recording start path.
+        // It's still a valid Win32 HWND because the recording is still
+        // active (the abort/stop paths clear the cell to 0 BEFORE
+        // calling any teardown).
+        let hwnd = windows::Win32::Foundation::HWND(raw_hwnd as *mut std::ffi::c_void);
+        if hwnd.0.is_null() {
+            continue;
+        }
+
+        let snap = capture_window_snapshot(hwnd);
+        let frame_hash = capture_frame_hash(hwnd);
+        if let Some(reason) = detector.observe(&snap, frame_hash) {
+            tracing::warn!(
+                ?reason,
+                "ui_refusal_detector_task: refusal detected — notifying main loop"
+            );
+            // Show the tray notification IMMEDIATELY from this task so
+            // operators see the reason even if the main loop is briefly
+            // busy. The actual abort happens on the main loop (it owns
+            // the Recorder); we do not race.
+            crate::ui::notification::show_ui_refusal_notification(reason);
+            if tx.send(reason).await.is_err() {
+                // Receiver dropped — main loop has shut down. Exit
+                // cleanly.
+                return;
+            }
+            // After a fired refusal, reset so we don't immediately
+            // re-fire on the next tick (the main loop's abort path will
+            // take some time, and the recording is already gone).
+            detector = RefusalDetector::new(interval);
+        }
+    }
 }
 
 /// State machine-esque representation of the recording state. This is only accessible from tokio_thread.
@@ -2147,6 +2328,68 @@ impl State {
         if self.app_state.upload_trigger_tx.send(trigger).is_err() {
             tracing::error!("Auto-upload worker channel closed; dropping auto-upload request");
         }
+    }
+
+    /// Abort the in-progress recording because the UI-refusal detector
+    /// observed a buyer-rejected condition. This is the abort path that
+    /// the detector's spawned task fires through a channel into the main
+    /// loop.
+    ///
+    /// Contract (from the spec):
+    ///   - Partial clip on disk is deleted.
+    ///   - Partial clip is NOT enqueued for upload.
+    ///   - User sees a tray notification ("Recording rejected: {reason}").
+    ///   - State machine returns to `Idle`.
+    ///
+    /// The tray notification is already shown from the detector task —
+    /// we don't double-fire it here.
+    async fn handle_ui_refusal(&mut self, reason: UiRefusalReason) -> Result<()> {
+        // P0-3: clear crashed game info on abort (this is an
+        // operator-meaningful stop, like a hotkey stop).
+        self.crashed_game_info = None;
+
+        // Abort the recording. `Recorder::abort` deletes the partial
+        // clip; it does NOT call `maybe_trigger_auto_upload`, which is
+        // the critical contract.
+        let session_path = self.recorder.abort(&self.input_capture).await?;
+
+        if let Some(ref path) = session_path {
+            tracing::warn!(
+                reason=?reason,
+                session=%path.display(),
+                "ui-refusal: aborted recording; partial clip removed; NOT enqueued for upload"
+            );
+        } else {
+            tracing::debug!(
+                reason=?reason,
+                "ui-refusal: abort() found no active recording; no-op"
+            );
+        }
+
+        // Drop the state machine back to Idle. We deliberately do NOT
+        // call `handle_transition(RecordingState::Idle)` here because
+        // that path goes through `stop_recording_with_notification`
+        // which writes metadata.json (saving the clip) and would also
+        // enqueue auto-upload. Both are wrong for an abort.
+        self.recording_state = RecordingState::Idle;
+
+        // Mirror the visible UI state.
+        *self
+            .app_state
+            .state
+            .write_safe()
+            .unwrap_or_else(|e| e.into_inner()) = RecordingStatus::Stopped;
+
+        // Notify play-time tracker that recording stopped (not due to
+        // idle — due to UI refusal).
+        if let Ok(mut play_time) = self.app_state.play_time_state.write() {
+            play_time.handle_transition(PlayTimeTransition {
+                is_recording: false,
+                due_to_idle: false,
+            });
+        }
+
+        Ok(())
     }
 }
 

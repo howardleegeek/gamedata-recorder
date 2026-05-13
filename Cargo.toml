@@ -10,6 +10,7 @@ members = [
     "crates/engine-telemetry",
     "crates/metadata-polish-tests",
     "crates/auto-cap",
+    "crates/ui-refusal-tests",
 ]
 exclude = ["tools/vm", "test_game"]
 default-members = ["."]

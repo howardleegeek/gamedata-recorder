@@ -293,6 +293,15 @@ impl Recorder {
 
         delete_recording_on_exit.disarm();
 
+        // Publish the HWND for the ui-refusal detector task BEFORE we
+        // flip the visible recording state. Strict ordering (`Release`)
+        // pairs with the detector's `Acquire` read so a detector tick
+        // that observes a non-zero HWND is guaranteed to see the
+        // updated `RecordingStatus::Recording` next.
+        self.app_state
+            .recording_hwnd_raw
+            .store(hwnd.0 as isize, std::sync::atomic::Ordering::Release);
+
         self.recording = Some(recording);
         *self
             .app_state
@@ -331,6 +340,13 @@ impl Recorder {
         let Some(recording) = self.recording.take() else {
             return Ok(None);
         };
+
+        // Clear the published recording HWND so the ui-refusal detector
+        // stops trying to inspect a window we're about to tear down.
+        // Release-store mirrors the Release-store on start.
+        self.app_state
+            .recording_hwnd_raw
+            .store(0, std::sync::atomic::Ordering::Release);
 
         let session_path = recording.recording_location().to_path_buf();
 
@@ -405,6 +421,87 @@ impl Recorder {
     /// Returns the current game exe name if recording, None otherwise
     pub fn current_game_exe(&self) -> Option<String> {
         self.recording.as_ref().map(|r| r.game_exe().to_string())
+    }
+
+    /// Returns the HWND of the currently recording game window, if any.
+    /// Used by the UI-refusal detector to ask Win32 the right questions
+    /// about the right window.
+    pub fn current_recording_hwnd(&self) -> Option<HWND> {
+        self.recording.as_ref().map(|r| r.hwnd())
+    }
+
+    /// Aborts the in-progress recording: stops the video pipeline, deletes
+    /// the on-disk session folder, and returns to `RecordingStatus::Stopped`.
+    /// The session folder is **not** enqueued for upload — this is the
+    /// critical contract for the UI-refusal detector. The buyer pays for
+    /// clean clips; a popup-tainted partial clip must never reach the
+    /// upload queue.
+    ///
+    /// Best-effort: even if the video recorder reports an error during
+    /// `stop_recording`, we proceed to delete the folder anyway. The goal
+    /// is "no partial clip on disk, no upload" — not "perfectly clean
+    /// teardown".
+    pub async fn abort(&mut self, _input_capture: &InputCapture) -> Result<Option<PathBuf>> {
+        let Some(recording) = self.recording.take() else {
+            return Ok(None);
+        };
+
+        // Clear the published recording HWND immediately. Even if the
+        // teardown below races with one more detector tick, that tick
+        // will see HWND=0 and skip.
+        self.app_state
+            .recording_hwnd_raw
+            .store(0, std::sync::atomic::Ordering::Release);
+
+        let session_path = recording.recording_location().to_path_buf();
+
+        // Stop the encoder so the MP4 file is closed and we can remove
+        // the directory. We swallow errors here — even a half-closed MP4
+        // gets unlinked when we delete the parent folder.
+        if let Err(e) = self.video_recorder.stop_recording().await {
+            tracing::warn!(
+                e=?e,
+                session_path=%session_path.display(),
+                "abort(): video_recorder.stop_recording() failed; proceeding with folder \
+                 delete anyway (partial clip will be removed)"
+            );
+        }
+
+        // Discard the Recording struct so its input_writer + fps_logger
+        // drop cleanly. We DO NOT call `recording.stop(...)` because that
+        // path writes metadata.json and is the "successful save" path —
+        // exactly the opposite of what an abort wants.
+        drop(recording);
+
+        // Delete the session folder. Best-effort: a transient `EBUSY` on
+        // Windows (rare, but possible if the encoder's file handle hasn't
+        // released yet) gets logged but doesn't fail the abort — the
+        // folder is still flagged as in-progress and the upload worker
+        // will not touch it without a metadata.json.
+        match tokio::fs::remove_dir_all(&session_path).await {
+            Ok(()) => {
+                tracing::info!(
+                    session_path=%session_path.display(),
+                    "abort(): deleted partial recording folder"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    e=?e,
+                    session_path=%session_path.display(),
+                    "abort(): failed to delete partial recording folder; it will not be \
+                     enqueued for upload (no metadata.json), but the bytes remain on disk"
+                );
+            }
+        }
+
+        *self
+            .app_state
+            .state
+            .write_safe()
+            .unwrap_or_else(|e| e.into_inner()) = RecordingStatus::Stopped;
+
+        Ok(Some(session_path))
     }
 }
 
