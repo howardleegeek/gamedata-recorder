@@ -185,6 +185,7 @@ async fn main(
         user_stopped_game_exe: None,
         #[cfg(windows)]
         stability_tracker: None,
+        paused_session_path: None,
     };
 
     // Offline backoff state
@@ -1010,6 +1011,16 @@ struct State {
     /// we never auto-record on non-Windows anyway.
     #[cfg(windows)]
     stability_tracker: Option<StabilityTracker>,
+    /// rc19.0.2: session_path captured at the moment recording was paused
+    /// (Recording→Paused transition). Used by the Paused→Idle game-exit
+    /// path so we can pass the correct session_dir to run_finalize.bat
+    /// without having to re-derive it (the recorder has already stopped by
+    /// then so `recorder.recording()` is None).
+    ///
+    /// Cleared on any other transition out of Paused (e.g. resuming to
+    /// Recording, or transitioning to Idle via the user stop hotkey) so it
+    /// can't leak into a subsequent session.
+    paused_session_path: Option<PathBuf>,
 }
 
 /// Per-game window stability tracker used to gate auto-record.
@@ -1157,6 +1168,19 @@ impl State {
     }
 
     async fn tick(&mut self) -> Option<(RecordingState, &'static str)> {
+        // rc19.0.2: set to true only when *this* tick detected game-process
+        // termination. After handle_transition runs, if true we invoke
+        // run_finalize.bat and exit(0). `pending_finalize_dir` carries the
+        // session_path; it may be None even when the flag is true (rare
+        // race where the recorder produced no session) — finalize+exit is
+        // still expected, just without a dir to finalize.
+        //
+        // Gating on the *cause* (process gone) rather than the *target
+        // state* (Idle) keeps the user-stop-hotkey path still going
+        // Recording→Idle without finalize.
+        let mut pending_exit_finalize = false;
+        let mut pending_finalize_dir: Option<PathBuf> = None;
+
         if let RecordingState::Recording = self.recording_state {
             let Some(recording) = self.recorder.recording() else {
                 tracing::error!("Expected recording to exist in Recording state, but found None");
@@ -1180,6 +1204,12 @@ impl State {
                     "Game process no longer exists, stopping recording and tracking for auto-resume"
                 );
                 self.crashed_game_info = Some((game_name.clone(), Instant::now()));
+                // rc19.0.2: capture session_path BEFORE handle_transition
+                // stops the recorder. We pass this to run_finalize.bat
+                // after the OBS shutdown completes. Even if the path turns
+                // out unusable, the flag still drives the exit(0).
+                pending_exit_finalize = true;
+                pending_finalize_dir = Some(recording.recording_location().to_path_buf());
                 Some((RecordingState::Idle, "stop recording on game process exit"))
             } else if self.last_active.elapsed() > MAX_IDLE_DURATION {
                 // idle timeout
@@ -1360,10 +1390,29 @@ impl State {
                     pid = pid.0,
                     "Paused game process no longer exists, transitioning to idle"
                 );
+                // rc19.0.2: the recorder was already stopped when we
+                // transitioned into Paused (Recording→Paused), so
+                // `self.recorder.recording()` is None here. We saved the
+                // session_path at that earlier transition into
+                // `self.paused_session_path`; pick it up now so the
+                // post-transition finalize+exit path has the right dir.
+                // Always set the flag — even if the saved path is None,
+                // we still exit cleanly to avoid the rc19.0.1 hang.
+                pending_exit_finalize = true;
+                pending_finalize_dir = self.paused_session_path.clone();
                 if let Err(e) = self.handle_transition(RecordingState::Idle).await {
                     tracing::error!(e=?e, "Failed to transition from paused to idle on process exit");
                 }
             }
+        }
+
+        // rc19.0.2: game-process exit detected this tick → finalize + exit.
+        // Must come after handle_transition(Idle) so OBS has flushed the
+        // recording.mp4 to disk. `finalize_session_and_exit` calls exit(0)
+        // and never returns — the rest of tick() (auto-record gate,
+        // stability tracker) is intentionally skipped.
+        if pending_exit_finalize {
+            finalize_session_and_exit(pending_finalize_dir);
         }
 
         // AUTO-RECORD: If idle and a recordable game is in the foreground, start recording automatically.
@@ -1497,6 +1546,9 @@ impl State {
         self.recording_state = match (&self.recording_state, to_state) {
             (RecordingState::Idle | RecordingState::Paused { .. }, RecordingState::Recording) => {
                 // Start recording from Idle or Paused state
+                // rc19.0.2: leaving Paused, drop the saved session_path so
+                // it can't leak into a future tick or unrelated session.
+                self.paused_session_path = None;
                 // Acquire both locks atomically to avoid race condition
                 let (honk, unsupported_games) = {
                     let config = self.app_state.config.read().map_err(|_| {
@@ -1585,6 +1637,10 @@ impl State {
                     &mut self.cue_cache,
                 )
                 .await?;
+                // rc19.0.2: remember session_path so the Paused→Idle
+                // game-exit path can pass it to run_finalize.bat. Cleared
+                // on any non-game-exit transition out of Paused.
+                self.paused_session_path = session_path.clone();
                 *self
                     .app_state
                     .state
@@ -1611,6 +1667,14 @@ impl State {
                     .unwrap_or_else(|e| e.into_inner())
                     .preferences
                     .honk;
+                // rc19.0.2: leaving Paused for Idle, drop the saved session
+                // path. If this transition was driven by game-exit detection
+                // in tick(), the caller has already cloned the value into
+                // its own `pending_finalize_dir` local before we get here.
+                // Clearing post-clone is safe; clearing here means non-exit
+                // transitions (e.g. user hotkey stop while Paused) don't
+                // leave stale state behind.
+                self.paused_session_path = None;
                 // When user stop keys recording while paused, or when the paused app closes
                 *self
                     .app_state
@@ -2101,6 +2165,110 @@ async fn stop_recording_with_notification(
             .ok();
     }
     Ok(session_path)
+}
+
+/// rc19.0.2: invoke post-record finalize, then exit cleanly.
+///
+/// Called from the two game-process-exit paths in `tick()` (Recording→Idle
+/// and Paused→Idle when the game .exe has disappeared). Runs
+/// `cmd /C %app%\run_finalize.bat <session_dir>` and then `exit(0)` so the
+/// recorder process doesn't linger as an idle daemon (the rc19.0.1 hang
+/// bug — OysterRecorder.exe stayed resident as ~425 MB after javaw exit,
+/// forcing Howard to manually SCP + finalize on mac1).
+///
+/// The .bat is what sets PYTHONPATH/model paths and chains into
+/// finalize_session.py; we invoke it via `cmd /C` rather than calling
+/// python.exe directly so we don't have to reimplement the env setup.
+///
+/// Behavior:
+/// - `OYSTER_SKIP_AUTO_FINALIZE=1` → skip finalize, still exit(0).
+/// - `run_finalize.bat` missing (e.g. dev checkout) → log, still exit(0).
+/// - Finalize spawn failure → log, still exit(0) — raw data stays on disk.
+/// - `session_dir = None` → log, still exit(0).
+///
+/// In all cases the recorder exits cleanly, satisfying the no-lingering-
+/// daemon invariant.
+fn finalize_session_and_exit(session_dir: Option<std::path::PathBuf>) -> ! {
+    // Debugging escape hatch: skip finalize entirely. The recorder still
+    // exits cleanly so the no-lingering-daemon invariant holds.
+    if std::env::var("OYSTER_SKIP_AUTO_FINALIZE").is_ok() {
+        tracing::info!(
+            "OYSTER_SKIP_AUTO_FINALIZE=1; skipping run_finalize.bat and exiting cleanly",
+        );
+        std::process::exit(0);
+    }
+
+    let Some(session_dir) = session_dir else {
+        tracing::warn!(
+            "Game process exited but no session_dir was recorded; exiting cleanly anyway",
+        );
+        std::process::exit(0);
+    };
+
+    // The recorder exe lives at {app}\recorder\OysterRecorder.exe, so
+    // {app} = current_exe.parent().parent(). run_finalize.bat is at
+    // {app}\run_finalize.bat (one level above the recorder\ subdir).
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let app_root = exe_dir
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| exe_dir.clone());
+    let bat = app_root.join("run_finalize.bat");
+
+    if !bat.exists() {
+        tracing::warn!(
+            bat = %bat.display(),
+            session_dir = %session_dir.display(),
+            "run_finalize.bat not found — session_dir contains raw data only; \
+             exiting cleanly without finalize",
+        );
+        std::process::exit(0);
+    }
+
+    tracing::info!(
+        session_dir = %session_dir.display(),
+        bat = %bat.display(),
+        "Detected game_exe terminated; invoking run_finalize.bat",
+    );
+
+    // Block-wait so the exit-after-finalize ordering is deterministic.
+    // The .bat's slowest step (depth EXR for ~1800 frames) is bounded
+    // internally; we don't impose a separate Rust-side timeout.
+    let output = std::process::Command::new("cmd")
+        .arg("/C")
+        .arg(&bat)
+        .arg(&session_dir)
+        .output();
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::info!(
+                exit_code = ?out.status.code(),
+                stdout = %stdout,
+                stderr = %stderr,
+                "run_finalize.bat completed",
+            );
+        }
+        Err(e) => {
+            // Finalize spawn failure must NOT prevent recorder exit per
+            // rc19.0.2 spec — the session_dir still has raw data on disk
+            // that can be finalized offline if needed.
+            tracing::error!(
+                error = %e,
+                session_dir = %session_dir.display(),
+                "Failed to spawn run_finalize.bat; session_dir has raw data only. \
+                 Exiting cleanly anyway.",
+            );
+        }
+    }
+
+    tracing::info!("Recording session complete; exiting cleanly with code 0");
+    std::process::exit(0);
 }
 
 fn notify_of_recording_state_change(
