@@ -64,6 +64,26 @@ pub(crate) struct Recording {
 }
 
 impl Recording {
+    /// Process ID of the recorded game.
+    pub(crate) fn pid(&self) -> Pid {
+        self.pid
+    }
+
+    /// Window handle of the recorded game.
+    pub(crate) fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+
+    /// Game window resolution captured at recording-start time.
+    pub(crate) fn game_resolution(&self) -> (u32, u32) {
+        self.game_resolution
+    }
+
+    /// Executable name of the recorded game (e.g. "javaw.exe").
+    pub(crate) fn game_exe(&self) -> &str {
+        &self.game_exe
+    }
+
     pub(crate) async fn start(
         video_recorder: &mut dyn VideoRecorder,
         params: RecordingParams,

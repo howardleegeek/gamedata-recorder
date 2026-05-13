@@ -225,7 +225,7 @@ fn send_session_telemetry(telemetry: SessionTelemetry) {
         LintVerdict::Fail { failed_criteria } => {
             span.set_attribute(KeyValue::new("lint.verdict", "FAIL"));
             span.set_attribute(KeyValue::new("lint.failed_criteria", failed_criteria as i64));
-            span.set_status(Status::Error("Lint failed".to_string()));
+            span.set_status(Status::Error { description: "Lint failed".into() });
         }
         LintVerdict::Unknown => {
             span.set_attribute(KeyValue::new("lint.verdict", "UNKNOWN"));
