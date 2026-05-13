@@ -667,7 +667,15 @@ impl LocalRecording {
                 .map(|a| hardware_specs::GpuSpecs::from_name(&a.name))
                 .collect(),
         ) {
-            Ok(specs) => Some(specs),
+            // R5.2: enrich GPU entries with driver_version. On non-Windows
+            // hosts this is a no-op; on Windows it walks the DISPLAY_DEVICE
+            // chain and substring-matches against the friendly name. We do
+            // this AFTER `get_hardware_specs` so any failure in the
+            // enrichment doesn't lose the rest of the data.
+            Ok(mut specs) => {
+                hardware_specs::enrich_gpu_specs_with_driver_version(&mut specs.gpus);
+                Some(specs)
+            }
             Err(e) => {
                 tracing::warn!("Failed to get hardware specs: {}", e);
                 None

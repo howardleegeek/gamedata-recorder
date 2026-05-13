@@ -3663,6 +3663,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "metadata-polish-tests"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "constants",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "metal"
 version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
