@@ -46,9 +46,7 @@ use windows::{
         UI::{
             Input::{
                 self, GetRawInputData, HRAWINPUT,
-                KeyboardAndMouse::{
-                    VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2,
-                },
+                KeyboardAndMouse::{VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2},
                 MOUSE_MOVE_ABSOLUTE, MOUSE_VIRTUAL_DESKTOP, RAWINPUT, RAWINPUTDEVICE,
                 RAWINPUTDEVICE_FLAGS, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK,
                 RegisterRawInputDevices,
@@ -59,15 +57,15 @@ use windows::{
                 MSLLHOOKSTRUCT, PostQuitMessage, PostThreadMessageW, RI_KEY_BREAK,
                 RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
                 RI_MOUSE_BUTTON_5_UP, RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP,
-                RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP,
-                RI_MOUSE_RIGHT_BUTTON_DOWN, RI_MOUSE_RIGHT_BUTTON_UP, RI_MOUSE_WHEEL,
-                RegisterClassA, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
-                SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SetWindowsHookExW, ShowWindow,
-                TranslateMessage, UnhookWindowsHookEx, UnregisterClassA, WH_KEYBOARD_LL,
-                WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-                WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER,
-                WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSA, WS_EX_TOOLWINDOW,
+                RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN,
+                RI_MOUSE_RIGHT_BUTTON_UP, RI_MOUSE_WHEEL, RegisterClassA, SM_CXSCREEN,
+                SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+                SM_YVIRTUALSCREEN, SW_HIDE, SetWindowsHookExW, ShowWindow, TranslateMessage,
+                UnhookWindowsHookEx, UnregisterClassA, WH_KEYBOARD_LL, WH_MOUSE_LL,
+                WINDOW_EX_STYLE, WINDOW_STYLE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+                WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP,
+                WNDCLASSA, WS_EX_TOOLWINDOW,
             },
         },
     },
@@ -347,11 +345,7 @@ static LAST_MOUSE_POS: AtomicU64 = AtomicU64::new(0);
 /// the chain run. Returning a non-zero value would BLOCK the keystroke
 /// from reaching the active application — that would be terrible (the
 /// user couldn't actually play the game), so we always forward.
-unsafe extern "system" fn keyboard_ll_proc(
-    code: i32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn keyboard_ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     // SAFETY: Win32 callback boundary. All unsafe blocks below have
     // their preconditions documented.
     unsafe {
@@ -405,9 +399,7 @@ unsafe extern "system" fn keyboard_ll_proc(
                 && let Ok(guard) = slot.lock()
                 && let Some(active_keys_arc) = guard.as_ref()
             {
-                let mut ak = active_keys_arc
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
+                let mut ak = active_keys_arc.lock().unwrap_or_else(|p| p.into_inner());
                 match press_state {
                     PressState::Pressed => ak.keyboard.insert(vk),
                     PressState::Released => {
@@ -453,7 +445,6 @@ unsafe extern "system" fn keyboard_ll_proc(
     }
 }
 
-
 /// Low-level mouse hook procedure (`WH_MOUSE_LL`).
 ///
 /// Safety: the function signature is dictated by Win32 (`HOOKPROC`).
@@ -464,11 +455,7 @@ unsafe extern "system" fn keyboard_ll_proc(
 /// Return value: we must call `CallNextHookEx` to let other hooks in
 /// the chain run. Returning a non-zero value would BLOCK the mouse
 /// event from reaching the active application.
-unsafe extern "system" fn mouse_ll_proc(
-    code: i32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn mouse_ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     // SAFETY: Win32 callback boundary. All unsafe blocks below have
     // their preconditions documented.
     unsafe {
@@ -504,21 +491,21 @@ unsafe extern "system" fn mouse_ll_proc(
             WM_MOUSEMOVE => {
                 let x = hook_struct.pt.x;
                 let y = hook_struct.pt.y;
-                
+
                 // Compute delta from last position
                 let last_pos = LAST_MOUSE_POS.load(Ordering::Relaxed);
                 let last_x = (last_pos >> 32) as i32;
                 let last_y = (last_pos & 0xFFFFFFFF) as i32;
-                
+
                 // Store new position
                 let new_pos = ((x as u64) << 32) | (y as u32 as u64);
                 LAST_MOUSE_POS.store(new_pos, Ordering::Relaxed);
-                
+
                 // Only send event if we have a previous position (not first event)
                 if last_pos != 0 {
                     let dx = x - last_x;
                     let dy = y - last_y;
-                    
+
                     if dx != 0 || dy != 0 {
                         // Send mouse move event
                         if let Some(slot) = HOOK_EVENT_TX.get()
@@ -526,11 +513,16 @@ unsafe extern "system" fn mouse_ll_proc(
                             && let Some(tx) = guard.as_ref()
                         {
                             let _ = tx.try_send(Event::MouseMove([dx, dy]));
-                            
+
                             // Wake the message pump so GetMessageA returns and drain runs
                             let pump_tid = PUMP_THREAD_ID.load(Ordering::Relaxed);
                             if pump_tid != 0 {
-                                let _ = PostThreadMessageW(pump_tid, HOOK_WAKE_MSG, WPARAM(0), LPARAM(0));
+                                let _ = PostThreadMessageW(
+                                    pump_tid,
+                                    HOOK_WAKE_MSG,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                );
                             }
                         }
                     }
@@ -542,7 +534,7 @@ unsafe extern "system" fn mouse_ll_proc(
                 } else {
                     PressState::Released
                 };
-                
+
                 if let Some(slot) = HOOK_EVENT_TX.get()
                     && let Ok(guard) = slot.lock()
                     && let Some(tx) = guard.as_ref()
@@ -551,7 +543,7 @@ unsafe extern "system" fn mouse_ll_proc(
                         key: VK_LBUTTON.0,
                         press_state,
                     });
-                    
+
                     // Wake the message pump
                     let pump_tid = PUMP_THREAD_ID.load(Ordering::Relaxed);
                     if pump_tid != 0 {
@@ -565,7 +557,7 @@ unsafe extern "system" fn mouse_ll_proc(
                 } else {
                     PressState::Released
                 };
-                
+
                 if let Some(slot) = HOOK_EVENT_TX.get()
                     && let Ok(guard) = slot.lock()
                     && let Some(tx) = guard.as_ref()
@@ -574,7 +566,7 @@ unsafe extern "system" fn mouse_ll_proc(
                         key: VK_RBUTTON.0,
                         press_state,
                     });
-                    
+
                     // Wake the message pump
                     let pump_tid = PUMP_THREAD_ID.load(Ordering::Relaxed);
                     if pump_tid != 0 {
@@ -588,7 +580,7 @@ unsafe extern "system" fn mouse_ll_proc(
                 } else {
                     PressState::Released
                 };
-                
+
                 if let Some(slot) = HOOK_EVENT_TX.get()
                     && let Ok(guard) = slot.lock()
                     && let Some(tx) = guard.as_ref()
@@ -597,7 +589,7 @@ unsafe extern "system" fn mouse_ll_proc(
                         key: VK_MBUTTON.0,
                         press_state,
                     });
-                    
+
                     // Wake the message pump
                     let pump_tid = PUMP_THREAD_ID.load(Ordering::Relaxed);
                     if pump_tid != 0 {
@@ -608,7 +600,7 @@ unsafe extern "system" fn mouse_ll_proc(
             WM_MOUSEWHEEL => {
                 // Extract wheel delta from high word of mouseData
                 let wheel_delta = (hook_struct.mouseData as i32 >> 16) as i16;
-                
+
                 if let Some(slot) = HOOK_EVENT_TX.get()
                     && let Ok(guard) = slot.lock()
                     && let Some(tx) = guard.as_ref()
@@ -616,7 +608,7 @@ unsafe extern "system" fn mouse_ll_proc(
                     let _ = tx.try_send(Event::MouseScroll {
                         scroll_amount: wheel_delta,
                     });
-                    
+
                     // Wake the message pump
                     let pump_tid = PUMP_THREAD_ID.load(Ordering::Relaxed);
                     if pump_tid != 0 {
@@ -632,7 +624,6 @@ unsafe extern "system" fn mouse_ll_proc(
         CallNextHookEx(None, code, wparam, lparam)
     }
 }
-
 
 pub struct KbmCapture {
     hwnd: HWND,
@@ -923,106 +914,108 @@ impl KbmCapture {
             //   - The hook chain must always be forwarded (we return
             //     `CallNextHookEx(...)`) so games still receive
             //     keystrokes.
-            let (tier, hook_handle, mouse_hook_handle, hook_rx) = if matches!(tier, RegistrationTier::None) {
-                let (tx, rx) = sync_channel::<Event>(10_000);
-                // Park the sender / active_keys / metrics in process-
-                // wide slots that the static hook callback can reach
-                // (the callback is `extern "system" fn` — no captures).
-                let _ = HOOK_EVENT_TX.set(Mutex::new(None));
-                let _ = HOOK_ACTIVE_KEYS.set(Mutex::new(None));
-                let _ = HOOK_METRICS.set(Mutex::new(None));
-                if let Some(slot) = HOOK_EVENT_TX.get()
-                    && let Ok(mut g) = slot.lock()
-                {
-                    *g = Some(tx);
-                }
-                if let Some(slot) = HOOK_ACTIVE_KEYS.get()
-                    && let Ok(mut g) = slot.lock()
-                {
-                    *g = Some(active_keys.clone());
-                }
-                if let Some(slot) = HOOK_METRICS.get()
-                    && let Ok(mut g) = slot.lock()
-                {
-                    *g = Some(metrics.clone());
-                }
+            let (tier, hook_handle, mouse_hook_handle, hook_rx) =
+                if matches!(tier, RegistrationTier::None) {
+                    let (tx, rx) = sync_channel::<Event>(10_000);
+                    // Park the sender / active_keys / metrics in process-
+                    // wide slots that the static hook callback can reach
+                    // (the callback is `extern "system" fn` — no captures).
+                    let _ = HOOK_EVENT_TX.set(Mutex::new(None));
+                    let _ = HOOK_ACTIVE_KEYS.set(Mutex::new(None));
+                    let _ = HOOK_METRICS.set(Mutex::new(None));
+                    if let Some(slot) = HOOK_EVENT_TX.get()
+                        && let Ok(mut g) = slot.lock()
+                    {
+                        *g = Some(tx);
+                    }
+                    if let Some(slot) = HOOK_ACTIVE_KEYS.get()
+                        && let Ok(mut g) = slot.lock()
+                    {
+                        *g = Some(active_keys.clone());
+                    }
+                    if let Some(slot) = HOOK_METRICS.get()
+                        && let Ok(mut g) = slot.lock()
+                    {
+                        *g = Some(metrics.clone());
+                    }
 
-                // hMod = NULL: this hook is bound to our thread (the
-                // current thread that installed it). MSDN: "If hMod is
-                // NULL, the lpfn parameter must point to a hook
-                // procedure in the code associated with the current
-                // process and the dwThreadId parameter must be zero
-                // or the identifier of a thread created by the
-                // current process." We're using dwThreadId=0, which
-                // means the hook applies to ALL threads of the
-                // calling process. For a process-only hook that's
-                // fine because the OS dispatches LL hooks to the
-                // installing thread regardless.
-                match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_ll_proc), None, 0)
-                    .wrap_err("tier 3: SetWindowsHookExW(WH_KEYBOARD_LL)")
-                {
-                    Ok(h) => {
-                        // rc19.0.1 (Bug 1 sibling, 2026-05-13): also install
-                        // WH_MOUSE_LL so mouse_ll_proc (already defined with
-                        // wake posts at all 5 sites) actually fires. Before
-                        // this, mouse_ll_proc was dead code on tier-3
-                        // systems — keyboard worked but mouse was 100%
-                        // silent on AMD Radeon 780M and other LL-fallback
-                        // hardware. Mirrors the keyboard install pattern.
-                        let mouse_hook = match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_ll_proc), None, 0)
-                            .wrap_err("tier 3: SetWindowsHookExW(WH_MOUSE_LL)")
-                        {
-                            Ok(mh) => {
-                                tracing::info!(
-                                    tier = RegistrationTier::Hook.as_str(),
-                                    "INPUTSINK tiers exhausted; installed WH_KEYBOARD_LL + \
+                    // hMod = NULL: this hook is bound to our thread (the
+                    // current thread that installed it). MSDN: "If hMod is
+                    // NULL, the lpfn parameter must point to a hook
+                    // procedure in the code associated with the current
+                    // process and the dwThreadId parameter must be zero
+                    // or the identifier of a thread created by the
+                    // current process." We're using dwThreadId=0, which
+                    // means the hook applies to ALL threads of the
+                    // calling process. For a process-only hook that's
+                    // fine because the OS dispatches LL hooks to the
+                    // installing thread regardless.
+                    match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_ll_proc), None, 0)
+                        .wrap_err("tier 3: SetWindowsHookExW(WH_KEYBOARD_LL)")
+                    {
+                        Ok(h) => {
+                            // rc19.0.1 (Bug 1 sibling, 2026-05-13): also install
+                            // WH_MOUSE_LL so mouse_ll_proc (already defined with
+                            // wake posts at all 5 sites) actually fires. Before
+                            // this, mouse_ll_proc was dead code on tier-3
+                            // systems — keyboard worked but mouse was 100%
+                            // silent on AMD Radeon 780M and other LL-fallback
+                            // hardware. Mirrors the keyboard install pattern.
+                            let mouse_hook =
+                                match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_ll_proc), None, 0)
+                                    .wrap_err("tier 3: SetWindowsHookExW(WH_MOUSE_LL)")
+                                {
+                                    Ok(mh) => {
+                                        tracing::info!(
+                                            tier = RegistrationTier::Hook.as_str(),
+                                            "INPUTSINK tiers exhausted; installed WH_KEYBOARD_LL + \
                                      WH_MOUSE_LL hooks. Both keyboard and mouse events will \
                                      flow through the LL hook fallback."
-                                );
-                                Some(mh)
+                                        );
+                                        Some(mh)
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = ?e,
+                                            "tier 3: WH_MOUSE_LL install FAILED but WH_KEYBOARD_LL \
+                                             succeeded. Continuing with keyboard-only fallback — \
+                                             mouse capture will be DEAD for this session."
+                                        );
+                                        None
+                                    }
+                                };
+                            (RegistrationTier::Hook, Some(h), mouse_hook, Some(rx))
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = ?e,
+                                "tier 3 (WH_KEYBOARD_LL hook) also failed. Input capture is \
+                                 completely dead for this session — recording will contain \
+                                 only lifecycle events."
+                            );
+                            // Clear out the slots we just populated so a
+                            // future capture instance can retry cleanly.
+                            if let Some(slot) = HOOK_EVENT_TX.get()
+                                && let Ok(mut g) = slot.lock()
+                            {
+                                *g = None;
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = ?e,
-                                    "tier 3: WH_MOUSE_LL install FAILED but WH_KEYBOARD_LL \
-                                     succeeded. Continuing with keyboard-only fallback — \
-                                     mouse capture will be DEAD for this session."
-                                );
-                                None
+                            if let Some(slot) = HOOK_ACTIVE_KEYS.get()
+                                && let Ok(mut g) = slot.lock()
+                            {
+                                *g = None;
                             }
-                        };
-                        (RegistrationTier::Hook, Some(h), mouse_hook, Some(rx))
+                            if let Some(slot) = HOOK_METRICS.get()
+                                && let Ok(mut g) = slot.lock()
+                            {
+                                *g = None;
+                            }
+                            (RegistrationTier::None, None, None, None)
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!(
-                            error = ?e,
-                            "tier 3 (WH_KEYBOARD_LL hook) also failed. Input capture is \
-                             completely dead for this session — recording will contain \
-                             only lifecycle events."
-                        );
-                        // Clear out the slots we just populated so a
-                        // future capture instance can retry cleanly.
-                        if let Some(slot) = HOOK_EVENT_TX.get()
-                            && let Ok(mut g) = slot.lock()
-                        {
-                            *g = None;
-                        }
-                        if let Some(slot) = HOOK_ACTIVE_KEYS.get()
-                            && let Ok(mut g) = slot.lock()
-                        {
-                            *g = None;
-                        }
-                        if let Some(slot) = HOOK_METRICS.get()
-                            && let Ok(mut g) = slot.lock()
-                        {
-                            *g = None;
-                        }
-                        (RegistrationTier::None, None, None, None)
-                    }
-                }
-            } else {
-                (tier, None, None, None)
-            };
+                } else {
+                    (tier, None, None, None)
+                };
 
             // Publish the tier so the host can read it. Done before we
             // return so the parent thread sees the value as soon as the

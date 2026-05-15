@@ -153,11 +153,7 @@ impl LintResult {
     /// Build a PASS / FAIL result from a parsed script report. The
     /// `ran_at` and `session_dir` arguments are injected by the caller
     /// (so unit tests can pin them deterministically).
-    fn from_script(
-        report: LintScriptReport,
-        session_dir: &Path,
-        ran_at: String,
-    ) -> Self {
+    fn from_script(report: LintScriptReport, session_dir: &Path, ran_at: String) -> Self {
         let failures: Vec<LintFailure> = report
             .results
             .iter()
@@ -328,9 +324,8 @@ fn days_to_ymd(days: i64) -> (i32, u32, u32) {
 fn write_lint_result(session_dir: &Path, result: &LintResult) -> std::io::Result<PathBuf> {
     let target = session_dir.join(LINT_RESULT_FILENAME);
     let tmp = session_dir.join(format!("{}.tmp", LINT_RESULT_FILENAME));
-    let body = serde_json::to_vec_pretty(result).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-    })?;
+    let body = serde_json::to_vec_pretty(result)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(&tmp, &body)?;
     // Best-effort fsync of the tmp before rename so a power loss between
     // rename and reboot can't leave a torn lint_result.json.
@@ -376,8 +371,7 @@ pub async fn run_lint_v3(session_dir: PathBuf) -> std::io::Result<LintResult> {
         Some(p) => p,
         None => {
             let reason =
-                "lint_v3_prd_grounded.py not found (set OYSTER_LINT_V3_PY to override)"
-                    .to_string();
+                "lint_v3_prd_grounded.py not found (set OYSTER_LINT_V3_PY to override)".to_string();
             tracing::warn!(reason = %reason, "run_lint_v3: cannot locate script");
             let result = LintResult::from_error(&session_dir, ran_at, reason);
             let _ = write_lint_result(&session_dir, &result);
@@ -438,9 +432,8 @@ pub async fn run_lint_v3(session_dir: PathBuf) -> std::io::Result<LintResult> {
 
             if !lint_output_tmp.is_file() && exit_code == 2 {
                 let stderr_excerpt = stderr.chars().take(512).collect::<String>();
-                let reason = format!(
-                    "lint v3 errored (exit=2) and produced no output: {stderr_excerpt}"
-                );
+                let reason =
+                    format!("lint v3 errored (exit=2) and produced no output: {stderr_excerpt}");
                 tracing::warn!(reason = %reason, "run_lint_v3: script error");
                 LintResult::from_error(&session_dir, ran_at, reason)
             } else if !lint_output_tmp.is_file() {
@@ -491,10 +484,7 @@ pub async fn run_lint_v3(session_dir: PathBuf) -> std::io::Result<LintResult> {
     // don't want to flash a toast on every successful recording, only
     // when a human needs to look.
     if result.overall_status != "PASS" {
-        let title = format!(
-            "Session FAILED lint v3 ({} criteria)",
-            result.failed
-        );
+        let title = format!("Session FAILED lint v3 ({} criteria)", result.failed);
         let body = if let Some(err) = &result.error {
             format!(
                 "Lint did not run: {}\nSession: {}",
@@ -599,9 +589,12 @@ mod tests {
     #[test]
     fn parse_lint_output_pass_yields_pass_status() {
         let session_dir = PathBuf::from("/tmp/session");
-        let r =
-            parse_lint_output(&sample_pass_json(), &session_dir, "2026-05-12T00:00:00Z".into())
-                .expect("parse should succeed");
+        let r = parse_lint_output(
+            &sample_pass_json(),
+            &session_dir,
+            "2026-05-12T00:00:00Z".into(),
+        )
+        .expect("parse should succeed");
         assert_eq!(r.overall_status, "PASS");
         assert_eq!(r.passed, 32);
         assert_eq!(r.failed, 0);
@@ -674,8 +667,7 @@ mod tests {
 
         // Roundtrip: file contents parse back into the expected fields.
         let bytes = fs::read(&written).expect("read back");
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&bytes).expect("valid JSON");
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
         assert_eq!(parsed["overall_status"], "FAIL");
         assert_eq!(parsed["failed"], 3);
         assert_eq!(parsed["lint_version"], "v3");
