@@ -370,7 +370,7 @@ fn action_camera_record_serializes_with_correct_field_names() {
     assert_eq!(obj["mouse_dy"].as_f64(), Some(-2.0));
     assert!(obj["camera_position"].is_null());
     assert!(obj["camera_rotation_quaternion"].is_null());
-    assert!(obj["rotation_oula"].is_null());
+    assert!(obj["camera_rotation_oula"].is_null());
     assert!(obj["rotation_quaternion"].is_null());
     assert!(obj["camera_Follow Offset"].is_null());
     assert!(obj["player_position"].is_null());
