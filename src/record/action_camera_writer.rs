@@ -54,8 +54,8 @@
 //!   "timestamp_ns": <u64>,   // PRD: same instant as `timestamp`, in ns
 //!   "route_type": 1,         // 1=normal / 2=special / 3=loop (PRD §4.1)
 //!   "input_modality": "keyboard_mouse" | "gamepad" | "mixed",
-//!   "mouseX": <f64 in [0, 1]> | null,
-//!   "mouseY": <f64 in [0, 1]> | null,
+//!   "mouse_x": <f64 in [0, 1]> | null,
+//!   "mouse_y": <f64 in [0, 1]> | null,
 //!   "mouse_dx": <f64 pixels, per-frame delta> | null,
 //!   "mouse_dy": <f64 pixels, per-frame delta> | null,
 //!   "keyCode": <sorted ascending list of held VK codes at this frame> | null,
@@ -67,10 +67,10 @@
 //!   "gamepad_right_trigger": <f64 in [0, 1]>  | null,
 //!   "gamepad_buttons": <u16 XInput bitmask> | null,
 //!   "camera_position": {"x": f64, "y": f64, "z": f64} | null,
-//!   "rotation_oula":   {"x": pitch_deg, "y": yaw_deg, "z": roll_deg} | null,
+//!   "camera_rotation_oula":   {"x": pitch_deg, "y": yaw_deg, "z": roll_deg} | null,
 //!   "rotation_quaternion": {"x": f64, "y": f64, "z": f64, "w": f64} | null,
 //!   "camera_rotation_quaternion": [x, y, z, w] | null,  // PRD: xyzw order
-//!   "Follow_Offset": {"x": f64, "y": f64, "z": f64} | null,
+//!   "camera_Follow Offset": {"x": f64, "y": f64, "z": f64} | null,
 //!   "camera_intrinsics": {"fx": f64, "fy": f64, "cx": f64, "cy": f64},
 //!   "speed": <f64>,                                  // camera-frame speed
 //!   "player_position": {"x": f64, "y": f64, "z": f64} | null,
@@ -1382,8 +1382,8 @@ mod tests {
         assert!(obj.contains_key("timestamp_ns"));
         assert!(obj.contains_key("route_type"));
         assert!(obj.contains_key("input_modality"));
-        assert!(obj.contains_key("mouseX"));
-        assert!(obj.contains_key("mouseY"));
+        assert!(obj.contains_key("mouse_x"));
+        assert!(obj.contains_key("mouse_y"));
         assert!(obj.contains_key("mouse_dx"));
         assert!(obj.contains_key("mouse_dy"));
         assert!(obj.contains_key("keyCode"));
@@ -1395,10 +1395,10 @@ mod tests {
         assert!(obj.contains_key("gamepad_right_trigger"));
         assert!(obj.contains_key("gamepad_buttons"));
         assert!(obj.contains_key("camera_position"));
-        assert!(obj.contains_key("rotation_oula"));
+        assert!(obj.contains_key("camera_rotation_oula"));
         assert!(obj.contains_key("rotation_quaternion"));
         assert!(obj.contains_key("camera_rotation_quaternion"));
-        assert!(obj.contains_key("Follow_Offset"));
+        assert!(obj.contains_key("camera_Follow Offset"));
         // PRD wire field name is `camera_intrinsics`; Rust field stays
         // `intrinsics` and is renamed at serde time. Stream BC lint
         // criterion 12 reads this exact key.
@@ -1421,8 +1421,8 @@ mod tests {
             .expect("camera_intrinsics is object");
         assert!(intr.contains_key("fx"));
         assert!(intr.contains_key("fy"));
-        assert!(intr.contains_key("cx"));
-        assert!(intr.contains_key("cy"));
+        assert!(intr.contains_key("Cx"));
+        assert!(intr.contains_key("Cy"));
         // metric_scale serializes as the bare float 1.0.
         assert_eq!(obj["metric_scale"].as_f64(), Some(1.0));
         // gamepad fields render as JSON null when None.
@@ -1539,8 +1539,8 @@ mod tests {
         // not been applied).
         assert_eq!(arr[0]["frame_index"].as_u64(), Some(0));
         assert_eq!(arr[0]["input_modality"].as_str(), Some("keyboard_mouse"));
-        assert!((arr[0]["mouseX"].as_f64().unwrap() - 0.5).abs() < 1e-9);
-        assert!((arr[0]["mouseY"].as_f64().unwrap() - 0.5).abs() < 1e-9);
+        assert!((arr[0]["mouse_x"].as_f64().unwrap() - 0.5).abs() < 1e-9);
+        assert!((arr[0]["mouse_y"].as_f64().unwrap() - 0.5).abs() < 1e-9);
         assert!(arr[0]["keyCode"].as_array().unwrap().is_empty());
         // gamepad fields are null on a KBM session.
         assert!(arr[0]["gamepad_left_stick_x"].is_null());
@@ -1560,8 +1560,8 @@ mod tests {
         assert_eq!(key_codes, vec![87]);
         let expect_x = (1920.0 / 2.0 + 12.0) / 1920.0;
         let expect_y = (1080.0 / 2.0 + 7.0) / 1080.0;
-        assert!((arr[1]["mouseX"].as_f64().unwrap() - expect_x).abs() < 1e-9);
-        assert!((arr[1]["mouseY"].as_f64().unwrap() - expect_y).abs() < 1e-9);
+        assert!((arr[1]["mouse_x"].as_f64().unwrap() - expect_x).abs() < 1e-9);
+        assert!((arr[1]["mouse_y"].as_f64().unwrap() - expect_y).abs() < 1e-9);
         // mouse_dx/dy are per-frame pixel deltas.
         assert!((arr[1]["mouse_dx"].as_f64().unwrap() - 12.0).abs() < 1e-9);
         assert!((arr[1]["mouse_dy"].as_f64().unwrap() - 7.0).abs() < 1e-9);
@@ -1908,7 +1908,7 @@ mod tests {
         assert_eq!(cam.y, 64.0);
         assert_eq!(cam.z, 5.0);
         // rotation_oula: x=pitch, y=yaw, z=0 (no roll in MC).
-        let eul = r.rotation_oula.expect("rotation_oula");
+        let eul = r.rotation_oula.expect("camera_rotation_oula");
         assert_eq!(eul.x, 0.0);
         assert_eq!(eul.y, 90.0);
         assert_eq!(eul.z, 0.0);

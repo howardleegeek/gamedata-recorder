@@ -61,15 +61,15 @@ async fn cursor_accumulates_pixel_deltas_across_frames() {
     let arr = json.as_array().expect("array");
     assert_eq!(arr.len(), 2);
     // Frame 0: pre-move. Cursor at center, zero delta.
-    assert!((arr[0]["mouseX"].as_f64().unwrap() - 0.5).abs() < 1e-9);
-    assert!((arr[0]["mouseY"].as_f64().unwrap() - 0.5).abs() < 1e-9);
+    assert!((arr[0]["mouse_x"].as_f64().unwrap() - 0.5).abs() < 1e-9);
+    assert!((arr[0]["mouse_y"].as_f64().unwrap() - 0.5).abs() < 1e-9);
     assert_eq!(arr[0]["mouse_dx"].as_f64().unwrap(), 0.0);
     assert_eq!(arr[0]["mouse_dy"].as_f64().unwrap(), 0.0);
     // Frame 1: cursor moved +12, +7 in pixels; mouse_dx == 12, mouse_dy == 7.
     let expect_x = (1920.0 / 2.0 + 12.0) / 1920.0;
     let expect_y = (1080.0 / 2.0 + 7.0) / 1080.0;
-    assert!((arr[1]["mouseX"].as_f64().unwrap() - expect_x).abs() < 1e-9);
-    assert!((arr[1]["mouseY"].as_f64().unwrap() - expect_y).abs() < 1e-9);
+    assert!((arr[1]["mouse_x"].as_f64().unwrap() - expect_x).abs() < 1e-9);
+    assert!((arr[1]["mouse_y"].as_f64().unwrap() - expect_y).abs() < 1e-9);
     assert!((arr[1]["mouse_dx"].as_f64().unwrap() - 12.0).abs() < 1e-9);
     assert!((arr[1]["mouse_dy"].as_f64().unwrap() - 7.0).abs() < 1e-9);
 }
@@ -199,8 +199,8 @@ async fn output_is_valid_json_array_with_buyer_field_names() {
     for required in [
         "frame_index",
         "timestamp",
-        "mouseX",
-        "mouseY",
+        "mouse_x",
+        "mouse_y",
         "mouse_dx",
         "mouse_dy",
         "keyCode",
@@ -249,7 +249,7 @@ nonsense line
         .collect();
     assert_eq!(key_codes, vec![87]);
     let expect_x = (1920.0 / 2.0 + 5.0) / 1920.0;
-    assert!((arr[1]["mouseX"].as_f64().unwrap() - expect_x).abs() < 1e-9);
+    assert!((arr[1]["mouse_x"].as_f64().unwrap() - expect_x).abs() < 1e-9);
 }
 
 // -----------------------------------------------------------------------
@@ -364,15 +364,15 @@ fn action_camera_record_serializes_with_correct_field_names() {
     assert_eq!(obj["frame_number"].as_u64(), Some(7));
     assert!((obj["timestamp"].as_f64().unwrap() - 0.123).abs() < 1e-12);
     assert_eq!(obj["timestamp_ns"].as_u64(), Some(123_000_000));
-    assert_eq!(obj["mouseX"].as_f64(), Some(0.5));
-    assert_eq!(obj["mouseY"].as_f64(), Some(0.5));
+    assert_eq!(obj["mouse_x"].as_f64(), Some(0.5));
+    assert_eq!(obj["mouse_y"].as_f64(), Some(0.5));
     assert_eq!(obj["mouse_dx"].as_f64(), Some(1.5));
     assert_eq!(obj["mouse_dy"].as_f64(), Some(-2.0));
     assert!(obj["camera_position"].is_null());
     assert!(obj["camera_rotation_quaternion"].is_null());
     assert!(obj["rotation_oula"].is_null());
     assert!(obj["rotation_quaternion"].is_null());
-    assert!(obj["Follow_Offset"].is_null());
+    assert!(obj["camera_Follow Offset"].is_null());
     assert!(obj["player_position"].is_null());
     // camera_intrinsics is always populated (depends only on FOV + resolution).
     // PRD wire name is `camera_intrinsics` (Rust field name `intrinsics` is
