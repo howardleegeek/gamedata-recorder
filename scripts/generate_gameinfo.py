@@ -202,6 +202,43 @@ def _resolve_route_type() -> int:
     return _next_cyclic_route_type()
 
 
+# MECE G15 — strict operator_id with persistent config + loud sentinel.
+_OPERATOR_CONFIG_PATH = Path.home() / ".oyster-operator.json"
+_OPERATOR_MISSING_SENTINEL = "operator-MISSING-CONFIG"
+
+
+def _resolve_operator_id() -> str:
+    """MECE G15 / RBGA-C2 — pick operator_id with priority:
+      1. OYSTER_OPERATOR_ID env (per-recording override)
+      2. ~/.oyster-operator.json {"operator_id": "..."} (persistent config)
+      3. Loud sentinel ``operator-MISSING-CONFIG`` so the bad provenance
+         is impossible to ignore — buyer pipeline lint flags it, scorecard
+         shows red, and grep finds every leaked session.
+
+    Previously defaulted to the literal string "vendor-001-op-A" which
+    silently contaminated every untraceable session with what looked
+    like a real ID. The sentinel removes ambiguity.
+    """
+    env_raw = os.environ.get("OYSTER_OPERATOR_ID")
+    if env_raw is not None and env_raw.strip() != "":
+        return env_raw.strip()
+    try:
+        if _OPERATOR_CONFIG_PATH.is_file():
+            data = json.loads(_OPERATOR_CONFIG_PATH.read_text(encoding="utf-8"))
+            op = data.get("operator_id") if isinstance(data, dict) else None
+            if isinstance(op, str) and op.strip():
+                return op.strip()
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[gameinfo] WARN: could not read {_OPERATOR_CONFIG_PATH}: {e}",
+              file=sys.stderr)
+    print(f"[gameinfo] ERROR: operator_id NOT configured "
+          f"(neither OYSTER_OPERATOR_ID env nor {_OPERATOR_CONFIG_PATH}). "
+          f"Writing sentinel {_OPERATOR_MISSING_SENTINEL!r}. "
+          f"Set OYSTER_OPERATOR_ID or run: echo '{{\"operator_id\":\"tester-N\"}}' "
+          f"> {_OPERATOR_CONFIG_PATH}", file=sys.stderr)
+    return _OPERATOR_MISSING_SENTINEL
+
+
 # PRD §3.3 — 14 fields in this exact order
 PRD_FIELD_ORDER = [
     "game_name",
@@ -245,7 +282,8 @@ def build_row(metadata: Dict[str, Any], session_dir: Path) -> Dict[str, Any]:
         # rather than placeholder. Env var still wins for explicit override.
         "character_name": os.environ.get("OYSTER_CHARACTER_NAME") or _detect_mc_username() or "DataPilot",
         "character_class": os.environ.get("OYSTER_CHARACTER_CLASS", "survival"),
-        "operator_id": os.environ.get("OYSTER_OPERATOR_ID", "vendor-001-op-A"),
+        # MECE G15 — strict operator_id resolution (env → config → sentinel).
+        "operator_id": _resolve_operator_id(),
         "recording_date": derive_recording_date(metadata),
         "total_frames": count_frames(session_dir),
         "video_duration_sec": round(derive_duration(metadata), 2),
