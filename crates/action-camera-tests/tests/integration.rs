@@ -355,6 +355,7 @@ fn action_camera_record_serializes_with_correct_field_names() {
         speed: 0.0,
         player_position: None,
         player_rotation_quaternion: None,
+        player_rotation_oula: None,
         player_speed: 0.0,
         metric_scale: 1.0,
     };
@@ -371,6 +372,7 @@ fn action_camera_record_serializes_with_correct_field_names() {
     assert!(obj["camera_position"].is_null());
     assert!(obj["camera_rotation_quaternion"].is_null());
     assert!(obj["camera_rotation_oula"].is_null());
+    assert!(obj["player_rotation_oula"].is_null());
     assert!(obj["rotation_quaternion"].is_null());
     assert!(obj["camera_Follow Offset"].is_null());
     assert!(obj["player_position"].is_null());

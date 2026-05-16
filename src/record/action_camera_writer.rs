@@ -392,6 +392,13 @@ pub struct ActionCameraRecord {
     /// short-circuit on equality. Required for lint criterion 13/14 to
     /// vote xyzw + verify normalization on the player axis.
     pub player_rotation_quaternion: Option<[f64; 4]>,
+    /// PRD §5 page 5: player Euler angles (degrees) — x=pitch, y=yaw,
+    /// z=roll. In first-person MC the player IS the camera (eye position
+    /// + look direction), so this equals `camera_rotation_oula` per
+    /// frame. Emitted as a separate JSON key (`player_rotation_oula`)
+    /// so the buyer plugin's per-frame inspection doesn't have to
+    /// short-circuit on equality. Required for PRD-COMPLIANCE-MECE C17.
+    pub player_rotation_oula: Option<Vec3>,
     /// PRD: player speed magnitude (blocks/s = m/s). Computed from the
     /// nearest game_state tick's velocity vector; `0.0` when no
     /// game_state is available.
@@ -865,6 +872,9 @@ fn build_records(
             speed: speed_val,
             player_position,
             player_rotation_quaternion,
+            // PRD C17: in first-person MC, player_rotation_oula = camera
+            // rotation_oula (player IS the camera). Emit identical value.
+            player_rotation_oula: rotation_oula,
             player_speed: player_speed_val,
             metric_scale: 1.0,
         });
@@ -1370,6 +1380,7 @@ mod tests {
             speed: 0.0,
             player_position: None,
             player_rotation_quaternion: None,
+            player_rotation_oula: None,
             player_speed: 0.0,
             metric_scale: 1.0,
         };
@@ -1396,6 +1407,7 @@ mod tests {
         assert!(obj.contains_key("gamepad_buttons"));
         assert!(obj.contains_key("camera_position"));
         assert!(obj.contains_key("camera_rotation_oula"));
+        assert!(obj.contains_key("player_rotation_oula"));
         assert!(obj.contains_key("rotation_quaternion"));
         assert!(obj.contains_key("camera_rotation_quaternion"));
         assert!(obj.contains_key("camera_Follow Offset"));
