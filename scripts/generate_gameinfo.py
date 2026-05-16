@@ -156,6 +156,52 @@ def _parse_route_type(raw: str) -> int:
     return rt
 
 
+# MECE I3 — cyclic route_type counter file.
+# Persists across recordings so operator gets natural 1→2→3→1 rotation
+# without needing to set OYSTER_ROUTE_TYPE manually each session. Explicit
+# env override still wins (see _resolve_route_type below).
+_ROUTE_COUNTER_PATH = Path.home() / ".oyster-route-counter"
+
+
+def _next_cyclic_route_type() -> int:
+    """Read + increment + write the persistent route counter.
+
+    Cycles 1 → 2 → 3 → 1 → ... across recordings. File is a single-byte
+    text file (digit '1'/'2'/'3'). Corrupt / missing → start at 1.
+
+    NOT atomic across concurrent recorders (unlikely on a single rig);
+    if that ever matters add fcntl.flock around the read-modify-write.
+    """
+    try:
+        raw = _ROUTE_COUNTER_PATH.read_text().strip()
+        prev = int(raw)
+        if prev not in (1, 2, 3):
+            prev = 0  # treat as "before first" — first call returns 1
+    except (OSError, ValueError):
+        prev = 0
+    nxt = (prev % 3) + 1  # 0→1, 1→2, 2→3, 3→1
+    try:
+        _ROUTE_COUNTER_PATH.write_text(str(nxt))
+    except OSError as e:
+        print(f"[gameinfo] WARN: could not persist route counter at "
+              f"{_ROUTE_COUNTER_PATH}: {e}", file=sys.stderr)
+    return nxt
+
+
+def _resolve_route_type() -> int:
+    """MECE I3 — pick route_type with priority:
+      1. OYSTER_ROUTE_TYPE env (explicit override per recording)
+      2. Cyclic counter at ~/.oyster-route-counter (default behavior)
+      3. Fallback 1 if everything fails (matches old behavior)
+    """
+    env_raw = os.environ.get("OYSTER_ROUTE_TYPE")
+    if env_raw is not None and env_raw != "":
+        # Explicit override — don't advance the cyclic counter (else
+        # setting OYSTER_ROUTE_TYPE=2 once would shift cyclic too).
+        return _parse_route_type(env_raw)
+    return _next_cyclic_route_type()
+
+
 # PRD §3.3 — 14 fields in this exact order
 PRD_FIELD_ORDER = [
     "game_name",
@@ -203,14 +249,13 @@ def build_row(metadata: Dict[str, Any], session_dir: Path) -> Dict[str, Any]:
         "recording_date": derive_recording_date(metadata),
         "total_frames": count_frames(session_dir),
         "video_duration_sec": round(derive_duration(metadata), 2),
-        # route_type ∈ {1,2,3}; PRD-defined route classes. Operator selects
-        # before recording via OYSTER_ROUTE_TYPE env (launcher form rc17.4).
-        # Bug-fix 2026-05-15: validate + clamp. Bad input (non-numeric or
-        # out-of-range) used to crash the whole pipeline with ValueError;
-        # now it silently falls back to 1 with a stderr warning so the
-        # session still finalizes (operator audit will surface the wrong
-        # value via D4 later).
-        "route_type": _parse_route_type(os.environ.get("OYSTER_ROUTE_TYPE", "1")),
+        # route_type ∈ {1,2,3}; PRD-defined route classes.
+        # MECE I3 (2026-05-15): cyclic counter persisted at ~/.oyster-route-counter
+        # so operator gets natural 1→2→3→1 rotation across recordings.
+        # OYSTER_ROUTE_TYPE env still overrides for single-session pinning.
+        # Bad/missing input falls back to 1 with stderr warning (does NOT
+        # crash the pipeline — recording is more important than provenance).
+        "route_type": _resolve_route_type(),
         "notes": os.environ.get("OYSTER_NOTES", ""),
     }
 
