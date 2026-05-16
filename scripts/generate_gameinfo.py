@@ -77,6 +77,54 @@ def derive_duration(metadata: Dict[str, Any]) -> float:
     return 0.0
 
 
+def _detect_mc_username() -> Optional[str]:
+    """RBGA-C3: try to read the real MC username from launcher_profiles.json
+    so character_name in gameinfo.xlsx isn't the hardcoded "DataPilot".
+
+    Returns None if not findable — caller falls back to default. We check
+    the standard MC launcher paths in priority order:
+      - %APPDATA%/.minecraft/launcher_profiles.json (Windows)
+      - ~/Library/Application Support/minecraft/launcher_profiles.json (mac)
+      - ~/.minecraft/launcher_profiles.json (linux)
+      - bundled mc-instance under the recorder install (rc19.0.x bundles MC)
+    """
+    candidates = []
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidates.append(Path(appdata) / ".minecraft" / "launcher_profiles.json")
+    home = Path.home()
+    candidates += [
+        home / "Library" / "Application Support" / "minecraft" / "launcher_profiles.json",
+        home / ".minecraft" / "launcher_profiles.json",
+        home / "AppData" / "Local" / "GameData Recorder" / "mc-instance" / "launcher_profiles.json",
+    ]
+    for p in candidates:
+        try:
+            if not p.is_file():
+                continue
+            data = json.loads(p.read_text())
+            # MC launcher_profiles.json has a `selectedUser` key with UUID;
+            # the actual username lives in `authenticationDatabase.<uuid>.username`
+            # in older versions, or directly visible in `profiles.<id>.name`.
+            # Try multiple shapes for resilience across launcher versions.
+            sel = data.get("selectedUser") or {}
+            if isinstance(sel, dict):
+                uuid_ = sel.get("account")
+                auth = data.get("authenticationDatabase", {})
+                if uuid_ and uuid_ in auth:
+                    name = auth[uuid_].get("username") or auth[uuid_].get("displayName")
+                    if name:
+                        return str(name)
+            # Newer launchers: try first profile's name
+            for prof_id, prof in (data.get("profiles") or {}).items():
+                name = prof.get("name") or prof.get("lastVersionId")
+                if name and name not in ("(Default)", "latest-release"):
+                    return str(name)
+        except (json.JSONDecodeError, OSError, KeyError):
+            continue
+    return None
+
+
 # PRD §3.3 — 14 fields in this exact order
 PRD_FIELD_ORDER = [
     "game_name",
@@ -115,8 +163,10 @@ def build_row(metadata: Dict[str, Any], session_dir: Path) -> Dict[str, Any]:
         "weather": os.environ.get("OYSTER_WEATHER", "clear"),
         "time_of_day": os.environ.get("OYSTER_TIME_OF_DAY", "day"),
         # Character + operator metadata: operator-supplied via env / launcher
-        # form (launcher form UI is rc17.4).
-        "character_name": os.environ.get("OYSTER_CHARACTER_NAME", "DataPilot"),
+        # form (launcher form UI is rc17.4). rc19.0.5 (RBGA-C3): fallback to
+        # MC's launcher_profiles.json so character_name = real MC username
+        # rather than placeholder. Env var still wins for explicit override.
+        "character_name": os.environ.get("OYSTER_CHARACTER_NAME") or _detect_mc_username() or "DataPilot",
         "character_class": os.environ.get("OYSTER_CHARACTER_CLASS", "survival"),
         "operator_id": os.environ.get("OYSTER_OPERATOR_ID", "vendor-001-op-A"),
         "recording_date": derive_recording_date(metadata),
