@@ -418,9 +418,8 @@ async fn camera_position_resolves_from_sibling_session_dir() {
     let anchor_sec: f64 = 1_000_000.000;
     let anchor_ms: i64 = (anchor_sec * 1_000.0) as i64;
 
-    let inputs = format!(
-        "{{\"timestamp\":{anchor_sec:.3},\"event_type\":\"START\",\"event_args\":[]}}\n"
-    );
+    let inputs =
+        format!("{{\"timestamp\":{anchor_sec:.3},\"event_type\":\"START\",\"event_args\":[]}}\n");
     let frames = "{\"idx\":0,\"t_ns\":0}\n";
     let game_state = format!(
         "{{\"tick\":0,\"timestamp_ms\":{anchor_ms},\"x\":65.5,\"y\":64.0,\"z\":-102.5,\

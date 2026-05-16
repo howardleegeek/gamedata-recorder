@@ -713,8 +713,7 @@ fn build_records(
         let camera = if !game_state_slice.is_empty() {
             let frame_t = frame_t_session_sec;
             while gs_idx + 1 < game_state_slice.len() {
-                let cur =
-                    game_state_slice[gs_idx].timestamp_ms as f64 / 1000.0 - input_anchor_sec;
+                let cur = game_state_slice[gs_idx].timestamp_ms as f64 / 1000.0 - input_anchor_sec;
                 let nxt =
                     game_state_slice[gs_idx + 1].timestamp_ms as f64 / 1000.0 - input_anchor_sec;
                 // Stop if advancing would take us past the frame and
