@@ -24,7 +24,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -48,22 +48,33 @@ def load_metadata(session_dir: Path) -> Dict[str, Any]:
 
 
 def count_frames(session_dir: Path) -> int:
-    """Count entries in frames.jsonl."""
+    """Count entries in frames.jsonl.
+
+    Bug-fix 2026-05-15: use ``with`` context manager so the file handle is
+    closed deterministically even if the generator is interrupted partway.
+    """
     p = session_dir / "frames.jsonl"
     if not p.is_file():
         return 0
-    return sum(1 for line in open(p, 'r') if line.strip())
+    with p.open('r', encoding='utf-8') as fh:
+        return sum(1 for line in fh if line.strip())
 
 
 def derive_recording_date(metadata: Dict[str, Any]) -> str:
-    """Derive recording_date YYYY-MM-DD from metadata.start_timestamp."""
+    """Derive recording_date YYYY-MM-DD from metadata.start_timestamp.
+
+    Bug-fix 2026-05-15: ``datetime.utcnow()`` is deprecated in Python 3.12+
+    (and slated for removal); use timezone-aware ``datetime.now(timezone.utc)``.
+    Same applies to ``datetime.fromtimestamp(ts)`` — pass ``tz=timezone.utc``
+    so the returned object isn't a naive local-time value.
+    """
     ts = metadata.get("start_timestamp")
     if ts is None:
-        return datetime.utcnow().strftime("%Y-%m-%d")
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
-        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d")
     except (ValueError, TypeError, OSError):
-        return datetime.utcnow().strftime("%Y-%m-%d")
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def derive_duration(metadata: Dict[str, Any]) -> float:
@@ -125,6 +136,26 @@ def _detect_mc_username() -> Optional[str]:
     return None
 
 
+def _parse_route_type(raw: str) -> int:
+    """Parse + clamp route_type to PRD-allowed values {1,2,3}.
+
+    Returns 1 on any error (non-numeric, out-of-range, None). Emits a stderr
+    warning so the bad config is visible, but does NOT raise — the recording
+    is more important than perfect provenance, and D4 audit will catch it.
+    """
+    try:
+        rt = int(raw)
+    except (TypeError, ValueError):
+        print(f"[gameinfo] WARN: OYSTER_ROUTE_TYPE={raw!r} not an int, using 1",
+              file=sys.stderr)
+        return 1
+    if rt not in (1, 2, 3):
+        print(f"[gameinfo] WARN: OYSTER_ROUTE_TYPE={rt} not in {{1,2,3}}, using 1",
+              file=sys.stderr)
+        return 1
+    return rt
+
+
 # PRD §3.3 — 14 fields in this exact order
 PRD_FIELD_ORDER = [
     "game_name",
@@ -174,7 +205,12 @@ def build_row(metadata: Dict[str, Any], session_dir: Path) -> Dict[str, Any]:
         "video_duration_sec": round(derive_duration(metadata), 2),
         # route_type ∈ {1,2,3}; PRD-defined route classes. Operator selects
         # before recording via OYSTER_ROUTE_TYPE env (launcher form rc17.4).
-        "route_type": int(os.environ.get("OYSTER_ROUTE_TYPE", "1")),
+        # Bug-fix 2026-05-15: validate + clamp. Bad input (non-numeric or
+        # out-of-range) used to crash the whole pipeline with ValueError;
+        # now it silently falls back to 1 with a stderr warning so the
+        # session still finalizes (operator audit will surface the wrong
+        # value via D4 later).
+        "route_type": _parse_route_type(os.environ.get("OYSTER_ROUTE_TYPE", "1")),
         "notes": os.environ.get("OYSTER_NOTES", ""),
     }
 
