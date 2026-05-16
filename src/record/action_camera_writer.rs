@@ -174,7 +174,12 @@ pub struct Quat {
 pub struct Intrinsics {
     pub fx: f64,
     pub fy: f64,
+    // PRD §5 page 5: intrinsics keys are CAPITAL Cx / Cy (per PDF
+    // literal). Struct field names stay snake_case for Rust convention;
+    // serde rename emits the PRD-required wire names.
+    #[serde(rename = "Cx")]
     pub cx: f64,
+    #[serde(rename = "Cy")]
     pub cy: f64,
 }
 
@@ -305,9 +310,11 @@ pub struct ActionCameraRecord {
     /// which reads `route_type ∈ {1, 2, 3}`.
     pub route_type: u8,
     pub input_modality: InputModality,
-    #[serde(rename = "mouseX")]
+    // PRD §5: snake_case mouse_x / mouse_y (page 4-5). Was camelCase
+    // before — fixed 2026-05-16 per PRD-COMPLIANCE-MECE C5/C6.
+    #[serde(rename = "mouse_x")]
     pub mouse_x: Option<f64>,
-    #[serde(rename = "mouseY")]
+    #[serde(rename = "mouse_y")]
     pub mouse_y: Option<f64>,
     pub mouse_dx: Option<f64>,
     pub mouse_dy: Option<f64>,
@@ -336,6 +343,9 @@ pub struct ActionCameraRecord {
     pub camera_position: Option<Vec3>,
     /// PRD: Euler angles (degrees) — x=pitch, y=yaw, z=roll. MC has no
     /// roll, so z is always 0.0. `None` when no game_state is available.
+    /// PRD §5: literal name is `camera_rotation_oula` (拼音 oula, NOT
+    /// euler; with `camera_` prefix). Fixed 2026-05-16 per MECE C11.
+    #[serde(rename = "camera_rotation_oula")]
     pub rotation_oula: Option<Vec3>,
     /// PRD: quaternion form of `rotation_oula`, in customer's frame.
     /// Vector-first serialization: `{"x", "y", "z", "w"}`. Retained as
@@ -352,7 +362,10 @@ pub struct ActionCameraRecord {
     /// PRD: offset from player to camera. First-person MC: zero vector.
     /// Reserved for future third-person modes / replay cinematics where
     /// the camera diverges from the player.
-    #[serde(rename = "Follow_Offset")]
+    // PRD §5 page 4: literal name is `camera_Follow Offset` — with a
+    // SPACE before "Offset" and CAPITAL F. Yes, JSON keys can contain
+    // spaces (just unusual). Fixed 2026-05-16 per MECE C13.
+    #[serde(rename = "camera_Follow Offset")]
     pub follow_offset: Option<Vec3>,
     /// PRD: pinhole intrinsics derived from FOV + screen resolution.
     /// Always populated — these depend only on recorder settings, not
