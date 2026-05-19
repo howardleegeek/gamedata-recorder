@@ -65,6 +65,20 @@ pub struct InstalledGame {
     pub steam_app_id: u32,
 }
 
+/// Scans the local Steam installation to detect installed games.
+///
+/// This function uses the `steamlocate` crate to find Steam installations
+/// and enumerate all installed games across all Steam libraries.
+/// Returns a vector of `InstalledGame` structs containing game names
+/// and their Steam App IDs.
+///
+/// # Returns
+/// - `Vec<InstalledGame>`: List of installed games, empty if Steam is not found
+///   or if there are issues reading the library data.
+///
+/// # Note
+/// Only detects games installed via Steam; other platforms (Epic, GOG, etc.)
+/// are not supported.
 pub fn detect_installed_games() -> Vec<InstalledGame> {
     let Ok(steam_dir) = steamlocate::SteamDir::locate() else {
         tracing::warn!("Steam installation not found");
