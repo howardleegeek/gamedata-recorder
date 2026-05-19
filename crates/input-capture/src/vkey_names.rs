@@ -1,5 +1,25 @@
 //! Virtual key code to human-readable name mapping.
 
+/// Maps a Windows virtual-key code to a human-readable string.
+///
+/// Returns the canonical name for standard keys (letters, numbers, function
+/// keys, modifiers, navigation keys, etc.) and `"?"` for any unrecognised
+/// code. The mapping covers the full set of VK_* constants defined by the
+/// Win32 API that are relevant to game input capture.
+///
+/// # Arguments
+///
+/// * `vkey` — A 16-bit virtual-key code as produced by `WM_KEYDOWN` /
+///   `WM_KEYUP` messages or the Raw Input API.
+///
+/// # Example
+///
+/// ```
+/// use input_capture::vkey_names::vkey_to_name;
+/// assert_eq!(vkey_to_name(0x41), "A");
+/// assert_eq!(vkey_to_name(0x0D), "ENTER");
+/// assert_eq!(vkey_to_name(0xFF), "?");
+/// ```
 pub fn vkey_to_name(vkey: u16) -> &'static str {
     match vkey {
         0x08 => "BACKSPACE",
