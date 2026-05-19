@@ -180,6 +180,11 @@ impl InputCapture {
             .load(Ordering::Relaxed)
     }
 
+    /// Returns a snapshot of currently active inputs (keyboard keys, mouse buttons,
+    /// and gamepad states). Acquires both the keyboard/mouse and gamepad mutexes,
+    /// recovering from poisoned locks gracefully to avoid panicking the recorder.
+    /// The returned [`ActiveInput`] is a clone suitable for serialization into
+    /// `metadata.json` or for real-time UI display.
     pub fn active_input(&self) -> ActiveInput {
         // Handle poisoned mutexes gracefully to avoid application crashes
         let active_keys = self.active_keys.lock().unwrap_or_else(|e| e.into_inner());
