@@ -287,10 +287,9 @@ async fn run_logger<W: OutputWriter>(
                 press_state: PressState::Pressed,
                 ..
             }
-        ) {
-            if let Err(e) = out.flush_output() {
-                tracing::warn!("Failed to flush output: {}", e);
-            }
+        ) && let Err(e) = out.flush_output()
+        {
+            tracing::warn!("Failed to flush output: {}", e);
         }
     }
 
