@@ -475,7 +475,7 @@ unsafe extern "system" fn mouse_ll_proc(code: i32, wparam: WPARAM, lparam: LPARA
         }
 
         let hook_struct = *mouse;
-        let timestamp = std::time::Instant::now();
+        let _timestamp = std::time::Instant::now();
 
         // Bump the event-observed counter
         if let Some(slot) = HOOK_METRICS.get()
