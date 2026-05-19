@@ -136,7 +136,7 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
             }
 
             RawEventKind::KeyDown { vkey, .. } => {
-                // Key press terminates trajectory
+                // Key press terminates the current trajectory
                 if let Some(start) = current_start_ns {
                     trajectories.push(build_trajectory(
                         traj_index,
@@ -179,18 +179,18 @@ pub fn segment_trajectories(events: &[RawEvent], pause_threshold_ms: f64) -> Vec
     }
 
     // Finalize any remaining trajectory
-    if let Some(start) = current_start_ns {
-        if !current_path.is_empty() {
-            trajectories.push(build_trajectory(
-                traj_index,
-                start,
-                last_move_ns,
-                &current_path,
-                total_distance,
-                event_count,
-                TrajectoryTerminator::SessionEnd,
-            ));
-        }
+    if let Some(start) = current_start_ns
+        && !current_path.is_empty()
+    {
+        trajectories.push(build_trajectory(
+            traj_index,
+            start,
+            last_move_ns,
+            &current_path,
+            total_distance,
+            event_count,
+            TrajectoryTerminator::SessionEnd,
+        ));
     }
 
     trajectories
