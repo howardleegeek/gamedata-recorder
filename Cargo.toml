@@ -168,3 +168,7 @@ embed-manifest = "1.3.1"
 
 [patch.'https://github.com/RustAudio/cpal']
 cpal = { git = "https://github.com/philpax/cpal.git", branch = "audio-device-fix-updated" }
+
+# === Wave 2 Rust spec deps (S12/S13/S15/S16) — to be wired into [dependencies] manually ===
+# See feat/rust-tray-v2 branch + branch feat/rust-tray-oauth-updater-notify for full Cargo.toml.
+# Modules src/{tray,auth,updater,notify}/ added — main.rs wiring TBD in follow-up PR.
