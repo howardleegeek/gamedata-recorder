@@ -45,6 +45,12 @@ impl UnsupportedGames {
             .expect("Failed to load unsupported games from embedded data")
     }
 
+    /// Look up an unsupported game by its executable stem (without `.exe`).
+    ///
+    /// The search is case-insensitive and matches exact binary names as well
+    /// as common suffix variants (e.g. `_dx12`, `-win64-shipping`) and the
+    /// Epic Games Store naming convention. Returns `None` if the executable
+    /// is not in the unsupported-games list.
     pub fn get(&self, game_exe_without_ext: &str) -> Option<&UnsupportedGame> {
         let game_exe_without_ext = game_exe_without_ext.to_lowercase();
         self.games.iter().find(|g| {
