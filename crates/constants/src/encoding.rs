@@ -28,6 +28,11 @@ impl std::fmt::Display for VideoEncoderType {
     }
 }
 impl VideoEncoderType {
+    /// Returns the machine-readable identifier for this encoder type.
+    ///
+    /// The returned string is used in JSON metadata and OBS config files.
+    /// It follows snake_case convention (e.g. `"nvenc_hevc"`, `"x264"`)
+    /// and is stable across versions so downstream parsers can rely on it.
     pub fn id(&self) -> &str {
         match self {
             VideoEncoderType::X264 => "x264",
