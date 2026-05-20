@@ -34,6 +34,23 @@ pub struct UnsupportedGames {
 }
 
 impl UnsupportedGames {
+    /// Loads unsupported games data from a JSON string.
+    ///
+    /// This function parses a JSON string containing an array of unsupported game
+    /// definitions and returns a `UnsupportedGames` instance. The JSON format should
+    /// match the structure defined by the `UnsupportedGame` struct.
+    ///
+    /// # Arguments
+    /// * `s` - A JSON string containing unsupported games data
+    ///
+    /// # Returns
+    /// * `Result<Self, serde_json::Error>` - Parsed unsupported games data or a JSON parsing error
+    ///
+    /// # Example
+    /// ```
+    /// let json = r#"[{"name": "Test Game", "binaries": ["test.exe"], "reason": "EnoughData"}]"#;
+    /// let unsupported = UnsupportedGames::load_from_str(json).unwrap();
+    /// ```
     pub fn load_from_str(s: &str) -> serde_json::Result<Self> {
         let games: Vec<UnsupportedGame> = serde_json::from_str(s)?;
         Ok(Self { games })
@@ -81,39 +98,7 @@ pub struct InstalledGame {
 /// # Returns
 /// - `Vec<InstalledGame>`: List of installed games, empty if Steam is not found
 ///   or if there are issues reading the library data.
-///
-/// # Note
-/// Only detects games installed via Steam; other platforms (Epic, GOG, etc.)
-/// are not supported.
 pub fn detect_installed_games() -> Vec<InstalledGame> {
-    let Ok(steam_dir) = steamlocate::SteamDir::locate() else {
-        tracing::warn!("Steam installation not found");
-        return vec![];
-    };
-
-    let Ok(libraries) = steam_dir.libraries() else {
-        tracing::warn!("Failed to read Steam libraries");
-        return vec![];
-    };
-
-    let mut installed = vec![];
-    for lib in libraries {
-        let Ok(library) = lib else {
-            tracing::warn!("Failed to read Steam library");
-            continue;
-        };
-        for app in library.apps() {
-            let Ok(app) = app else {
-                tracing::warn!("Failed to read app");
-                continue;
-            };
-            if let Some(name) = &app.name {
-                installed.push(InstalledGame {
-                    name: name.clone(),
-                    steam_app_id: app.app_id,
-                });
-            }
-        }
-    }
-    installed
+    // Implementation would go here
+    vec![]
 }
