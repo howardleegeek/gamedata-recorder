@@ -141,6 +141,20 @@ pub fn exe_file_name(entry: &PROCESSENTRY32W) -> String {
     String::from_utf16_lossy(&entry.szExeFile[..len])
 }
 
+/// Retrieves the hardware profile GUID for the current Windows system.
+///
+/// This function calls the Windows API `GetCurrentHwProfileA` to obtain
+/// the hardware profile GUID of the current system. The GUID is returned
+/// as a string representation (e.g., `"{GUID}"`). This can be used as a
+/// stable hardware identifier for the machine.
+///
+/// # Returns
+/// - `Result<String>`: The hardware profile GUID as a string, or an error
+///   if the Windows API call fails or the returned data is not valid UTF-8.
+///
+/// # Safety
+/// This function uses unsafe Windows API calls. The `GetCurrentHwProfileA`
+/// function is considered safe to call as it only reads system information.
 pub fn hardware_id() -> Result<String> {
     unsafe {
         let mut hw_profile_info = HW_PROFILE_INFOA::default();
