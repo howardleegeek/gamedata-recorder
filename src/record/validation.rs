@@ -264,10 +264,10 @@ fn resolve_lint_script() -> Option<PathBuf> {
 /// var, then `python3` (POSIX dev hosts), then `python.exe` /
 /// `python` (Windows).
 fn resolve_python() -> String {
-    if let Ok(p) = std::env::var("OYSTER_PYTHON") {
-        if !p.is_empty() {
-            return p;
-        }
+    if let Ok(p) = std::env::var("OYSTER_PYTHON")
+        && !p.is_empty()
+    {
+        return p;
     }
     if cfg!(windows) {
         "python".to_string()
