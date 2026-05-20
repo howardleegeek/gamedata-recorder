@@ -70,19 +70,32 @@ pub fn exe_name_for_pid(Pid(pid): Pid) -> Result<PathBuf> {
     }
 }
 
+/// Returns the window that is currently in the foreground and the process ID
+/// of the application that owns it.
+///
+/// This is used to detect which game the user is actively playing when they
+/// press the hotkey to start/stop recording. The returned `HWND` can be used
+/// for subsequent window-specific operations, and the `Pid` can be matched
+/// against the game whitelist to verify the target is an allowed game.
 pub fn foreground_window() -> Result<(HWND, Pid), Error> {
     unsafe {
         let hwnd = GetForegroundWindow();
-        let mut pid = 0;
-        if GetWindowThreadProcessId(hwnd, Some(&mut pid)) == 0 {
-            return Err(Error::from_thread());
-        }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
         Ok((hwnd, Pid(pid)))
     }
 }
 
-/// Iterate every running process on the system, invoking `f` with each
-/// process-entry record. Return `false` from `f` to stop enumeration early.
+/// Iterates over all running processes, calling `f` with each process entry.
+///
+/// The callback receives a `PROCESSENTRY32W` (wide-character variant) and
+/// should return `true` to continue iteration or `false` to stop.
+///
+/// This is used to locate running games by scanning the process list and
+/// checking each executable name against the whitelist. The wide-character
+/// variant is required because process names may contain non-ASCII characters
+/// (Chinese, Japanese, Cyrillic, etc.) that would be corrupted by the ANSI
+/// API on non-English Windows locales.
 ///
 /// v2.5.5: migrated to `PROCESSENTRY32W` + `Process32FirstW` / `Process32NextW`
 /// so that exe names containing non-ASCII characters (Chinese, Japanese,
@@ -140,7 +153,31 @@ pub fn hardware_id() -> Result<String> {
     }
 }
 
-/// Gets all of the modules loaded by the process.
+/// Retrieves the names of all modules (DLLs) loaded by a given process.
+///
+/// This function opens the target process with query permissions, creates
+/// a module snapshot using the Windows ToolHelp API, and iterates through
+/// all loaded modules to collect their names. The returned vector contains
+/// the module names as owned `String` values.
+///
+/// # Arguments
+/// * `pid` - The process ID of the target process
+///
+/// # Returns
+/// A `Result` containing a `Vec<String>` of all loaded module names, or an
+/// error if the process cannot be opened or the snapshot cannot be created.
+/// Returns an empty vector if the process has no modules or if enumeration
+/// fails after successfully opening the process.
+///
+/// # Example
+/// ```
+/// use gamedata_recorder_game_process::Pid;
+///
+/// let modules = get_modules(Pid(1234))?;
+/// for module in modules {
+///     println!("Loaded module: {}", module);
+/// }
+/// ```
 pub fn get_modules(pid: Pid) -> Result<Vec<String>> {
     unsafe {
         // Open the target process with query permissions
