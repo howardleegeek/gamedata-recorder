@@ -45,6 +45,12 @@ pub fn does_process_exist(Pid(pid): Pid) -> Result<bool, Error> {
     }
 }
 
+/// Returns the full executable path for a process identified by its PID.
+///
+/// Uses `QueryFullProcessImageNameW` (UTF-16 wide-char variant) to correctly
+/// handle paths containing non-ASCII characters (e.g., Chinese characters on
+/// localized Windows installations). Returns a `PathBuf` with the resolved
+/// executable path, or an error if the process cannot be opened.
 pub fn exe_name_for_pid(Pid(pid): Pid) -> Result<PathBuf> {
     // v2.5.5: wide-char (UTF-16) variant. The v2.5.4 implementation used
     // `QueryFullProcessImageNameA`, which returns ANSI bytes in the current
