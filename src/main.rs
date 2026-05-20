@@ -18,6 +18,10 @@ mod ui;
 mod upload;
 mod util;
 mod validation;
+mod tray;
+mod auth;
+mod updater;
+mod notify;
 
 use crate::app_state::RwLockExt as _;
 use crate::util::log_rotation::RotatingFileWriter;
@@ -30,6 +34,10 @@ use std::sync::Arc;
 use crate::system::ensure_single_instance::ensure_single_instance;
 
 fn main() -> Result<()> {
+    tray::start();
+    auth::ensure_logged_in().await.ok();
+    updater::spawn_check_loop(std::time::Duration::from_secs(86400));
+    notify::spawn_income_poller("20:00");
     // Security hardening: restrict DLL search to a safe set BEFORE any other
     // Win32 call. Must run first — once any Win32 API has run, the loader's
     // per-process search list may already be fixed.

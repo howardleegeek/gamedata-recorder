@@ -160,6 +160,12 @@ rfd = "0.14"
 steamlocate.workspace = true
 tempfile.workspace = true
 
+oauth2 = "5.0"
+keyring = "3.6"
+notify-rust = "4.11"
+ed25519-dalek = "2.2"
+self_update = { version = "0.41", default-features = false, features = ["rustls"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 
@@ -168,7 +174,3 @@ embed-manifest = "1.3.1"
 
 [patch.'https://github.com/RustAudio/cpal']
 cpal = { git = "https://github.com/philpax/cpal.git", branch = "audio-device-fix-updated" }
-
-# === Wave 2 Rust spec deps (S12/S13/S15/S16) — to be wired into [dependencies] manually ===
-# See feat/rust-tray-v2 branch + branch feat/rust-tray-oauth-updater-notify for full Cargo.toml.
-# Modules src/{tray,auth,updater,notify}/ added — main.rs wiring TBD in follow-up PR.
