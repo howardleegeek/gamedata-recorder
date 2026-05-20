@@ -1050,6 +1050,25 @@ impl KbmCapture {
         }
     }
 
+    /// Runs the Windows message pump to process input events.
+    ///
+    /// This function enters a message loop that:
+    /// 1. Retrieves Windows messages via `GetMessageA`
+    /// 2. Processes `WM_INPUT` messages for Raw Input events
+    /// 3. Drains events from the low-level keyboard hook channel
+    /// 4. Calls the provided callback for each input event
+    ///
+    /// The loop continues until:
+    /// - `WM_QUIT` is received (returns `Ok(())`)
+    /// - `GetMessageA` fails (returns `Err`)
+    /// - The callback returns `false` (returns `Ok(())`)
+    ///
+    /// # Arguments
+    /// * `event_callback` - Callback invoked for each input event.
+    ///   Return `true` to continue processing, `false` to stop.
+    ///
+    /// # Returns
+    /// * `Result<()>` - `Ok(())` on normal exit, `Err` on system error.
     pub fn run_queue(&mut self, mut event_callback: impl FnMut(Event) -> bool) -> Result<()> {
         unsafe {
             let mut msg = MSG::default();
