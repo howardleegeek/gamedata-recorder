@@ -146,11 +146,20 @@ reqwest = { version = "0.12.23", features = ["json", "stream"] }
 
 tar = "0.4.44"
 opener = { version = "0.8", features = ["reveal"] }
+keyring = "3.6.1"
+base64 = "0.22"
+rand = "0.8"
+urlencoding = "2.1"
+
 sha256 = "1.6.0"
 sha2 = "0.10"
 backoff = { version = "0.4", features = ["tokio"] }
 rfd = "0.14"
 steamlocate.workspace = true
+
+
+[features]
+mock-oauth = []
 
 [dev-dependencies]
 tempfile = "3"

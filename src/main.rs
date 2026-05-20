@@ -1,5 +1,5 @@
 #![cfg_attr(
-    all(target_os = "windows", not(debug_assertions),),
+    all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
 )]
 #![deny(clippy::uninlined_format_args)]
@@ -13,7 +13,7 @@ mod play_time;
 mod record;
 mod system;
 mod tokio_thread;
-mod ui;
+mod tray;
 mod upload;
 mod util;
 mod validation;
@@ -21,26 +21,13 @@ mod validation;
 use crate::app_state::RwLockExt as _;
 use crate::util::log_rotation::RotatingFileWriter;
 use color_eyre::Result;
-use egui_wgpu::wgpu;
 use tracing_subscriber::{Layer, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicBool};
 
 use crate::system::ensure_single_instance::ensure_single_instance;
 
 fn main() -> Result<()> {
-    // Security hardening: restrict DLL search to a safe set BEFORE any other
-    // Win32 call. Must run first — once any Win32 API has run, the loader's
-    // per-process search list may already be fixed.
-    //
-    // v2.5.11: we used to pass ONLY `LOAD_LIBRARY_SEARCH_SYSTEM32`, but that
-    // broke OBS's `LoadLibrary("libobs-d3d11.dll")` because the app-directory
-    // fell out of the search path entirely and the bundled DLLs ship next to
-    // the exe in the release zip. The correct hardening is
-    // `LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`, which is equivalent to
-    // `SYSTEM32 | APPLICATION_DIR | USER_DIRS` — it still excludes the
-    // current-working-directory (which is the actual DLL-hijack vector) but
-    // keeps SxS / app-local DLL loading functional.
     #[cfg(windows)]
     unsafe {
         use windows::Win32::System::LibraryLoader::{
@@ -49,7 +36,7 @@ fn main() -> Result<()> {
         let _ = SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     }
 
-    // Set up logging, including to file with rotation (20MB max, 3 files)
+    // --- logging ---
     let log_dir = config::get_persistent_dir()?;
     let log_path = log_dir.join("gamedata-recorder-debug.log");
     let log_file =
@@ -58,14 +45,7 @@ fn main() -> Result<()> {
     let mut env_filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
         .from_env()?;
-    for crate_name in [
-        "wgpu_hal",
-        "symphonia_core",
-        "symphonia_bundle_mp3",
-        "egui_window_glfw_passthrough",
-        "egui_overlay",
-        "egui_render_glow",
-    ] {
+    for crate_name in ["wgpu_hal", "symphonia_core", "symphonia_bundle_mp3"] {
         if let Ok(directive) = format!("{crate_name}=warn").parse() {
             env_filter = env_filter.add_directive(directive);
         }
@@ -87,15 +67,6 @@ fn main() -> Result<()> {
 
     tracing::debug!("Logging initialized, writing to {:?}", log_path);
 
-    tracing::info!(
-        "GameData Recorder v{} ({})",
-        env!("CARGO_PKG_VERSION"),
-        git_version::git_version!()
-    );
-
-    // CI mode banner. Emitted as `warn` so it's hard to miss in logs — every
-    // safety gate (consent, whitelist) is bypassed when this is active and
-    // anyone reading the log needs to know that.
     if config::ci_mode() {
         let out = config::ci_output_dir_override()
             .map(|p| p.display().to_string())
@@ -109,44 +80,26 @@ fn main() -> Result<()> {
 
     color_eyre::install()?;
 
-    // Ensure only one instance is running
     tracing::debug!("Checking for single instance");
     ensure_single_instance()?;
     tracing::debug!("Single instance check passed");
 
-    tracing::debug!("Creating WGPU instance and enumerating adapters");
-    let wgpu_instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-    let adapter_infos = wgpu_instance
-        .enumerate_adapters(wgpu::Backends::DX12)
-        .into_iter()
-        .map(|a| a.get_info())
-        .collect::<Vec<_>>();
-    tracing::info!("Available adapters: {adapter_infos:?}");
-
-    tracing::debug!("Creating communication channels");
+    // --- channels ---
     let (async_request_tx, async_request_rx) = tokio::sync::mpsc::channel(200);
     let (ui_update_tx, ui_update_rx) = app_state::UiUpdateSender::build();
-    // A broadcast channel is used as older entries will be dropped if the channel is full.
     let (ui_update_unreliable_tx, ui_update_unreliable_rx) = tokio::sync::broadcast::channel(200);
-    // Upload trigger channel: unbounded so that stop-recording callers never block.
-    // The upload worker task owns the receiver and drains it with dedup.
     let (upload_trigger_tx, upload_trigger_rx) =
         tokio::sync::mpsc::unbounded_channel::<upload::UploadTrigger>();
-    tracing::debug!("Initializing app state");
+
     let app_state = Arc::new(app_state::AppState::new(
-        async_request_tx,
+        async_request_tx.clone(),
         ui_update_tx,
         ui_update_unreliable_tx,
-        adapter_infos,
+        Vec::new(), // no GPU adapters needed without egui
         upload_trigger_tx,
     ));
-    tracing::debug!("App state initialized");
 
-    // CI mode: redirect recordings to GAMEDATA_OUTPUT_DIR (in-memory only;
-    // never persisted to disk). All downstream readers go through
-    // `app_state.config.preferences.recording_location`, so a single mutation
-    // here propagates to recorder, upload scanner, and UI without touching any
-    // read site.
+    // CI mode override
     if let Some(ci_dir) = config::ci_output_dir_override() {
         if let Err(e) = std::fs::create_dir_all(&ci_dir) {
             tracing::warn!(
@@ -165,12 +118,13 @@ fn main() -> Result<()> {
             "CI mode: overriding recording_location"
         );
         config.preferences.recording_location = ci_dir;
-        // NB: no `config.save()` — the override is session-only.
     }
 
-    // launch tokio (which hosts the recorder) on seperate thread
-    tracing::debug!("Spawning tokio thread");
+    // --- tokio daemon thread ---
     let (stopped_tx, stopped_rx) = tokio::sync::broadcast::channel(1);
+    let running = Arc::new(AtomicBool::new(true));
+
+    let daemon_running = running.clone();
     let tokio_thread = std::thread::spawn({
         let app_state = app_state.clone();
         let stopped_tx = stopped_tx.clone();
@@ -188,38 +142,71 @@ fn main() -> Result<()> {
                 tracing::error!("Error in tokio thread: {e}");
             }
 
-            // note: this is usually the ctrl+c shut down path, but its a known bug that if the app is minimized to tray,
-            // killing it via ctrl+c will not kill the app immediately, the MainApp will not receive the stop signal until
-            // you click on the tray icon to re-open it, triggering the main loop repaint to run. Killing it via tray icon quit
-            // works as we just force the app to reopen for a split second to trigger refresh, but no clean way to implement this
-            // from here, so we just have to live with it for now.
             tracing::info!("Tokio thread shut down, propagating stop signal");
-            match stopped_tx.send(()) {
-                Ok(_) => {}
-                Err(e) => tracing::error!("Failed to send stop signal: {}", e),
-            };
+            let _ = stopped_tx.send(());
             app_state
                 .ui_update_tx
                 .send(app_state::UiUpdate::ForceUpdate)
                 .ok();
             tracing::info!("Tokio thread shut down complete");
+            daemon_running.store(false, std::sync::atomic::Ordering::Relaxed);
         }
     });
 
-    tracing::debug!("Starting UI");
-    ui::start(
-        wgpu_instance,
-        app_state,
-        ui_update_rx,
-        ui_update_unreliable_rx,
-        stopped_tx,
-        stopped_rx,
+    // --- tray icon ---
+    let tray_running = running.clone();
+    let tray = tray::Tray::new(
+        // Open dashboard → open recordings folder
+        {
+            let async_request_tx = async_request_tx.clone();
+            move || {
+                let _ = async_request_tx.try_send(app_state::AsyncRequest::OpenDataDump);
+            }
+        },
+        // Pause → toggle recording
+        {
+            let app_state = app_state.clone();
+            Arc::new(move || {
+                let state = app_state.state.read().unwrap();
+                let is_recording = state.is_recording();
+                drop(state);
+                if is_recording {
+                    let _ = async_request_tx.try_send(app_state::AsyncRequest::UpdateRecordingState(false));
+                } else {
+                    let _ = async_request_tx.try_send(app_state::AsyncRequest::UpdateRecordingState(true));
+                }
+            })
+        },
+        // Exit
+        Arc::new(move || {
+            tracing::info!("Tray exit requested");
+            let _ = stopped_tx.send(());
+            tray_running.store(false, std::sync::atomic::Ordering::Relaxed);
+        }),
     )?;
-    tracing::info!("UI thread shut down, joining tokio thread");
+
+    // --- state-sync loop: poll app_state and update tray icon ---
+    let sync_running = running.clone();
+    let sync_thread = std::thread::spawn(move || {
+        while sync_running.load(std::sync::atomic::Ordering::Relaxed) {
+            let state = app_state.state.read().unwrap();
+            let recording = state.is_recording();
+            let uploading = app_state.upload_in_progress.load(std::sync::atomic::Ordering::Relaxed);
+            drop(state);
+            tray.update_state(recording, uploading);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
+
+    // --- tray event loop (blocks until exit) ---
+    tray.run_until_exit(&running);
+
+    tracing::info!("Tray event loop exited, joining threads");
+    let _ = sync_thread.join();
     if let Err(e) = tokio_thread.join() {
         tracing::error!("Tokio thread panicked: {e:?}");
     }
-    tracing::info!("Tokio thread joined, shutting down");
+    tracing::info!("All threads joined, shutting down");
 
     Ok(())
 }
