@@ -28,6 +28,14 @@ pub struct HighPrecisionTimer {
 }
 
 impl HighPrecisionTimer {
+    /// Creates a new high-precision timer, capturing the current
+    /// `QueryPerformanceCounter` value (Windows) or `std::time::Instant`
+    /// (other platforms) as the reference start point.
+    ///
+    /// On Windows the timer also records the initial `GetMessageTime`
+    /// value so that elapsed timestamps can be correlated with the
+    /// Windows message queue. Falls back to sensible defaults if the
+    /// QPC query fails (extremely rare on modern Windows).
     pub fn new() -> Self {
         #[cfg(target_os = "windows")]
         {
