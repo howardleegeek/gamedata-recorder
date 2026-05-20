@@ -37,3 +37,8 @@
 - Type: A
 - Target: crates/constants/src/unsupported_games.rs (UnsupportedGames::load_from_str)
 - Commit: 852ba4f2
+
+## Round @ 2026-05-20T16:30:00Z
+- Type: C
+- Target: validation-tests (src/record/validation.rs)
+- Commit: 32e299fe
