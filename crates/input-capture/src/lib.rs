@@ -205,7 +205,6 @@ impl InputCapture {
     /// The returned `HashMap` maps each gamepad's unique `GamepadId` to its
     /// `GamepadMetadata` (device name, capabilities, etc.). Suitable for
     /// serialization into `metadata.json` or for real-time UI display.
-
     pub fn gamepads(&self) -> HashMap<GamepadId, GamepadMetadata> {
         self.gamepads.read().unwrap().clone()
     }
