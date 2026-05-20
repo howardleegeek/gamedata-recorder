@@ -199,6 +199,13 @@ impl InputCapture {
         }
     }
 
+    /// Returns a snapshot of all connected gamepads with their metadata.
+    ///
+    /// Reads the shared gamepad map under a read lock and clones the result.
+    /// The returned `HashMap` maps each gamepad's unique `GamepadId` to its
+    /// `GamepadMetadata` (device name, capabilities, etc.). Suitable for
+    /// serialization into `metadata.json` or for real-time UI display.
+
     pub fn gamepads(&self) -> HashMap<GamepadId, GamepadMetadata> {
         self.gamepads.read().unwrap().clone()
     }
