@@ -99,6 +99,11 @@ pub struct ActiveGamepads {
     pub devices: HashMap<GamepadId, ActiveGamepad>,
 }
 impl ActiveGamepads {
+    /// Returns a mutable reference to the `ActiveGamepad` for the given `id`,
+    /// inserting a default-constructed one if it does not yet exist.
+    ///
+    /// This is the primary entry point for recording button presses, analog
+    /// values, and axis changes from a newly-seen gamepad during a session.
     pub fn get_or_insert(&mut self, id: GamepadId) -> &mut ActiveGamepad {
         self.devices.entry(id).or_insert_with(|| ActiveGamepad {
             digital: HashSet::new(),
