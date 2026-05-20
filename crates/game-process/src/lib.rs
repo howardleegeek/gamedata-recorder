@@ -27,6 +27,15 @@ pub use windows;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pid(pub u32);
 
+/// Checks whether a process with the given PID is still running.
+///
+/// Opens the process with `PROCESS_QUERY_LIMITED_INFORMATION` access and
+/// checks if the exit code is `STILL_ACTIVE`. Returns `true` if the process
+/// is running, `false` if it has exited. Returns an error if the process
+/// cannot be opened (e.g., access denied or PID does not exist).
+///
+/// This is used by the recorder to verify that a game process is still
+/// alive before attempting to capture from it.
 pub fn does_process_exist(Pid(pid): Pid) -> Result<bool, Error> {
     unsafe {
         let process = Owned::new(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)?);
