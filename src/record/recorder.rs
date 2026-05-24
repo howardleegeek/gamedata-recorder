@@ -478,17 +478,27 @@ pub fn get_foregrounded_game() -> Result<Option<(String, game_process::Pid, HWND
         return find_running_game();
     }
 
-    // CI mode: any foreground process that isn't blacklisted counts as "the
-    // game". The harness launches `test_game.exe` (D3D11) which is not in
-    // GAME_WHITELIST, so without this bypass the recorder would idle. We
-    // still require a non-null HWND (foreground_window already enforced
-    // that) and we still skip our own process via the blacklist above.
+    let exe_stem = exe_lower.strip_suffix(".exe");
+
+    // CI mode: prefer known game processes over arbitrary foreground helper
+    // windows. On self-hosted runners the foreground can be the runner,
+    // PowerShell, or our own tray UI between focus changes; falling back to a
+    // whitelisted running game keeps auto-record pinned to Minecraft/test_game
+    // instead of accidentally sampling the runner desktop.
     if crate::config::ci_mode() {
+        if let Some(stem) = exe_stem
+            && (stem == "test_game" || constants::GAME_WHITELIST.iter().any(|g| stem == *g))
+        {
+            return Ok(Some((exe_name, pid, hwnd)));
+        }
+        if let Some(running_game) = find_running_game()? {
+            return Ok(Some(running_game));
+        }
         return Ok(Some((exe_name, pid, hwnd)));
     }
 
     // Validate executable has .exe extension and strip it for whitelist comparison
-    let Some(exe_stem) = exe_lower.strip_suffix(".exe") else {
+    let Some(exe_stem) = exe_stem else {
         // Not a .exe in foreground — try scanning all processes
         return find_running_game();
     };

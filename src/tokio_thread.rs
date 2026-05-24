@@ -1598,7 +1598,12 @@ impl State {
 
         // Sample the current client rect. If we can't, fail closed — it's
         // safer to keep waiting than to pin OBS to an unknown resolution.
-        let hwnd = unsafe { GetForegroundWindow() };
+        let detected_hwnd = HWND(game.hwnd_raw as *mut core::ffi::c_void);
+        let hwnd = if detected_hwnd.is_invalid() {
+            unsafe { GetForegroundWindow() }
+        } else {
+            detected_hwnd
+        };
         if hwnd.is_invalid() {
             tracing::debug!(
                 game = ?exe_name,
@@ -1966,6 +1971,7 @@ fn get_foregrounded_game(
 
     Some(ForegroundedGame {
         exe_name: Some(exe_name),
+        hwnd_raw: hwnd.0 as isize,
         unsupported_reason,
     })
 }

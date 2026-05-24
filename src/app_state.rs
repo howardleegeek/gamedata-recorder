@@ -120,6 +120,10 @@ pub struct UploadFilters {
 #[derive(Clone, PartialEq)]
 pub struct ForegroundedGame {
     pub exe_name: Option<String>,
+    /// Raw HWND value for the detected game window. Stored as an integer so
+    /// AppState remains Send + Sync; convert back to HWND only on the Windows
+    /// thread that samples the window.
+    pub hwnd_raw: isize,
     pub unsupported_reason: Option<String>,
 }
 impl ForegroundedGame {

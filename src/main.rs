@@ -28,9 +28,21 @@ use std::sync::Arc;
 use crate::system::ensure_single_instance::ensure_single_instance;
 
 fn main() -> Result<()> {
-    // Security hardening: restrict DLL search to a safe set BEFORE any other
-    // Win32 call. Must run first — once any Win32 API has run, the loader's
-    // per-process search list may already be fixed.
+    // Suppress Windows' process-modal loader / GP-fault dialogs for runtime
+    // DLL failures. We still log normal Rust/OBS errors, but a background tray
+    // process must never interrupt a user's game or an unattended smoke runner
+    // with a blocking "Application Error" box.
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Diagnostics::Debug::{
+            SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX, SetErrorMode,
+        };
+        let _ =
+            SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    }
+
+    // Security hardening: restrict DLL search to a safe set before loading any
+    // app-local runtime DLLs.
     //
     // v2.5.11: we used to pass ONLY `LOAD_LIBRARY_SEARCH_SYSTEM32`, but that
     // broke OBS's `LoadLibrary("libobs-d3d11.dll")` because the app-directory
