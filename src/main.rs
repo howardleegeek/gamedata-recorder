@@ -7,18 +7,14 @@
 mod api;
 mod app_state;
 mod assets;
-mod auth;
 mod config;
 mod config_bitrate;
-mod notify;
 mod output_types;
 mod play_time;
 mod record;
 mod system;
 mod tokio_thread;
-mod tray;
 mod ui;
-mod updater;
 mod upload;
 mod util;
 mod validation;
@@ -34,10 +30,6 @@ use std::sync::Arc;
 use crate::system::ensure_single_instance::ensure_single_instance;
 
 fn main() -> Result<()> {
-    tray::start();
-    auth::ensure_logged_in().ok();
-    updater::spawn_check_loop(std::time::Duration::from_secs(86400));
-    notify::spawn_income_poller("20:00");
     // Security hardening: restrict DLL search to a safe set BEFORE any other
     // Win32 call. Must run first — once any Win32 API has run, the loader's
     // per-process search list may already be fixed.
