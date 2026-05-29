@@ -681,6 +681,26 @@ unsafe extern "system" fn enum_windows_proc(
         }
     }
 
+    // v2.6.1: reject launcher / storefront surfaces in BOTH the strict-PID pass
+    // and the GLFW class/title fallback. The Mojang launcher process is literally
+    // named `Minecraft.exe` and is whitelisted as "minecraft", so without this the
+    // strict-PID pass locks onto its "Minecraft Launcher" window (observed on a
+    // tester rig: title="Minecraft Launcher", area=1308000) and OBS records the
+    // launcher UI instead of the game — producing empty 261-byte mp4 stubs. The
+    // real Java game window is class "GLFW30" titled "Minecraft <version>" with no
+    // launcher substring, so it still passes. Mirrors the foreground-window filter
+    // in `find_window_for_pid`; previously that filter was the ONLY place this list
+    // was applied, and the EnumWindows path skipped it entirely.
+    {
+        let title_lower = window_title(hwnd).to_lowercase();
+        if LAUNCHER_TITLE_SUBSTRINGS
+            .iter()
+            .any(|needle| title_lower.contains(needle))
+        {
+            return BOOL(1);
+        }
+    }
+
     if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
         return BOOL(1);
     }
