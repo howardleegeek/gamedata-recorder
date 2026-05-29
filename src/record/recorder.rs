@@ -588,12 +588,58 @@ fn window_title(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..n as usize])
 }
 
+/// Win32 window *class* name (e.g. `"GLFW30"` for LWJGL3/GLFW games such as
+/// Minecraft Java). Mirrors `window_title` but calls `GetClassNameW`, which
+/// has the same `(HWND, &mut [u16]) -> i32` shape in the `windows` crate and
+/// returns the number of UTF-16 code units copied (excluding the NUL).
+fn window_class_name(hwnd: HWND) -> String {
+    use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+    // Safety: GetClassNameW is a plain Win32 call; we give it a valid buffer
+    // and copy out at most 256 UTF-16 code units (class names are short).
+    let mut buf = [0u16; 256];
+    let n = unsafe { GetClassNameW(hwnd, &mut buf) };
+    if n <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..n as usize])
+}
+
+/// True if `hwnd` looks like a GLFW/LWJGL3 game window such as Minecraft Java.
+/// Used only as a *fallback* when the strict-PID enumeration finds nothing —
+/// the visible Minecraft window is frequently owned by a sibling/child PID
+/// (the official launcher spawns `javaw.exe`, window/thread ownership differs),
+/// so PID matching misses it and auto-record never fires.
+///
+/// NOTE: the recorder's own egui overlay is *also* a GLFW window with class
+/// `"GLFW30"`, so this must only ever be called for windows that have already
+/// been confirmed not to belong to our own process — otherwise we'd re-trigger
+/// the v2.5.3 self-capture bug.
+fn looks_like_minecraft_window(hwnd: HWND) -> bool {
+    if window_class_name(hwnd) == "GLFW30" {
+        return true;
+    }
+    window_title(hwnd).to_lowercase().contains("minecraft")
+}
+
 /// Shared state for the EnumWindows callback. We can't capture Rust closures
 /// from `unsafe extern "system" fn`, so we thread everything through a
 /// stack-allocated context pointer.
 struct EnumContext {
     target_pid: u32,
+    /// Our own process id. In the class/title fallback pass we iterate *every*
+    /// top-level window regardless of owner, so we must explicitly skip any
+    /// window owned by ourselves — the recorder's overlay is a `"GLFW30"`
+    /// window too and would otherwise be mistaken for Minecraft (self-capture).
+    own_pid: u32,
+    /// When `true`, also accept a window that *looks like* a GLFW/LWJGL3 game
+    /// (Minecraft Java) by class/title even if its owning PID differs from
+    /// `target_pid`. Used only as a fallback pass; the strict-PID pass leaves
+    /// this `false`.
+    match_mc_by_class_title: bool,
     found: HWND,
+    /// Owning PID of `found`, recorded so the caller can log what it locked
+    /// onto (useful when it differs from `target_pid` in the fallback path).
+    found_pid: u32,
     candidate_area: i64,
 }
 
@@ -613,9 +659,28 @@ unsafe extern "system" fn enum_windows_proc(
     let ctx = unsafe { &mut *(lparam.0 as *mut EnumContext) };
     let mut pid: u32 = 0;
     let _ = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-    if pid != ctx.target_pid {
-        return BOOL(1); // continue enumeration
+
+    // Decide whether this window is a candidate. The primary rule is the strict
+    // PID match (unchanged). The fallback rule — only enabled when
+    // `match_mc_by_class_title` is set — additionally accepts a GLFW/LWJGL3
+    // game window (Minecraft Java) whose owning PID differs from the target,
+    // which happens because the launcher spawns `javaw.exe` and the visible
+    // render surface is owned by a sibling/child PID.
+    let pid_match = pid == ctx.target_pid;
+    if !pid_match {
+        if !ctx.match_mc_by_class_title {
+            return BOOL(1); // continue enumeration
+        }
+        // Never let the fallback capture our own UI: the recorder's overlay is
+        // a `"GLFW30"` window and would otherwise match here (v2.5.3 bug).
+        if pid == ctx.own_pid {
+            return BOOL(1);
+        }
+        if !looks_like_minecraft_window(hwnd) {
+            return BOOL(1);
+        }
     }
+
     if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
         return BOOL(1);
     }
@@ -624,11 +689,17 @@ unsafe extern "system" fn enum_windows_proc(
         return BOOL(1);
     }
     let area = (rect.right - rect.left) as i64 * (rect.bottom - rect.top) as i64;
-    // Keep the largest visible window belonging to this PID — that's almost
-    // always the game's render surface (menus/HUD windows are smaller).
+    // Require a non-degenerate client rect — a 0x0 window is never the render
+    // surface and would also fail the downstream auto-record size gate anyway.
+    if area <= 0 {
+        return BOOL(1);
+    }
+    // Keep the largest visible window — that's almost always the game's render
+    // surface (menus/HUD windows are smaller).
     if area > ctx.candidate_area {
         ctx.candidate_area = area;
         ctx.found = hwnd;
+        ctx.found_pid = pid;
     }
     BOOL(1)
 }
@@ -665,7 +736,10 @@ fn find_window_for_pid(pid: game_process::Pid) -> HWND {
     if target_pid != own_pid {
         let mut ctx = EnumContext {
             target_pid,
+            own_pid,
+            match_mc_by_class_title: false,
             found: HWND::default(),
+            found_pid: 0,
             candidate_area: 0,
         };
         let lparam = LPARAM(&mut ctx as *mut EnumContext as isize);
@@ -673,8 +747,10 @@ fn find_window_for_pid(pid: game_process::Pid) -> HWND {
         if ctx.found.0 != std::ptr::null_mut() && ctx.candidate_area > 0 {
             tracing::info!(
                 pid = target_pid,
+                window_pid = ctx.found_pid,
                 hwnd = ?ctx.found,
                 title = %window_title(ctx.found),
+                class = %window_class_name(ctx.found),
                 area = ctx.candidate_area,
                 "Found real game window by PID enumeration"
             );
@@ -684,7 +760,44 @@ fn find_window_for_pid(pid: game_process::Pid) -> HWND {
             pid = target_pid,
             "PID enumeration found no visible windows — game may still be \
              starting up or running in a way that hides its HWND from \
-             EnumWindows. Falling back to foreground-window check."
+             EnumWindows (e.g. Minecraft Java's GLFW window is owned by a \
+             sibling/child PID). Trying GLFW/Minecraft class+title fallback."
+        );
+
+        // 1b. Minecraft Java fallback: the official launcher spawns
+        //     `javaw.exe`, and the visible LWJGL3/GLFW render surface is
+        //     frequently owned by a *different* PID than the one our process
+        //     scan reported. Re-enumerate, this time accepting any visible,
+        //     non-degenerate window whose class is `"GLFW30"` or whose title
+        //     contains "minecraft" — while still hard-excluding our own PID so
+        //     we never capture the recorder's own GLFW overlay.
+        let mut mc_ctx = EnumContext {
+            target_pid,
+            own_pid,
+            match_mc_by_class_title: true,
+            found: HWND::default(),
+            found_pid: 0,
+            candidate_area: 0,
+        };
+        let mc_lparam = LPARAM(&mut mc_ctx as *mut EnumContext as isize);
+        let _ = unsafe { EnumWindows(Some(enum_windows_proc), mc_lparam) };
+        if mc_ctx.found.0 != std::ptr::null_mut() && mc_ctx.candidate_area > 0 {
+            tracing::info!(
+                pid = target_pid,
+                window_pid = mc_ctx.found_pid,
+                hwnd = ?mc_ctx.found,
+                title = %window_title(mc_ctx.found),
+                class = %window_class_name(mc_ctx.found),
+                area = mc_ctx.candidate_area,
+                "Found GLFW/Minecraft game window by class/title fallback \
+                 (owning PID differs from scanned game PID)"
+            );
+            return mc_ctx.found;
+        }
+        tracing::warn!(
+            pid = target_pid,
+            "GLFW/Minecraft class+title fallback also found no window — \
+             falling back to foreground-window check."
         );
     } else {
         tracing::error!(
