@@ -9,11 +9,23 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// PCI vendor ID for NVIDIA Corporation — used to identify NVIDIA GPUs in
-/// DXGI adapter enumeration. Stable across every NVIDIA GPU ever shipped.
+/// PCI vendor IDs — used to identify GPUs in DXGI adapter enumeration.
+/// Stable across every GPU that vendor has ever shipped.
 const NVIDIA_PCI_VENDOR_ID: u32 = 0x10DE;
+const AMD_PCI_VENDOR_ID: u32 = 0x1002;
+const INTEL_PCI_VENDOR_ID: u32 = 0x8086;
 
-/// Quick probe: does any DX12-capable GPU report NVIDIA as its vendor?
+/// A GPU vendor we can map to a hardware video encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GpuVendor {
+    Nvidia,
+    Amd,
+    Intel,
+}
+
+/// Quick probe: which hardware-encoder-capable GPU vendor does the system
+/// report? Returns the first matching adapter's vendor, or `None` if no
+/// NVIDIA / AMD / Intel adapter is found.
 ///
 /// v2.5.5: rewritten to use direct DXGI adapter enumeration via `wgpu`.
 /// v2.5.4 shelled out to `wmic path win32_VideoController get Name`, but
@@ -24,21 +36,34 @@ const NVIDIA_PCI_VENDOR_ID: u32 = 0x10DE;
 /// adapters at startup (see `src/main.rs` via `wgpu::Instance`), so doing
 /// it here too is essentially free, has no external process dependency,
 /// and works on every modern Windows SKU.
-fn detect_nvidia_gpu() -> Result<bool> {
+///
+/// v2.6.0: generalized from NVIDIA-only (`detect_nvidia_gpu`) to also
+/// recognize AMD (AMF) and Intel (QuickSync). Previously AMD/Intel users
+/// stayed on software X264, which is CPU-bound — confirmed ~1 FPS effective
+/// plus system-wide lag on an AMD Radeon 780M iGPU.
+fn detect_gpu_vendor() -> Result<Option<GpuVendor>> {
     #[cfg(target_os = "windows")]
     {
         use egui_wgpu::wgpu;
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let has_nvidia = instance
+        // Prefer the first adapter that maps to a hardware encoder. wgpu
+        // enumerates discrete adapters ahead of integrated ones, so the
+        // first NVIDIA/AMD/Intel match is the most capable available GPU.
+        let vendor = instance
             .enumerate_adapters(wgpu::Backends::DX12)
             .into_iter()
-            .any(|adapter| adapter.get_info().vendor == NVIDIA_PCI_VENDOR_ID);
-        Ok(has_nvidia)
+            .find_map(|adapter| match adapter.get_info().vendor {
+                NVIDIA_PCI_VENDOR_ID => Some(GpuVendor::Nvidia),
+                AMD_PCI_VENDOR_ID => Some(GpuVendor::Amd),
+                INTEL_PCI_VENDOR_ID => Some(GpuVendor::Intel),
+                _ => None,
+            });
+        Ok(vendor)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Ok(false)
+        Ok(None)
     }
 }
 
@@ -1116,12 +1141,18 @@ impl Config {
         // encode essentially for free; x264 software encoding chews CPU
         // (we saw 1 FPS effective on an AMD iGPU, and NVIDIA users often
         // end up here by default too).
+        //
+        // v2.6.0: extended to AMD (AMF) and Intel (QuickSync). AMD/Intel
+        // users were stuck on software X264 — maxing the CPU and lagging the
+        // whole system (~1 FPS effective on an AMD Radeon 780M). We pick the
+        // H.264 hardware variant for each vendor to mirror the existing
+        // NVIDIA choice (NvEnc, not NvEncHevc) — lowest-risk codec parity.
         if matches!(
             config.preferences.encoder.encoder,
             constants::encoding::VideoEncoderType::X264
         ) {
-            match detect_nvidia_gpu() {
-                Ok(true) => {
+            match detect_gpu_vendor() {
+                Ok(Some(GpuVendor::Nvidia)) => {
                     tracing::info!("NVIDIA GPU detected — upgrading encoder X264 -> NvEnc");
                     config.preferences.encoder.encoder =
                         constants::encoding::VideoEncoderType::NvEnc;
@@ -1129,7 +1160,21 @@ impl Config {
                         tracing::warn!(e=?e, "Failed to persist NvEnc migration");
                     }
                 }
-                Ok(false) => {}
+                Ok(Some(GpuVendor::Amd)) => {
+                    tracing::info!("AMD GPU detected — upgrading encoder X264 -> Amf");
+                    config.preferences.encoder.encoder = constants::encoding::VideoEncoderType::Amf;
+                    if let Err(e) = config.save() {
+                        tracing::warn!(e=?e, "Failed to persist Amf migration");
+                    }
+                }
+                Ok(Some(GpuVendor::Intel)) => {
+                    tracing::info!("Intel GPU detected — upgrading encoder X264 -> Qsv");
+                    config.preferences.encoder.encoder = constants::encoding::VideoEncoderType::Qsv;
+                    if let Err(e) = config.save() {
+                        tracing::warn!(e=?e, "Failed to persist Qsv migration");
+                    }
+                }
+                Ok(None) => {}
                 Err(e) => {
                     tracing::debug!(e=?e, "GPU vendor probe failed, keeping X264");
                 }

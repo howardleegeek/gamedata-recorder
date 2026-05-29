@@ -9,8 +9,8 @@
 //!     `IOCTL_STORAGE_QUERY_PROPERTY` and returns NVMe / SATA SSD / SATA HDD
 //!     / USB / Unknown.
 //!   - `gpu`: was `"Unknown"`/`"Unknown GPU"`; now comes from the DXGI
-//!     adapter list the caller already enumerates (same list the NVENC
-//!     detector in `config.rs::detect_nvidia_gpu` uses).
+//!     adapter list the caller already enumerates (same list the hardware
+//!     encoder detector in `config.rs::detect_gpu_vendor` uses).
 //!   - `cpu`, `ram_gb`, `os`: were pulled from `sysinfo` but dropped the
 //!     per-core and available-memory fields; now emits both with the new
 //!     optional `cpu_physical_cores` / `cpu_logical_cores` /
