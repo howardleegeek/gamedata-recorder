@@ -14,6 +14,15 @@ use color_eyre::eyre::{self, Context as _};
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 
+/// Compatibility hook for the half-wired S63v2 startup path.
+///
+/// OAuth/keyring login is not wired into recorder startup yet. Treat startup
+/// auth as optional so the proven OBS recorder can launch unchanged.
+pub fn ensure_logged_in() -> eyre::Result<()> {
+    tracing::debug!("S63v2 auth startup hook disabled; continuing without login gate");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------

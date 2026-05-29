@@ -67,6 +67,11 @@ git-version = "0.3"
 sysinfo = "0.32.1"
 steamlocate = "2.0.1"
 tracing-appender = "0.2"
+base64 = "0.22"
+fastrand = "2"
+hex = "0.4"
+quick-xml = { version = "0.39", features = ["serialize"] }
+rand = "0.8"
 # tempfile is used by the atomic-write helper in src/util/durable_write.rs
 # (R5.6: tempfile + rename + fsync for metadata finalization). Same version
 # already used in dev-dependencies and the action-camera-tests crate so the
@@ -122,6 +127,11 @@ obws.workspace = true
 windows.workspace = true
 winit.workspace = true
 futures.workspace = true
+base64.workspace = true
+fastrand.workspace = true
+hex.workspace = true
+quick-xml.workspace = true
+rand.workspace = true
 
 tray-icon = "0.14.3"
 
@@ -163,7 +173,7 @@ tempfile.workspace = true
 oauth2 = "5.0"
 keyring = "3.6"
 notify-rust = "4.11"
-ed25519-dalek = "2.2"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 self_update = { version = "0.41", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]

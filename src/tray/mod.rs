@@ -12,13 +12,22 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use color_eyre::eyre::{self, Context as _};
+use color_eyre::eyre;
 use tray_icon::{
     TrayIcon, TrayIconBuilder, TrayIconEvent,
     menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
 };
 
 use crate::assets;
+
+/// Compatibility hook for the half-wired S63v2 startup path.
+///
+/// The production recorder already owns tray lifecycle through `ui::tray_icon`;
+/// until this replacement tray is fully integrated, startup keeps using the
+/// proven UI tray and this hook intentionally does nothing.
+pub fn start() {
+    tracing::debug!("S63v2 tray startup hook disabled; using existing UI tray");
+}
 
 // ---------------------------------------------------------------------------
 // Icon data — generated at runtime from PNG assets (or fallback 1×1 pixels)
@@ -117,22 +126,20 @@ impl Tray {
             let dashboard_item_id = dashboard_item_id.clone();
             let on_pause = on_pause.clone();
             let on_exit = on_exit.clone();
-            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-                match event.id() {
-                    id if id == &dashboard_item_id => {
-                        tracing::info!("Tray: Open dashboard clicked");
-                        on_dashboard();
-                    }
-                    id if id == &pause_item_id => {
-                        tracing::info!("Tray: Pause toggled");
-                        on_pause();
-                    }
-                    id if id == &exit_item_id => {
-                        tracing::info!("Tray: Exit clicked");
-                        on_exit();
-                    }
-                    _ => {}
+            MenuEvent::set_event_handler(Some(move |event: MenuEvent| match event.id() {
+                id if id == &dashboard_item_id => {
+                    tracing::info!("Tray: Open dashboard clicked");
+                    on_dashboard();
                 }
+                id if id == &pause_item_id => {
+                    tracing::info!("Tray: Pause toggled");
+                    on_pause();
+                }
+                id if id == &exit_item_id => {
+                    tracing::info!("Tray: Exit clicked");
+                    on_exit();
+                }
+                _ => {}
             }));
         }
 

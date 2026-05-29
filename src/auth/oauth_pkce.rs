@@ -25,8 +25,7 @@ use crate::auth::{OAuthProvider, TokenSet, delete_token, save_token};
 // ---------------------------------------------------------------------------
 
 /// Google OAuth endpoints (from the well-known OpenID configuration).
-const GOOGLE_AUTHORIZE_URL: &str =
-    "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_SCOPES: &str = "openid email profile";
 
@@ -184,9 +183,7 @@ async fn exchange_code(
 
     let refresh_token = json["refresh_token"].as_str().map(String::from);
 
-    let expires_in = json["expires_in"]
-        .as_u64()
-        .unwrap_or(3600); // default 1 hour
+    let expires_in = json["expires_in"].as_u64().unwrap_or(3600); // default 1 hour
 
     Ok(TokenResponse {
         access_token,
@@ -275,10 +272,7 @@ async fn wait_for_callback(listener: TcpListener) -> eyre::Result<String> {
         html.len(),
         html
     );
-    writer
-        .write_all(response.as_bytes())
-        .await
-        .ok();
+    writer.write_all(response.as_bytes()).await.ok();
     writer.flush().await.ok();
 
     Ok(query)
@@ -296,8 +290,7 @@ fn parse_callback_query(query: &str) -> eyre::Result<(String, String)> {
         let (k, v) = pair
             .split_once('=')
             .ok_or_else(|| eyre::eyre!("malformed query param: {pair}"))?;
-        let decoded = urlencoding::decode(v)
-            .wrap_err("failed to URL-decode query param")?;
+        let decoded = urlencoding::decode(v).wrap_err("failed to URL-decode query param")?;
         match k {
             "code" => code = Some(decoded.into_owned()),
             "state" => state = Some(decoded.into_owned()),
@@ -439,9 +432,7 @@ pub async fn try_refresh_token(tokens: &TokenSet) -> eyre::Result<Option<TokenSe
         params.insert("client_id", client_id);
     }
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()?;
+    let client = Client::builder().timeout(Duration::from_secs(15)).build()?;
 
     let resp = client.post(token_url).form(&params).send().await?;
     let status = resp.status();
@@ -505,9 +496,10 @@ mod tests {
         // SHA256 = 32 bytes → base64url no-pad = 43 chars
         assert_eq!(c.len(), 43);
         // Should only contain URL-safe base64 chars
-        assert!(c
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'));
+        assert!(
+            c.chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        );
     }
 
     #[test]
@@ -616,8 +608,8 @@ mod tests {
     #[cfg(feature = "mock-oauth")]
     mod mock_tests {
         use super::*;
-        use std::net::TcpStream;
         use std::io::Write;
+        use std::net::TcpStream;
 
         /// Simulate a mock OAuth callback by connecting to the loopback server
         /// and sending a fake HTTP request.
@@ -633,8 +625,12 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
 
             // Connect and send a mock callback
-            let redirect_uri = format!("http://{REDIRECT_HOST}:{port}/callback?code=mock-code-123&state=mock-state");
-            let request = format!("GET /callback?code=mock-code-123&state=mock-state HTTP/1.1\r\nHost: {REDIRECT_HOST}:{port}\r\nConnection: close\r\n\r\n");
+            let redirect_uri = format!(
+                "http://{REDIRECT_HOST}:{port}/callback?code=mock-code-123&state=mock-state"
+            );
+            let request = format!(
+                "GET /callback?code=mock-code-123&state=mock-state HTTP/1.1\r\nHost: {REDIRECT_HOST}:{port}\r\nConnection: close\r\n\r\n"
+            );
 
             // Use std TcpStream for simplicity
             let mut stream = TcpStream::connect(format!("{REDIRECT_HOST}:{port}")).unwrap();

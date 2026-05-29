@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use chrono::{Local, Timelike};
 use serde::Deserialize;
-use tokio::time::{sleep, Instant, MissedTickBehavior};
+use tokio::time::sleep;
 
 use crate::app_state::AppState;
 
@@ -30,10 +30,7 @@ impl IncomePoller {
     /// backend and show a notification. It repeats every 24 hours.
     ///
     /// Returns a handle that can be used to shut the poller down.
-    pub fn spawn(
-        app_state: std::sync::Arc<AppState>,
-        api_base_url: String,
-    ) -> Self {
+    pub fn spawn(app_state: std::sync::Arc<AppState>, api_base_url: String) -> Self {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
         tokio::spawn(async move {
@@ -118,7 +115,10 @@ async fn run_poller(
                 .unwrap()
         };
 
-        let wait = target.signed_duration_since(now).to_std().unwrap_or(Duration::ZERO);
+        let wait = target
+            .signed_duration_since(now)
+            .to_std()
+            .unwrap_or(Duration::ZERO);
         tracing::info!(
             wait_secs = wait.as_secs(),
             "Income poller sleeping until next 20:00"
@@ -156,7 +156,11 @@ async fn poll_once(
     api_base_url: &str,
 ) -> Result<Option<IncomeResponse>, String> {
     // Check offline mode first.
-    if app_state.offline.mode.load(std::sync::atomic::Ordering::Relaxed) {
+    if app_state
+        .offline
+        .mode
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
         return Err("offline mode active — skipping income poll".to_string());
     }
 
@@ -167,7 +171,10 @@ async fn poll_once(
 
     // Get the API key (Bearer token).
     let api_key = {
-        let config_guard = app_state.config.read().map_err(|e| format!("config lock poisoned: {e}"))?;
+        let config_guard = app_state
+            .config
+            .read()
+            .map_err(|e| format!("config lock poisoned: {e}"))?;
         config_guard.credentials.api_key.clone()
     };
 
@@ -183,7 +190,12 @@ async fn poll_once(
     let max_retries: u32 = 3;
 
     for attempt in 0..=max_retries {
-        tracing::debug!(attempt, "Income poll attempt {}/{}", attempt + 1, max_retries + 1);
+        tracing::debug!(
+            attempt,
+            "Income poll attempt {}/{}",
+            attempt + 1,
+            max_retries + 1
+        );
 
         match fetch_income(&url, &api_key).await {
             Ok(income) => return Ok(Some(income)),
@@ -244,10 +256,7 @@ async fn fetch_income(url: &str, api_key: &str) -> Result<IncomeResponse, String
         .map_err(|e| format!("HTTP request failed: {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!(
-            "backend returned HTTP {}",
-            resp.status()
-        ));
+        return Err(format!("backend returned HTTP {}", resp.status()));
     }
 
     let income: IncomeResponse = resp
@@ -320,11 +329,7 @@ fn show_native_notification(title: &str, body: &str) {
     #[cfg(feature = "mock-notify")]
     {
         // In mock mode, log the notification instead of showing it.
-        tracing::info!(
-            title,
-            body,
-            "[MOCK-NOTIFY] Notification would be shown"
-        );
+        tracing::info!(title, body, "[MOCK-NOTIFY] Notification would be shown");
     }
 }
 

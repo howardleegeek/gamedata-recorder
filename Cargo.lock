@@ -1615,6 +1615,7 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "rand_core 0.6.4",
  "serde",
  "sha2",
  "subtle",
@@ -2293,6 +2294,7 @@ dependencies = [
  "async-trait",
  "auto-cap",
  "backoff",
+ "base64",
  "catppuccin-egui",
  "chrono",
  "clap",
@@ -2311,9 +2313,11 @@ dependencies = [
  "egui_virtual_list",
  "egui_window_glfw_passthrough",
  "embed-manifest",
+ "fastrand",
  "futures",
  "game-process",
  "git-version",
+ "hex",
  "image",
  "input-capture",
  "keyring",
@@ -2324,6 +2328,8 @@ dependencies = [
  "oauth2",
  "obws",
  "opener",
+ "quick-xml 0.39.4",
+ "rand 0.8.6",
  "reqwest",
  "rfd",
  "rodio",
@@ -5394,6 +5400,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
 dependencies = [
  "memchr",
+ "serde",
 ]
 
 [[package]]

@@ -36,8 +36,7 @@ const DEFAULT_UPDATE_SERVER_URL: &str = "https://updates.gamedata.example.com";
 /// The ed25519 public key (hex-encoded) used to verify appcast signatures.
 /// In production this is baked at build time; for dev/test it can be
 /// overridden via `GAMEDATA_UPDATE_PUBKEY_HEX`.
-const DEFAULT_PUBKEY_HEX: &str =
-    "59e8e9c84f8e4e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e";
+const DEFAULT_PUBKEY_HEX: &str = "59e8e9c84f8e4e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e";
 
 // ---------------------------------------------------------------------------
 // Appcast types (RSS 2.0 + custom extensions)
@@ -92,9 +91,8 @@ fn load_verifying_key() -> Result<VerifyingKey> {
     let hex = std::env::var("GAMEDATA_UPDATE_PUBKEY_HEX")
         .unwrap_or_else(|_| DEFAULT_PUBKEY_HEX.to_string());
 
-    let bytes = hex::decode(&hex).map_err(|e| {
-        color_eyre::eyre::eyre!("Failed to decode update public key hex: {e}")
-    })?;
+    let bytes = hex::decode(&hex)
+        .map_err(|e| color_eyre::eyre::eyre!("Failed to decode update public key hex: {e}"))?;
 
     let key_bytes: [u8; 32] = bytes
         .try_into()
@@ -121,10 +119,8 @@ async fn fetch_verified_appcast(client: &reqwest::Client, base_url: &str) -> Res
     let sig_url = format!("{base_url}/appcast.xml.sig");
 
     // Fetch both in parallel
-    let (appcast_resp, sig_resp) = tokio::try_join!(
-        client.get(&appcast_url).send(),
-        client.get(&sig_url).send()
-    )?;
+    let (appcast_resp, sig_resp) =
+        tokio::try_join!(client.get(&appcast_url).send(), client.get(&sig_url).send())?;
 
     let appcast_bytes = appcast_resp
         .bytes()
@@ -139,9 +135,8 @@ async fn fetch_verified_appcast(client: &reqwest::Client, base_url: &str) -> Res
     // Decode the base64 signature
     let sig_text = String::from_utf8_lossy(&sig_bytes);
     let sig_bytes_decoded = base64_decode(sig_text.trim())?;
-    let signature = Signature::from_slice(&sig_bytes_decoded).map_err(|e| {
-        color_eyre::eyre::eyre!("Invalid signature format: {e}")
-    })?;
+    let signature = Signature::from_slice(&sig_bytes_decoded)
+        .map_err(|e| color_eyre::eyre::eyre!("Invalid signature format: {e}"))?;
 
     // Verify
     let vk = load_verifying_key()?;
@@ -154,9 +149,8 @@ async fn fetch_verified_appcast(client: &reqwest::Client, base_url: &str) -> Res
     tracing::info!("appcast.xml signature verified successfully");
 
     // Parse XML — we use quick-xml for a lightweight dependency
-    let appcast: Appcast = quick_xml::de::from_slice(&appcast_bytes).map_err(|e| {
-        color_eyre::eyre::eyre!("Failed to parse appcast XML: {e}")
-    })?;
+    let appcast: Appcast = quick_xml::de::from_slice(&appcast_bytes)
+        .map_err(|e| color_eyre::eyre::eyre!("Failed to parse appcast XML: {e}"))?;
 
     Ok(appcast)
 }
@@ -169,10 +163,7 @@ async fn fetch_verified_appcast(client: &reqwest::Client, base_url: &str) -> Res
 ///
 /// The signature is taken from the `sparkle:edSignature` field in the appcast
 /// item. The server also hosts `setup.exe.sig` (base64 ed25519 of the binary).
-async fn download_and_verify_setup(
-    client: &reqwest::Client,
-    item: &Item,
-) -> Result<PathBuf> {
+async fn download_and_verify_setup(client: &reqwest::Client, item: &Item) -> Result<PathBuf> {
     let enclosure = item
         .enclosure
         .as_ref()
@@ -191,19 +182,15 @@ async fn download_and_verify_setup(
         .as_ref()
         .ok_or_else(|| color_eyre::eyre::eyre!("No sparkle:edSignature in appcast item"))?;
 
-    let sig_bytes = hex::decode(sig_hex).map_err(|e| {
-        color_eyre::eyre::eyre!("Failed to decode edSignature hex: {e}")
-    })?;
+    let sig_bytes = hex::decode(sig_hex)
+        .map_err(|e| color_eyre::eyre::eyre!("Failed to decode edSignature hex: {e}"))?;
 
-    let signature = Signature::from_slice(&sig_bytes).map_err(|e| {
-        color_eyre::eyre::eyre!("Invalid edSignature format: {e}")
-    })?;
+    let signature = Signature::from_slice(&sig_bytes)
+        .map_err(|e| color_eyre::eyre::eyre!("Invalid edSignature format: {e}"))?;
 
     let vk = load_verifying_key()?;
     vk.verify(&setup_bytes, &signature).map_err(|e| {
-        color_eyre::eyre::eyre!(
-            "ed25519 verification of setup.exe FAILED (tampered binary): {e}"
-        )
+        color_eyre::eyre::eyre!("ed25519 verification of setup.exe FAILED (tampered binary): {e}")
     })?;
 
     tracing::info!("setup.exe signature verified successfully");
@@ -211,9 +198,8 @@ async fn download_and_verify_setup(
     // Write to %TEMP%
     let temp_dir = std::env::temp_dir();
     let setup_path = temp_dir.join("gamedata-recorder-setup.exe");
-    std::fs::write(&setup_path, &setup_bytes).map_err(|e| {
-        color_eyre::eyre::eyre!("Failed to write setup.exe to temp: {e}")
-    })?;
+    std::fs::write(&setup_path, &setup_bytes)
+        .map_err(|e| color_eyre::eyre::eyre!("Failed to write setup.exe to temp: {e}"))?;
 
     tracing::info!(path = ?setup_path, "Wrote setup.exe to temp");
     Ok(setup_path)
@@ -269,9 +255,8 @@ pub async fn check_for_update_once(client: &reqwest::Client) -> Result<bool> {
         .unwrap_or_else(|_| DEFAULT_UPDATE_SERVER_URL.to_string());
 
     let current_version = env!("CARGO_PKG_VERSION");
-    let current_semver = Version::parse(current_version).map_err(|e| {
-        color_eyre::eyre::eyre!("Invalid CARGO_PKG_VERSION: {e}")
-    })?;
+    let current_semver = Version::parse(current_version)
+        .map_err(|e| color_eyre::eyre::eyre!("Invalid CARGO_PKG_VERSION: {e}"))?;
 
     tracing::info!(
         current_version = %current_version,
@@ -346,10 +331,11 @@ pub fn spawn_update_checker(client: reqwest::Client) {
     tokio::spawn(async move {
         // Stagger the first check by 5-15 minutes so we don't hammer the
         // server when many clients start simultaneously.
-        let jitter = Duration::from_secs(
-            300 + fastrand::u64(0..600),
+        let jitter = Duration::from_secs(300 + fastrand::u64(0..600));
+        tracing::info!(
+            ?jitter,
+            "Update checker scheduled (first check after jitter)"
         );
-        tracing::info!(?jitter, "Update checker scheduled (first check after jitter)");
         tokio::time::sleep(jitter).await;
 
         let mut interval = tokio::time::interval(UPDATE_CHECK_INTERVAL);
@@ -365,7 +351,7 @@ pub fn spawn_update_checker(client: reqwest::Client) {
                     break;
                 }
                 Ok(false) => {
-                    tracing::debug("No update available");
+                    tracing::debug!("No update available");
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Update check failed; will retry in 24h");
@@ -373,6 +359,14 @@ pub fn spawn_update_checker(client: reqwest::Client) {
             }
         }
     });
+}
+
+/// Compatibility hook for the half-wired S63v2 startup path.
+///
+/// The real updater needs runtime ownership and release/appcast configuration
+/// before it can run safely. Keep startup buildable and no-op for now.
+pub fn spawn_check_loop(_interval: Duration) {
+    tracing::debug!("S63v2 updater startup hook disabled");
 }
 
 // ---------------------------------------------------------------------------
@@ -545,7 +539,10 @@ mod tests {
 
         let vk = load_verifying_key().expect("Failed to load verifying key");
         let result = vk.verify(tampered, &signature);
-        assert!(result.is_err(), "Verification should fail for tampered message");
+        assert!(
+            result.is_err(),
+            "Verification should fail for tampered message"
+        );
     }
 
     #[test]
@@ -622,7 +619,8 @@ mod tests {
         // Verify
         let vk = load_verifying_key().expect("Failed to load key");
         let sig = Signature::from_slice(&signature.to_bytes()).expect("Invalid sig");
-        vk.verify(appcast_xml.as_bytes(), &sig).expect("Verify failed");
+        vk.verify(appcast_xml.as_bytes(), &sig)
+            .expect("Verify failed");
 
         // Parse
         let appcast: Appcast = quick_xml::de::from_str(appcast_xml).expect("Parse failed");

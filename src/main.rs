@@ -7,21 +7,21 @@
 mod api;
 mod app_state;
 mod assets;
+mod auth;
 mod config;
 mod config_bitrate;
+mod notify;
 mod output_types;
 mod play_time;
 mod record;
 mod system;
 mod tokio_thread;
+mod tray;
 mod ui;
+mod updater;
 mod upload;
 mod util;
 mod validation;
-mod tray;
-mod auth;
-mod updater;
-mod notify;
 
 use crate::app_state::RwLockExt as _;
 use crate::util::log_rotation::RotatingFileWriter;
@@ -35,7 +35,7 @@ use crate::system::ensure_single_instance::ensure_single_instance;
 
 fn main() -> Result<()> {
     tray::start();
-    auth::ensure_logged_in().await.ok();
+    auth::ensure_logged_in().ok();
     updater::spawn_check_loop(std::time::Duration::from_secs(86400));
     notify::spawn_income_poller("20:00");
     // Security hardening: restrict DLL search to a safe set BEFORE any other
