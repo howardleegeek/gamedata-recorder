@@ -115,6 +115,16 @@ const HW_ENCODER_PREFERENCE: &[VideoEncoderType] = &[
 /// `available`. Constructing it anyway makes libobs error out and the whole
 /// recording fail. Instead we degrade deterministically:
 ///
+/// 0. If a *software* encoder (`X264`) is requested but any hardware encoder
+///    genuinely registered with OBS, UPGRADE to the best available hardware.
+///    OBS always lists x264 as available (it is the always-constructible
+///    software encoder), so without this step a stale `X264` config would be
+///    honoured by step 1 even on a perfectly good NVENC machine — the exact
+///    RTX 4060 tester regression (software x264, CPU-bound, ~2 FPS). The
+///    OBS-probed `available` list is firmer ground truth than the DXGI vendor
+///    probe that drives the optimistic `Config::load` upgrade, so this rescue
+///    fires even when that probe silently failed. Hardware requests skip this
+///    step and fall through unchanged, preserving the proven AMD-AMF path.
 /// 1. If the requested encoder is genuinely available, keep it (this is the
 ///    common path and keeps the proven AMD-AMF behaviour byte-for-byte
 ///    identical).
@@ -141,6 +151,36 @@ pub(crate) fn select_best_available_encoder(
     requested: VideoEncoderType,
     available: &[VideoEncoderType],
 ) -> VideoEncoderType {
+    // 0. Software-to-hardware rescue (the RTX 4060 tester bug). A stored config
+    //    of `X264` must NOT win just because OBS always lists x264 as
+    //    "available" — x264 is the always-constructible software encoder, so it
+    //    is present in `available` on every machine. Honouring it here is
+    //    exactly how a tester with a perfectly good NVENC GPU ended up CPU-bound
+    //    on software x264 at ~2 FPS: the optimistic `Config::load` upgrade
+    //    (DXGI vendor probe → NvEnc) is the ONLY thing that flips X264->NvEnc,
+    //    and that probe can silently return `None`/`Err` (deprecated `wmic`,
+    //    remote desktop, hardened Windows SKU, driver quirks). When it does, a
+    //    stale software choice reaches the recorder unchallenged.
+    //
+    //    The encoders OBS actually probed (`available`) are the ground truth a
+    //    DXGI vendor string is not: a hardware encoder appearing in this list
+    //    means libobs registered it and it WILL construct. So if a *software*
+    //    encoder is requested but any hardware encoder genuinely registered,
+    //    upgrade to the best available hardware regardless of what the stored
+    //    config or the DXGI probe said. Hardware requests are unaffected (they
+    //    fall through to the availability check below), so the proven AMD-AMF
+    //    and explicit-hardware paths stay byte-for-byte identical. This is the
+    //    reconcile-side safety net the start_recording guard relies on.
+    if !HW_ENCODER_PREFERENCE.contains(&requested) {
+        if let Some(best) = HW_ENCODER_PREFERENCE
+            .iter()
+            .copied()
+            .find(|enc| available.contains(enc))
+        {
+            return best;
+        }
+    }
+
     // 1. Honour the request when it's actually available. Keeps the working
     //    AMD-AMF path (and any explicit user selection) identical.
     if available.contains(&requested) {
@@ -1844,15 +1884,40 @@ mod tests {
     }
 
     #[test]
-    fn encoder_x264_request_is_stable() {
-        // An explicit x264 request must stay x264 regardless of what hardware
-        // is available — we never silently "upgrade" a deliberate software pick
-        // here (the optimistic upgrade lives in Config::load, not in the
-        // availability-reconciliation path).
+    fn encoder_x264_request_upgrades_to_available_hardware() {
+        // The RTX 4060 tester bug, pinned. A stored config of x264 must NOT be
+        // honoured when a real hardware encoder registered with OBS: x264 is
+        // always in `available` (it is the always-constructible software
+        // encoder), so honouring it is precisely how an NVENC-capable machine
+        // ended up CPU-bound on software at ~2 FPS. With NVENC present we must
+        // upgrade to it, deterministically preferring HEVC NVENC.
         let available = [VE::NvEncHevc, VE::NvEnc, VE::X264];
         assert_eq!(
             select_best_available_encoder(VE::X264, &available),
-            VE::X264
+            VE::NvEncHevc,
+            "a stale x264 config must be overridden to the best available \
+             hardware encoder (NVENC) — this is the tester's choppy-video fix"
+        );
+
+        // AMD-only machine: x264 config must upgrade to AMF, not stay software.
+        let amd = [VE::AmfHevc, VE::Amf, VE::X264];
+        assert_eq!(select_best_available_encoder(VE::X264, &amd), VE::AmfHevc);
+
+        // Intel-only machine: x264 config must upgrade to QSV.
+        let intel = [VE::QsvHevc, VE::Qsv, VE::X264];
+        assert_eq!(select_best_available_encoder(VE::X264, &intel), VE::QsvHevc);
+    }
+
+    #[test]
+    fn encoder_x264_request_stays_x264_without_hardware() {
+        // The only case x264 is honoured: no hardware encoder registered at
+        // all. x264 is then the correct (and only) choice, and the downstream
+        // 720p software cap protects the CPU.
+        let software_only = [VE::X264];
+        assert_eq!(
+            select_best_available_encoder(VE::X264, &software_only),
+            VE::X264,
+            "x264 must remain x264 when no hardware encoder is available"
         );
     }
 

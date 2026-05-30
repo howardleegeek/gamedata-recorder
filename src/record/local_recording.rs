@@ -823,7 +823,7 @@ impl LocalRecording {
             });
 
         // fps_effective / frame_count fix (ISC-DATA-FPS): the `frame_count` arg comes
-        // from `fps_logger`, whose `on_frame()` is driven by the ~1 Hz `update_fps`
+        // from `fps_logger`, whose `on_frame_fps()` is driven by the ~1 Hz `update_fps`
         // poll (embedded libobs exposes no per-frame callback), so it counts SECONDS,
         // not frames. Dividing it by duration yielded a bogus ~1 fps even though the
         // encoded mp4 is a real 30 fps — and `average_fps` (derived from

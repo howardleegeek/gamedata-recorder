@@ -39,6 +39,23 @@ use super::local_recording::LocalRecording;
 /// window needs while staying trivially safe to hold in RAM.
 const MAX_GAME_STATE_BYTES: u64 = 50 * 1024 * 1024;
 
+/// Slack added to each end of the recording's wall-clock window when trimming
+/// the MC mod's `game_state.jsonl` to align with the mp4 (ISC-DATA-GS-ALIGN).
+///
+/// The mod's per-tick `timestamp_ms` and the recorder's `start_time` are both
+/// Unix-epoch milliseconds (UTC), but they are sampled by two different
+/// processes/clocks with slightly different latencies: the mod stamps a row when
+/// the tick is simulated, while `start_time`/stop are taken around the OBS
+/// start/stop calls. A pose row that logically belongs to the first or last
+/// frame can therefore land a few hundred ms outside the raw `[start, stop]`
+/// bracket. We widen the window by this margin on BOTH ends so those boundary
+/// rows survive — over-inclusion of <=1s of pose context is harmless to the
+/// buyer (the server can still tighten), whereas dropping the row aligned to the
+/// first/last video frame is not. Kept small so rows from a *previous* MC launch
+/// (potentially seconds-to-hours earlier in the same cumulative file) are still
+/// excluded.
+const GAME_STATE_WINDOW_MARGIN_MS: u64 = 1_000;
+
 /// Parameters for starting a recording
 pub(crate) struct RecordingParams {
     pub recording_location: PathBuf,
@@ -273,8 +290,98 @@ impl Recording {
             Some(avg) => avg + (fps - avg) / self.fps_sample_count as f64,
             None => fps,
         });
-        // Feed frame timing data to the per-second FPS logger
-        self.fps_logger.on_frame();
+        // Feed the REAL measured delivered fps (from obs_output_get_total_frames
+        // deltas) to the per-second FPS logger. Previously called the zero-arg
+        // on_frame(), which made the logger derive "fps" from poll cadence and
+        // emit the misleading constant "fps": 2; pass the genuine rate instead.
+        self.fps_logger.on_frame_fps(fps);
+    }
+
+    /// Trim a buffer of COMPLETE `game_state.jsonl` lines down to only the rows
+    /// whose `timestamp_ms` falls inside this recording's wall-clock window
+    /// `[start_ms - margin, stop_ms + margin]` (ISC-DATA-GS-ALIGN / ISC-ACC-ALIGN).
+    ///
+    /// WHY: the Oyster Fabric mod APPENDS to a single cumulative
+    /// `~/Documents/OysterClips/active_session/game_state.jsonl` for the whole
+    /// time Minecraft is running — across MULTIPLE record start/stop cycles and
+    /// even multiple world joins. Shipping that whole file means the session's
+    /// `game_state.jsonl` contains pose rows from OUTSIDE this mp4's time window,
+    /// so the pose track no longer lines up with the video the buyer trains on.
+    /// We keep only the rows that overlap the video.
+    ///
+    /// TIME BASIS: the mod stamps each row with `timestamp_ms` = Unix epoch
+    /// milliseconds (UTC). `start_ms`/`stop_ms` are derived from the recorder's
+    /// `SystemTime` start/stop via `duration_since(UNIX_EPOCH)`, which is the
+    /// SAME Unix-epoch-UTC basis (`SystemTime` is clock-absolute, not local), and
+    /// the SAME `start_time` that `local_recording.rs` turns into the UTC
+    /// `wall_clock_start` field. So the comparison is apples-to-apples — no
+    /// timezone conversion is applied or needed on either side.
+    ///
+    /// PARSING: cheap — we deserialize each line into a one-field struct
+    /// (`{ timestamp_ms }`) via `serde_json::from_slice`, reusing the
+    /// already-present `serde_json` dep (no new dependency, no full-document
+    /// parse of the pose payload).
+    ///
+    /// FAIL-SOFT ROW HANDLING: a line we can't parse, or that is missing
+    /// `timestamp_ms`, is KEPT (not dropped). Over-inclusion of an unparseable
+    /// row is strictly safer for the buyer than silently discarding pose data
+    /// because of a schema tweak; the server can still re-trim. Returns the
+    /// filtered bytes (newline-terminated, ready to write as-is).
+    fn window_game_state_by_timestamp(complete: &[u8], start_ms: u64, stop_ms: u64) -> Vec<u8> {
+        /// Minimal projection of a mod row: we only need the timestamp to decide
+        /// inclusion. `serde_json` ignores all other fields by default, so this
+        /// stays cheap regardless of how wide the pose payload is.
+        #[derive(serde::Deserialize)]
+        struct TsOnly {
+            timestamp_ms: Option<u64>,
+        }
+
+        // Widen the window by the boundary margin on both ends. saturating_*
+        // keeps it panic-free at the u64 extremes (start near 0 / stop near MAX).
+        let lo = start_ms.saturating_sub(GAME_STATE_WINDOW_MARGIN_MS);
+        let hi = stop_ms.saturating_add(GAME_STATE_WINDOW_MARGIN_MS);
+
+        let mut out = Vec::with_capacity(complete.len());
+        let mut total = 0usize;
+        let mut kept = 0usize;
+        let mut unparsed_kept = 0usize;
+
+        // Split on '\n'. `complete` ends in '\n' (caller trimmed to whole lines),
+        // so the final split chunk is empty and skipped by the is_empty guard.
+        for line in complete.split(|&b| b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            total += 1;
+            let keep = match serde_json::from_slice::<TsOnly>(line) {
+                Ok(TsOnly {
+                    timestamp_ms: Some(ts),
+                }) => ts >= lo && ts <= hi,
+                // Parsed but no timestamp_ms, OR failed to parse: keep it
+                // (fail-soft — never silently drop pose rows on a schema change).
+                _ => {
+                    unparsed_kept += 1;
+                    true
+                }
+            };
+            if keep {
+                out.extend_from_slice(line);
+                out.push(b'\n');
+                kept += 1;
+            }
+        }
+
+        tracing::info!(
+            "Windowed game_state.jsonl to recording span [{}, {}] ms (+/-{}ms margin): \
+             kept {}/{} rows ({} kept without a parseable timestamp_ms)",
+            lo,
+            hi,
+            GAME_STATE_WINDOW_MARGIN_MS,
+            kept,
+            total,
+            unparsed_kept
+        );
+        out
     }
 
     /// Bounded TAIL read of a too-large `game_state.jsonl`, returning only
@@ -463,12 +570,12 @@ impl Recording {
         // OysterRecorder.exe's session dir), so the data is produced correctly but
         // never lands in THIS recorder's session dir. Copy it in now so game_state
         // ships with the rest of the session. Best-effort: the mod writes the whole
-        // MC session (from world-join, not record-start), so the server pipeline
-        // trims to this recording's [wall_clock_start, wall_clock_end] window by
-        // each row's `timestamp_ms`.
-        // TODO: window by timestamp_ms here using self.start_time..now() so the
-        // collected file is pre-aligned to the mp4 instead of deferring to server.
-        // Absence is non-fatal (mod off / not installed).
+        // MC session (from world-join, not record-start), so AFTER reading the
+        // file we TIME-ALIGN it to this recording's
+        // [start_time - margin, now + margin] window by each row's `timestamp_ms`
+        // (see window_game_state_by_timestamp) — the shipped game_state lines up
+        // with the mp4 instead of deferring that trim to the server. Absence is
+        // non-fatal (mod off / not installed).
         if let Some(home) = dirs::home_dir() {
             let mod_game_state = home
                 .join("Documents")
@@ -544,11 +651,65 @@ impl Recording {
                 };
 
                 if let Some(complete) = collected {
-                    let n = complete.len();
+                    // Time-align the collected rows to THIS recording's mp4 window
+                    // before writing (ISC-ACC-ALIGN). The mod's file is cumulative
+                    // across MC launches, so without this the shipped game_state
+                    // includes pose rows from outside the video.
+                    //
+                    // Window bounds are in Unix-epoch MILLISECONDS (UTC) — the
+                    // same basis as the mod's `timestamp_ms`. `self.start_time`
+                    // is the recorder's SystemTime at record start (the same value
+                    // local_recording.rs renders as the UTC `wall_clock_start`);
+                    // `now` is SystemTime at collection (≈ mp4 stop). Using epoch
+                    // ms on both sides means no timezone conversion is involved.
+                    //
+                    // FAIL-SOFT (guards a known past bug where a start timestamp
+                    // was a FUTURE / timezone-shifted value, e.g. recovery
+                    // session 100703 SS5): if either bound can't be expressed in
+                    // epoch ms, if start > stop, or if start is implausibly in the
+                    // future relative to stop, we SKIP windowing and ship the full
+                    // collected file. Over-inclusion is acceptable (server still
+                    // trims); dropping the whole pose track is not.
+                    let now = SystemTime::now();
+                    let start_ms = self
+                        .start_time
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_millis() as u64);
+                    let stop_ms = now
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_millis() as u64);
+
+                    let windowed = match (start_ms, stop_ms) {
+                        (Some(s), Some(e)) if s <= e => {
+                            Self::window_game_state_by_timestamp(&complete, s, e)
+                        }
+                        (Some(s), Some(e)) => {
+                            tracing::warn!(
+                                "game_state windowing skipped: recording start {}ms is AFTER \
+                                 stop {}ms (clock skew / future-dated start_time bug). \
+                                 Shipping full unwindowed game_state — server will trim.",
+                                s,
+                                e
+                            );
+                            complete
+                        }
+                        _ => {
+                            tracing::warn!(
+                                "game_state windowing skipped: start/stop time not \
+                                 representable as Unix epoch ms. Shipping full unwindowed \
+                                 game_state — server will trim."
+                            );
+                            complete
+                        }
+                    };
+
+                    let n = windowed.len();
                     // Atomic write (write-tmp → fsync → rename), same crash-safe
                     // pattern as the INVALID marker above. Errors are logged and
                     // swallowed — collecting game_state must never fail the recording.
-                    match durable_write::write_atomic_async(&dest, complete).await {
+                    match durable_write::write_atomic_async(&dest, windowed).await {
                         Ok(()) => tracing::info!(
                             "Collected MC mod game_state.jsonl ({n} complete bytes) into \
                              session {}",
