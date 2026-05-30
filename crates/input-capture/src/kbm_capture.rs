@@ -51,18 +51,18 @@ use windows::{
             WindowsAndMessaging::{
                 self, CallNextHookEx, CreateWindowExA, DefWindowProcA, DestroyWindow,
                 DispatchMessageA, GetMessageA, GetSystemMetrics, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
-                MSG, MSLLHOOKSTRUCT, PostQuitMessage, RI_KEY_BREAK, RI_MOUSE_BUTTON_4_DOWN,
-                RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_BUTTON_5_UP,
-                RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP, RI_MOUSE_MIDDLE_BUTTON_DOWN,
-                RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN, RI_MOUSE_RIGHT_BUTTON_UP,
-                RI_MOUSE_WHEEL, RegisterClassA, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
-                SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE,
-                SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
-                UnregisterClassA, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE,
-                WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-                WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
-                WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSA, WS_EX_TOOLWINDOW, XBUTTON1,
-                XBUTTON2,
+                KillTimer, MSG, MSLLHOOKSTRUCT, PostQuitMessage, RI_KEY_BREAK,
+                RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
+                RI_MOUSE_BUTTON_5_UP, RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP,
+                RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN,
+                RI_MOUSE_RIGHT_BUTTON_UP, RI_MOUSE_WHEEL, RegisterClassA, SM_CXSCREEN,
+                SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+                SM_YVIRTUALSCREEN, SW_HIDE, SetTimer, SetWindowsHookExW, ShowWindow,
+                TranslateMessage, UnhookWindowsHookEx, UnregisterClassA, WH_KEYBOARD_LL,
+                WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+                WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
+                WM_XBUTTONUP, WNDCLASSA, WS_EX_TOOLWINDOW, XBUTTON1, XBUTTON2,
             },
         },
     },
@@ -99,6 +99,20 @@ use crate::{Event, PressState};
 //   the SAME `event_callback`. Because the hooks fire on the very thread that
 //   runs the pump, a thread-local is correct (and lock-free) here.
 // ---------------------------------------------------------------------------
+
+/// `nIDEvent` for the tier-4 pump-wakeup timer. Low-level hooks fire *inside*
+/// `GetMessageA`, but the OS does NOT post a real `MSG` to wake it, so the
+/// post-dispatch drain in `run_queue` would otherwise never run on a machine
+/// where no `WM_INPUT` (or any) message ever arrives at our hidden window. A
+/// `WM_TIMER` on this id reliably unblocks `GetMessageA` so the drain flushes
+/// the LL-hook queue. Arbitrary non-zero value; we only ever set one timer.
+const LL_HOOK_PUMP_TIMER_ID: usize = 0xC1_5E;
+
+/// `WM_TIMER` cadence for the tier-4 pump-wakeup, in milliseconds. ~8 ms (~125
+/// Hz) keeps fallback input latency well under a video frame at 60 fps without
+/// busy-spinning; the actual hook events are still enqueued at full input rate
+/// and drained in a batch each time the timer wakes the pump.
+const LL_HOOK_PUMP_INTERVAL_MS: u32 = 8;
 
 thread_local! {
     /// Decoded events produced by the LL hook procedures, awaiting drain by
@@ -224,6 +238,11 @@ pub struct KbmCapture {
     /// MUST be unhooked in `Drop`, on the same thread that installed them.
     keyboard_hook: Option<HHOOK>,
     mouse_hook: Option<HHOOK>,
+    /// Tier-4 pump-wakeup timer id. `Some(LL_HOOK_PUMP_TIMER_ID)` only when at
+    /// least one LL hook installed and `SetTimer` succeeded; the timer's
+    /// `WM_TIMER` is what unblocks `GetMessageA` so `run_queue` can drain the
+    /// LL-hook queue. Killed in `Drop` on this same (capture) thread.
+    fallback_timer_id: Option<usize>,
 }
 impl Drop for KbmCapture {
     fn drop(&mut self) {
@@ -233,6 +252,18 @@ impl Drop for KbmCapture {
             // called `SetWindowsHookEx`; `Drop` runs on the capture thread
             // (the one that owned `run_queue`), which is exactly that thread.
             // Mirrors the DestroyWindow cleanup below.
+            //
+            // Kill the tier-4 pump-wakeup timer first so no further `WM_TIMER`
+            // fires for our (about-to-be-destroyed) window. `KillTimer` must run
+            // on the thread that called `SetTimer`, which is this capture thread.
+            if let Some(timer_id) = self.fallback_timer_id.take() {
+                if let Err(e) = KillTimer(Some(self.hwnd), timer_id) {
+                    tracing::error!(
+                        "Failed to kill tier-4 pump-wakeup timer during cleanup: {:?}",
+                        e
+                    );
+                }
+            }
             if let Some(hook) = self.keyboard_hook.take() {
                 if let Err(e) = UnhookWindowsHookEx(hook) {
                     tracing::error!("Failed to unhook WH_KEYBOARD_LL during cleanup: {:?}", e);
@@ -470,6 +501,8 @@ impl KbmCapture {
             // unhook them on this same (capture) thread.
             let mut keyboard_hook: Option<HHOOK> = None;
             let mut mouse_hook: Option<HHOOK> = None;
+            // Tier-4 pump-wakeup timer id; set below alongside the hooks.
+            let mut fallback_timer_id: Option<usize> = None;
 
             if !registered {
                 // All three Raw Input tiers failed (e.g. Win11 26200 restricted
@@ -549,6 +582,61 @@ impl KbmCapture {
                          failed to install — continuing without keyboard/mouse. \
                          Downstream validators will flag the empty input stream."
                     );
+                } else {
+                    // CRITICAL for tier-4: arm a periodic `WM_TIMER` so the
+                    // `run_queue` message pump actually wakes and drains the
+                    // LL-hook queue.
+                    //
+                    // Why this is required: `WH_KEYBOARD_LL` / `WH_MOUSE_LL`
+                    // procs are invoked by the OS *inside* `GetMessageA` on this
+                    // thread, but the OS does NOT post a real `MSG` to the queue
+                    // when it does so. On the happy path the WM_INPUT messages
+                    // themselves keep `GetMessageA` returning, after which we
+                    // drain the queue. But in tier-4 RegisterRawInputDevices
+                    // failed at every tier, so NO `WM_INPUT` (and nothing else)
+                    // ever arrives at our hidden message-only window — meaning
+                    // `GetMessageA` would block indefinitely and the drain loop
+                    // would never run, leaving every decoded keystroke/mouse
+                    // event stranded in `LL_HOOK_EVENTS` and `inputs.jsonl`
+                    // empty (exactly the observed Win11 26200 symptom). A
+                    // `WM_TIMER` targeted at our `hwnd` is a queued message that
+                    // reliably returns `GetMessageA` every ~8 ms, so the
+                    // existing drain in `run_queue` flushes the enqueued events
+                    // to the same `event_callback` the WM_INPUT path uses.
+                    //
+                    // `lptimerfunc = None` => the timer posts `WM_TIMER` to the
+                    // window's queue (we do NOT want a `TimerProc` callback; we
+                    // only need the message to unblock the pump). The drain in
+                    // `run_queue` runs after EVERY `GetMessageA` return, so we do
+                    // not handle `WM_TIMER` explicitly — its only job is to wake
+                    // the pump.
+                    let timer = SetTimer(
+                        Some(hwnd),
+                        LL_HOOK_PUMP_TIMER_ID,
+                        LL_HOOK_PUMP_INTERVAL_MS,
+                        None,
+                    );
+                    if timer == 0 {
+                        // SetTimer failed. The hooks are installed and will
+                        // still fire and enqueue, but without a wakeup the pump
+                        // may stall. Log loudly; this must not pass silently
+                        // because it reproduces the empty-input bug.
+                        let last_error = GetLastError();
+                        tracing::error!(
+                            last_error = ?last_error,
+                            "tier-4 fallback: SetTimer for pump-wakeup FAILED — \
+                             LL hooks installed but GetMessageA may block and \
+                             never drain the hook queue. Keyboard/mouse may not \
+                             reach inputs.jsonl."
+                        );
+                    } else {
+                        tracing::info!(
+                            interval_ms = LL_HOOK_PUMP_INTERVAL_MS,
+                            "tier-4 fallback: pump-wakeup WM_TIMER armed so \
+                             run_queue drains the LL-hook event queue"
+                        );
+                        fallback_timer_id = Some(LL_HOOK_PUMP_TIMER_ID);
+                    }
                 }
             }
 
@@ -559,6 +647,7 @@ impl KbmCapture {
                 active_keys,
                 keyboard_hook,
                 mouse_hook,
+                fallback_timer_id,
             })
         }
     }

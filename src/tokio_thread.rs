@@ -206,6 +206,7 @@ async fn main(
         app_state: app_state.clone(),
         cue_cache: HashMap::new(),
         last_active: Instant::now(),
+        has_seen_any_input: false,
         actively_recording_window: None,
         last_auto_record_attempt: None,
         user_stopped_game_exe: None,
@@ -1039,6 +1040,12 @@ struct State {
     app_state: Arc<AppState>,
     cue_cache: HashMap<String, Vec<u8>>,
     last_active: Instant,
+    /// Whether any input event has ever been observed since startup. On Win11
+    /// 26200 the RawInput keyboard/mouse capture can fail to deliver any events,
+    /// so `last_active` never advances and the AFK idle-stop would fire on an
+    /// actively-playing user, killing real recordings. We only honor the
+    /// idle-stop once we have proof input capture works (at least one event).
+    has_seen_any_input: bool,
     actively_recording_window: Option<HWND>,
     /// Cooldown for auto-record: prevents rapid start/stop churn on unhookable games
     last_auto_record_attempt: Option<Instant>,
@@ -1131,6 +1138,7 @@ impl State {
             tracing::error!(e=?e, "Failed to seen input");
         }
         self.last_active = Instant::now();
+        self.has_seen_any_input = true;
         if let Err(e) = match (&self.recording_state, e.key_press_keycode()) {
             (RecordingState::Idle, key) if key == start_key => {
                 if self.app_state.is_out_of_date.load(Ordering::SeqCst) {
@@ -1211,7 +1219,7 @@ impl State {
                     "Game process no longer exists, stopping recording"
                 );
                 Some((RecordingState::Idle, "stop recording on game process exit"))
-            } else if self.last_active.elapsed() > MAX_IDLE_DURATION {
+            } else if self.last_active.elapsed() > MAX_IDLE_DURATION && self.has_seen_any_input {
                 // idle timeout
                 tracing::info!(
                     "No input detected for {} seconds, stopping recording",
@@ -1223,6 +1231,19 @@ impl State {
                     },
                     "stop recording on idle timeout",
                 ))
+            } else if self.last_active.elapsed() > MAX_IDLE_DURATION && !self.has_seen_any_input {
+                // Idle threshold crossed, but we have NEVER observed a single
+                // input event this run. That is the signature of blind input
+                // capture (RawInput failing on Win11 26200), not a genuinely
+                // idle user — `last_active` simply never advanced. Auto-stopping
+                // here killed real recordings of actively-playing users, so we
+                // keep recording and warn instead.
+                tracing::warn!(
+                    "Idle threshold ({} s) crossed but no input has ever been observed; \
+                     input capture is likely blind (RawInput failure) — NOT stopping recording",
+                    MAX_IDLE_DURATION.as_secs()
+                );
+                None
             } else if recording.elapsed() > MAX_FOOTAGE {
                 // restart recording once max duration met
                 tracing::info!(
@@ -1261,7 +1282,7 @@ impl State {
                     None // Keep recording — game is still alive
                 }
             } else if let Ok(current_resolution) = get_recording_base_resolution(recording.hwnd())
-                && current_resolution != recording.game_resolution()
+                && resolution_changed_significantly(recording.game_resolution(), current_resolution)
             {
                 // Check if the window resolution has changed and restart the recording
                 tracing::info!(
@@ -2131,6 +2152,16 @@ fn wait_for_ctrl_c() -> oneshot::Receiver<()> {
         }
     });
     ctrl_c_rx
+}
+
+/// A window's client area is typically ~71px shorter than the monitor-native
+/// base the recorder captures at (title bar / taskbar). That is NOT a real
+/// resolution change; restarting on it caused an infinite restart storm that
+/// produced only empty 0.2s clips. Only a genuine resize restarts.
+const RESOLUTION_CHANGE_TOLERANCE_PX: u32 = 96;
+fn resolution_changed_significantly(old: (u32, u32), new: (u32, u32)) -> bool {
+    old.0.abs_diff(new.0) > RESOLUTION_CHANGE_TOLERANCE_PX
+        || old.1.abs_diff(new.1) > RESOLUTION_CHANGE_TOLERANCE_PX
 }
 
 fn is_window_focused(hwnd: HWND) -> bool {

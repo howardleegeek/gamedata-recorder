@@ -444,6 +444,131 @@ impl Recording {
             }
         };
 
+        // Collect the MC mod's game_state.jsonl into this session (ISC-DATA-GS).
+        //
+        // MUST run BEFORE the validity checks + INVALID early-return below.
+        // Previously this lived after that `return Ok(())`, so any recording that
+        // got invalidated (low FPS, dropped-input threshold, encoder error) never
+        // collected game_state — which is why only 1 of 77 real recordings had a
+        // co-located game_state.jsonl. The buyer needs the pose ground-truth track
+        // for EVERY stopped recording, valid or not, so we collect unconditionally
+        // here while still being fully fail-soft (warn + continue, never panic,
+        // never fail the stop path).
+        //
+        // The Oyster Fabric mod (world.oyster.recorder.OysterRecorderMod) streams
+        // per-tick player pose/orientation/velocity/state to a FIXED legacy path it
+        // hard-codes in SessionDir.java:
+        //     ~/Documents/OysterClips/active_session/game_state.jsonl
+        // That convention predates the Rust recorder (it was the old Python
+        // OysterRecorder.exe's session dir), so the data is produced correctly but
+        // never lands in THIS recorder's session dir. Copy it in now so game_state
+        // ships with the rest of the session. Best-effort: the mod writes the whole
+        // MC session (from world-join, not record-start), so the server pipeline
+        // trims to this recording's [wall_clock_start, wall_clock_end] window by
+        // each row's `timestamp_ms`.
+        // TODO: window by timestamp_ms here using self.start_time..now() so the
+        // collected file is pre-aligned to the mp4 instead of deferring to server.
+        // Absence is non-fatal (mod off / not installed).
+        if let Some(home) = dirs::home_dir() {
+            let mod_game_state = home
+                .join("Documents")
+                .join("OysterClips")
+                .join("active_session")
+                .join("game_state.jsonl");
+            if mod_game_state.exists() {
+                let dest = self
+                    .recording_location
+                    .join(constants::filename::recording::GAME_STATE);
+                // The Fabric mod APPENDS to this file concurrently, so a plain
+                // `tokio::fs::copy` can capture a partial final JSONL line (a
+                // torn read between the mod's `write` and its newline) or hit
+                // ERROR_SHARING_VIOLATION mid-flight. Instead we read the bytes
+                // and trim to whole lines before the atomic write.
+                //
+                // But the file can be hundreds of MB for a multi-hour MC session
+                // (the mod appends from world-join, not record-start), and a full
+                // `tokio::fs::read` would pull all of that into RAM during the
+                // critical stop window — alongside OBS encoding — risking OOM /
+                // a multi-second stall on a low-RAM machine. So: stat the file
+                // first, and only above MAX_GAME_STATE_BYTES fall back to a
+                // BOUNDED TAIL read (the server trims by `timestamp_ms` and only
+                // needs the tail, so dropping the head of a giant file is
+                // acceptable — we warn so it's honest). Under the cap we keep the
+                // existing full-read + trailing-trim path. Every error path here
+                // stays non-fatal (warn + continue); this step must NEVER fail
+                // the recording, and there is no unwrap/panic.
+                let collected = match tokio::fs::metadata(&mod_game_state).await {
+                    Ok(meta) if meta.len() > MAX_GAME_STATE_BYTES => {
+                        Self::read_game_state_tail(&mod_game_state, meta.len()).await
+                    }
+                    Ok(_) => {
+                        // Under the cap: read the whole file and drop only the
+                        // (possibly torn) trailing partial line.
+                        match tokio::fs::read(&mod_game_state).await {
+                            Ok(bytes) => {
+                                // Keep only up to and including the last newline
+                                // so a half-written final line is discarded. With
+                                // no newline at all the file holds no complete
+                                // line yet, so we collect an empty file rather
+                                // than a partial record.
+                                let complete_len = match bytes.iter().rposition(|&b| b == b'\n') {
+                                    Some(idx) => idx + 1,
+                                    None => 0,
+                                };
+                                let dropped = bytes.len() - complete_len;
+                                if dropped > 0 {
+                                    tracing::debug!(
+                                        "Dropping {dropped} trailing byte(s) of partial final \
+                                         line from game_state.jsonl before collecting \
+                                         (concurrent mod append)"
+                                    );
+                                }
+                                Some(bytes[..complete_len].to_vec())
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to read MC mod game_state.jsonl for collection \
+                                     (non-fatal): {e}"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to stat MC mod game_state.jsonl for collection \
+                             (non-fatal): {e}"
+                        );
+                        None
+                    }
+                };
+
+                if let Some(complete) = collected {
+                    let n = complete.len();
+                    // Atomic write (write-tmp → fsync → rename), same crash-safe
+                    // pattern as the INVALID marker above. Errors are logged and
+                    // swallowed — collecting game_state must never fail the recording.
+                    match durable_write::write_atomic_async(dest.clone(), complete).await {
+                        Ok(()) => tracing::info!(
+                            "Collected MC mod game_state.jsonl ({n} complete bytes) into \
+                             session {}",
+                            self.recording_location.display()
+                        ),
+                        Err(e) => tracing::warn!(
+                            "Failed to write collected game_state.jsonl into session \
+                             (non-fatal): {e}"
+                        ),
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "MC mod game_state.jsonl not found at {} — session will lack game_state \
+                     (mod not running, or wrote elsewhere)",
+                    mod_game_state.display()
+                );
+            }
+        }
+
         #[allow(clippy::collapsible_if)]
         if result.is_ok() {
             // Conditions that need to be met, even if the recording is otherwise valid
@@ -559,119 +684,6 @@ impl Recording {
                 "MP4 file missing after successful stop_recording: {}",
                 mp4_path.display()
             );
-        }
-
-        // Collect the MC mod's game_state.jsonl into this session (ISC-DATA-GS).
-        //
-        // The Oyster Fabric mod (world.oyster.recorder.OysterRecorderMod) streams
-        // per-tick player pose/orientation/velocity/state to a FIXED legacy path it
-        // hard-codes in SessionDir.java:
-        //     ~/Documents/OysterClips/active_session/game_state.jsonl
-        // That convention predates the Rust recorder (it was the old Python
-        // OysterRecorder.exe's session dir), so the data is produced correctly but
-        // never lands in THIS recorder's session dir. Copy it in now so game_state
-        // ships with the rest of the session. Best-effort: the mod writes the whole
-        // MC session (from world-join, not record-start), so the server pipeline
-        // trims to this recording's [wall_clock_start, wall_clock_end] window by
-        // each row's `timestamp_ms`. Absence is non-fatal (mod off / not installed).
-        if let Some(home) = dirs::home_dir() {
-            let mod_game_state = home
-                .join("Documents")
-                .join("OysterClips")
-                .join("active_session")
-                .join("game_state.jsonl");
-            if mod_game_state.exists() {
-                let dest = self
-                    .recording_location
-                    .join(constants::filename::recording::GAME_STATE);
-                // The Fabric mod APPENDS to this file concurrently, so a plain
-                // `tokio::fs::copy` can capture a partial final JSONL line (a
-                // torn read between the mod's `write` and its newline) or hit
-                // ERROR_SHARING_VIOLATION mid-flight. Instead we read the bytes
-                // and trim to whole lines before the atomic write.
-                //
-                // But the file can be hundreds of MB for a multi-hour MC session
-                // (the mod appends from world-join, not record-start), and a full
-                // `tokio::fs::read` would pull all of that into RAM during the
-                // critical stop window — alongside OBS encoding — risking OOM /
-                // a multi-second stall on a low-RAM machine. So: stat the file
-                // first, and only above MAX_GAME_STATE_BYTES fall back to a
-                // BOUNDED TAIL read (the server trims by `timestamp_ms` and only
-                // needs the tail, so dropping the head of a giant file is
-                // acceptable — we warn so it's honest). Under the cap we keep the
-                // existing full-read + trailing-trim path. Every error path here
-                // stays non-fatal (warn + continue); this step must NEVER fail
-                // the recording, and there is no unwrap/panic.
-                let collected = match tokio::fs::metadata(&mod_game_state).await {
-                    Ok(meta) if meta.len() > MAX_GAME_STATE_BYTES => {
-                        Self::read_game_state_tail(&mod_game_state, meta.len()).await
-                    }
-                    Ok(_) => {
-                        // Under the cap: read the whole file and drop only the
-                        // (possibly torn) trailing partial line.
-                        match tokio::fs::read(&mod_game_state).await {
-                            Ok(bytes) => {
-                                // Keep only up to and including the last newline
-                                // so a half-written final line is discarded. With
-                                // no newline at all the file holds no complete
-                                // line yet, so we collect an empty file rather
-                                // than a partial record.
-                                let complete_len = match bytes.iter().rposition(|&b| b == b'\n') {
-                                    Some(idx) => idx + 1,
-                                    None => 0,
-                                };
-                                let dropped = bytes.len() - complete_len;
-                                if dropped > 0 {
-                                    tracing::debug!(
-                                        "Dropping {dropped} trailing byte(s) of partial final \
-                                         line from game_state.jsonl before collecting \
-                                         (concurrent mod append)"
-                                    );
-                                }
-                                Some(bytes[..complete_len].to_vec())
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to read MC mod game_state.jsonl for collection \
-                                     (non-fatal): {e}"
-                                );
-                                None
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to stat MC mod game_state.jsonl for collection \
-                             (non-fatal): {e}"
-                        );
-                        None
-                    }
-                };
-
-                if let Some(complete) = collected {
-                    let n = complete.len();
-                    // Atomic write (write-tmp → fsync → rename), same crash-safe
-                    // pattern as the INVALID marker above. Errors are logged and
-                    // swallowed — collecting game_state must never fail the recording.
-                    match durable_write::write_atomic_async(dest.clone(), complete).await {
-                        Ok(()) => tracing::info!(
-                            "Collected MC mod game_state.jsonl ({n} complete bytes) into \
-                             session {}",
-                            self.recording_location.display()
-                        ),
-                        Err(e) => tracing::warn!(
-                            "Failed to write collected game_state.jsonl into session \
-                             (non-fatal): {e}"
-                        ),
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    "MC mod game_state.jsonl not found at {} — session will lack game_state \
-                     (mod not running, or wrote elsewhere)",
-                    mod_game_state.display()
-                );
-            }
         }
 
         let gamepads = input_capture.gamepads();
