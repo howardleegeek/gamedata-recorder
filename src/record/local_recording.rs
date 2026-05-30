@@ -278,6 +278,107 @@ fn parse_session_timestamp(folder_name: &str) -> Option<std::time::SystemTime> {
         .map(|secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
 }
 
+/// Convert a `SystemTime` to Unix-epoch-UTC seconds as `f64`.
+///
+/// This is the single, audited source of truth for every "utc"/"wall_clock"
+/// value this module emits. `SystemTime` is a clock-absolute instant, and
+/// `duration_since(UNIX_EPOCH)` measures its offset from the epoch in UTC — so
+/// the result is genuine epoch-UTC, NOT a local-time value formatted as UTC
+/// (the mislabeling behind the SS5 future/timezone-shifted-timestamp bug).
+///
+/// Returns `None` for the impossible-but-defensive case of a time strictly
+/// before the Unix epoch (e.g. a corrupted/zeroed clock), letting the caller
+/// decide on a fallback rather than silently emitting a negative timestamp.
+fn utc_secs_f64(t: SystemTime) -> Option<f64> {
+    t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
+}
+
+/// A detected wall-clock anomaly, recorded additively in `metadata.json` so a
+/// downstream consumer can quarantine the session. Serialized as the nested
+/// `clock_anomaly` object; only present when an anomaly was actually detected.
+///
+/// `Serialize` only — this is a write-only diagnostic; nothing reads it back
+/// into this struct.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct ClockAnomaly {
+    /// Machine-readable anomaly kind: `"start_after_stop"` (wall clock moved
+    /// backward between start and stop) or `"wall_gap_disagrees_with_monotonic"`
+    /// (the wall-clock start→stop gap diverges from the monotonic recording
+    /// duration, indicating the wall clock was stepped mid-recording).
+    kind: &'static str,
+    /// The recorded UTC start timestamp (epoch seconds) that triggered the flag.
+    start_utc_secs: f64,
+    /// The recorded UTC stop timestamp (epoch seconds).
+    end_utc_secs: f64,
+    /// Monotonic recording duration (seconds) from `Instant` — unaffected by the
+    /// wall-clock skew, so it stays authoritative for the true recording length.
+    monotonic_duration_secs: f64,
+}
+
+/// Detect a wall-clock anomaly between the recorded start/stop epoch-UTC
+/// timestamps, cross-checked against the monotonic recording duration.
+///
+/// Pure function (no clock reads) so the policy is unit-testable. Flags:
+///   1. `start_after_stop` — `start > end`. The wall clock went backward
+///      between capturing `start_time` and `SystemTime::now()` at stop, so the
+///      recording appears to end before it began. This is the direct form of
+///      the SS5 "future-dated start" hazard.
+///   2. `wall_gap_disagrees_with_monotonic` — the wall-clock gap
+///      (`end - start`) differs from the monotonic recording duration by more
+///      than a generous tolerance. The two should agree to within a second; a
+///      large disagreement means the wall clock was stepped (NTP correction, VM
+///      catch-up, manual change) DURING the recording, so the UTC start/stop —
+///      and any future-dated value derived from them — are untrustworthy even
+///      though `start <= end` still holds.
+///
+/// Returns `None` when the timestamps are self-consistent (the common case).
+fn detect_clock_anomaly(
+    start_utc_secs: f64,
+    end_utc_secs: f64,
+    monotonic_duration_secs: f64,
+) -> Option<ClockAnomaly> {
+    // Non-finite inputs can't be reasoned about; don't fabricate an anomaly.
+    if !start_utc_secs.is_finite() || !end_utc_secs.is_finite() {
+        return None;
+    }
+
+    // Slack absorbs benign sub-second ordering between the start capture and the
+    // stop `SystemTime::now()` (they are read at slightly different points).
+    const ORDERING_SLACK_SECS: f64 = 1.0;
+
+    // (1) Start is after stop: the wall clock moved backward between start and
+    // stop, so the recording "ends before it began" — the SS5 hazard directly.
+    if start_utc_secs > end_utc_secs + ORDERING_SLACK_SECS {
+        return Some(ClockAnomaly {
+            kind: "start_after_stop",
+            start_utc_secs,
+            end_utc_secs,
+            monotonic_duration_secs,
+        });
+    }
+
+    // (2) Wall-clock gap should ≈ monotonic duration. A large disagreement means
+    // the wall clock was stepped mid-recording, so the UTC stamps are suspect.
+    // Only meaningful when we actually have a monotonic duration to compare to.
+    if monotonic_duration_secs.is_finite() && monotonic_duration_secs > 0.0 {
+        let wall_gap = end_utc_secs - start_utc_secs;
+        // Tolerance: the larger of a fixed floor and a small fraction of the
+        // duration, so long recordings aren't flagged for normal scheduling
+        // jitter while short ones still catch big absolute steps.
+        let tolerance = ORDERING_SLACK_SECS.max(monotonic_duration_secs * 0.10);
+        if (wall_gap - monotonic_duration_secs).abs() > tolerance {
+            return Some(ClockAnomaly {
+                kind: "wall_gap_disagrees_with_monotonic",
+                start_utc_secs,
+                end_utc_secs,
+                monotonic_duration_secs,
+            });
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod camera_intrinsics_tests {
     use super::CameraIntrinsics;
@@ -401,6 +502,154 @@ mod parse_timestamp_tests {
         assert!(parse_session_timestamp("not-a-session").is_none());
         assert!(parse_session_timestamp("session_bad_time").is_none());
         assert!(parse_session_timestamp("").is_none());
+    }
+}
+
+#[cfg(test)]
+mod clock_math_tests {
+    use super::{ClockAnomaly, detect_clock_anomaly, utc_secs_f64};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn utc_secs_is_genuine_epoch_utc() {
+        // A SystemTime built from a known epoch offset must round-trip to that
+        // same offset — proving we measure UTC-from-epoch, not local time.
+        let t = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let secs = utc_secs_f64(t).expect("post-epoch time must convert");
+        assert!((secs - 1_700_000_000.0).abs() < 1e-6, "got {secs}");
+    }
+
+    #[test]
+    fn utc_secs_epoch_is_zero() {
+        assert_eq!(utc_secs_f64(UNIX_EPOCH), Some(0.0));
+    }
+
+    #[test]
+    fn utc_secs_before_epoch_is_none() {
+        // Defensive: a clock set before 1970 must not yield a negative timestamp.
+        let before = UNIX_EPOCH - Duration::from_secs(10);
+        assert_eq!(utc_secs_f64(before), None);
+    }
+
+    #[test]
+    fn healthy_recording_has_no_anomaly() {
+        // start at T, stop ~120s later, monotonic duration ~120s: consistent.
+        let start = 1_700_000_000.0;
+        let end = start + 120.3;
+        assert_eq!(detect_clock_anomaly(start, end, 120.0), None);
+    }
+
+    #[test]
+    fn sub_second_ordering_noise_is_tolerated() {
+        // Stop stamped a hair before start due to read ordering; within slack.
+        let start = 1_700_000_000.5;
+        let end = 1_700_000_000.0;
+        assert_eq!(detect_clock_anomaly(start, end, 0.0), None);
+    }
+
+    #[test]
+    fn start_after_stop_is_flagged() {
+        // Wall clock jumped backward: start is well after stop (SS5 hazard).
+        let start = 1_700_000_500.0;
+        let end = 1_700_000_000.0;
+        let anomaly = detect_clock_anomaly(start, end, 60.0).expect("must flag");
+        assert_eq!(anomaly.kind, "start_after_stop");
+        // Monotonic duration is preserved verbatim for downstream triage.
+        assert_eq!(anomaly.monotonic_duration_secs, 60.0);
+        assert_eq!(anomaly.start_utc_secs, start);
+        assert_eq!(anomaly.end_utc_secs, end);
+    }
+
+    #[test]
+    fn forward_clock_step_during_recording_is_flagged() {
+        // Monotonic duration says 60s, but the wall clock advanced 3600s between
+        // start and stop — the clock was stepped forward mid-recording.
+        let start = 1_700_000_000.0;
+        let end = start + 3600.0;
+        let anomaly = detect_clock_anomaly(start, end, 60.0).expect("must flag");
+        assert_eq!(anomaly.kind, "wall_gap_disagrees_with_monotonic");
+    }
+
+    #[test]
+    fn long_recording_tolerates_proportional_jitter() {
+        // 10-minute recording; wall gap off by ~30s (<10% of 600s) is fine.
+        let start = 1_700_000_000.0;
+        let end = start + 600.0 + 30.0;
+        assert_eq!(detect_clock_anomaly(start, end, 600.0), None);
+    }
+
+    #[test]
+    fn non_finite_inputs_do_not_panic_or_fabricate() {
+        assert_eq!(detect_clock_anomaly(f64::NAN, 1.0, 1.0), None);
+        assert_eq!(detect_clock_anomaly(1.0, f64::INFINITY, 1.0), None);
+    }
+
+    #[test]
+    fn anomaly_serializes_as_nested_object() {
+        let a = ClockAnomaly {
+            kind: "start_after_stop",
+            start_utc_secs: 2.0,
+            end_utc_secs: 1.0,
+            monotonic_duration_secs: 0.5,
+        };
+        let v = serde_json::to_value(a).expect("must serialize");
+        assert_eq!(v["kind"], "start_after_stop");
+        assert!(v["start_utc_secs"].is_number());
+        assert!(v["end_utc_secs"].is_number());
+        assert!(v["monotonic_duration_secs"].is_number());
+    }
+}
+
+#[cfg(test)]
+mod encoder_used_tests {
+    use super::LocalRecording;
+
+    #[test]
+    fn promotes_encoder_from_recorder_extra() {
+        let mut value = serde_json::json!({
+            "game_exe": "javaw.exe",
+            "recorder_extra": { "encoder": "obs_nvenc_hevc_tex", "window_capture": false },
+        });
+        LocalRecording::inject_encoder_used(&mut value);
+        assert_eq!(value["encoder_used"], "obs_nvenc_hevc_tex");
+    }
+
+    #[test]
+    fn absent_when_no_recorder_extra() {
+        // Socket recorder path: recorder_extra is null → no fabricated encoder.
+        let mut value = serde_json::json!({
+            "game_exe": "javaw.exe",
+            "recorder_extra": serde_json::Value::Null,
+        });
+        LocalRecording::inject_encoder_used(&mut value);
+        assert!(
+            value.get("encoder_used").is_none(),
+            "must not fabricate an encoder when none is known"
+        );
+    }
+
+    #[test]
+    fn absent_when_recorder_extra_missing_entirely() {
+        let mut value = serde_json::json!({ "game_exe": "javaw.exe" });
+        LocalRecording::inject_encoder_used(&mut value);
+        assert!(value.get("encoder_used").is_none());
+    }
+
+    #[test]
+    fn does_not_overwrite_existing_encoder_used() {
+        let mut value = serde_json::json!({
+            "encoder_used": "preset_value",
+            "recorder_extra": { "encoder": "obs_x264" },
+        });
+        LocalRecording::inject_encoder_used(&mut value);
+        assert_eq!(value["encoder_used"], "preset_value");
+    }
+
+    #[test]
+    fn non_object_value_is_a_noop() {
+        let mut value = serde_json::json!("not an object");
+        LocalRecording::inject_encoder_used(&mut value);
+        assert_eq!(value, serde_json::json!("not an object"));
     }
 }
 
@@ -807,20 +1056,47 @@ impl LocalRecording {
         let duration = start_instant.elapsed().as_secs_f64();
         let end_system_time = SystemTime::now();
 
-        let start_timestamp = start_time
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or_else(|_| {
-                tracing::warn!("Start time before UNIX epoch, using 0");
-                0.0
-            });
-        let end_timestamp = end_system_time
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or_else(|_| {
-                tracing::warn!("Current time before UNIX epoch, using 0");
-                0.0
-            });
+        // Both timestamps are genuine Unix-epoch-UTC seconds: `SystemTime` is a
+        // clock-absolute value, and `duration_since(UNIX_EPOCH)` measures the
+        // offset from the epoch in UTC. This is NOT a local-time value formatted
+        // as if it were UTC — that mislabeling was the class of bug behind the
+        // SS5 recovery session (100703), where a `recording_started_utc` was a
+        // future / timezone-shifted value. We derive epoch-UTC directly so the
+        // emitted "utc"/"wall_clock" fields can never be a local-time lie.
+        let start_timestamp = utc_secs_f64(start_time).unwrap_or_else(|| {
+            tracing::warn!("Start time before UNIX epoch, using 0");
+            0.0
+        });
+        let end_timestamp = utc_secs_f64(end_system_time).unwrap_or_else(|| {
+            tracing::warn!("Current time before UNIX epoch, using 0");
+            0.0
+        });
+
+        // Clock-skew / future-dated-start sanity guard (mirrors the fail-soft
+        // guard in `recording.rs`'s game_state windowing). The wall-clock
+        // SystemTime can jump backward between `start_time` capture and
+        // `end_system_time = SystemTime::now()` (NTP step, manual clock change,
+        // VM clock catch-up), which yields a start that is AFTER the stop or an
+        // implausibly-far-future start — exactly the SS5 hazard. We do NOT
+        // rewrite the recorded timestamps (silently editing history could itself
+        // emit a wrong value, and the data team forbids changing existing field
+        // meanings); instead we record an additive `clock_anomaly` diagnostic so
+        // a buyer can detect and quarantine the session, and we log loudly.
+        // Note: the `duration` / `duration_ns` fields are derived from the
+        // MONOTONIC `Instant` (`start_instant.elapsed()`), so they remain correct
+        // even when the wall clock is skewed.
+        let clock_anomaly = detect_clock_anomaly(start_timestamp, end_timestamp, duration);
+        if let Some(ref anomaly) = clock_anomaly {
+            tracing::warn!(
+                "Clock anomaly in recording metadata: kind={}, start_utc={}s, end_utc={}s, \
+                 monotonic_duration={}s. Wall-clock timestamps are suspect; \
+                 monotonic `duration`/`duration_ns` remain authoritative.",
+                anomaly.kind,
+                start_timestamp,
+                end_timestamp,
+                duration
+            );
+        }
 
         // fps_effective / frame_count fix (ISC-DATA-FPS): the `frame_count` arg comes
         // from `fps_logger`, whose `on_frame_fps()` is driven by the ~1 Hz `update_fps`
@@ -931,6 +1207,30 @@ impl LocalRecording {
         let mut metadata_value = serde_json::to_value(&metadata)?;
         Self::inject_extra_metadata_fields(&mut metadata_value);
 
+        // Surface the encoder that ACTUALLY encoded this recording as a
+        // top-level convenience field so the session is self-describing for the
+        // buyer (PRD: "encoder actually used") without parsing the nested
+        // `recorder_extra` blob. The embedded OBS recorder already records the
+        // actually-constructed encoder id (including any runtime fallback) under
+        // `recorder_extra.encoder`; we promote it verbatim. This is purely
+        // additive and only set when genuinely known — we never fabricate it
+        // (the socket recorder returns no settings, so the field is simply
+        // absent there rather than guessed).
+        Self::inject_encoder_used(&mut metadata_value);
+
+        // Additive clock-anomaly diagnostic (see guard above). Only emitted when
+        // an anomaly was detected, so healthy recordings are unchanged.
+        if let Some(anomaly) = clock_anomaly {
+            if let Some(obj) = metadata_value.as_object_mut() {
+                match serde_json::to_value(&anomaly) {
+                    Ok(v) => {
+                        obj.insert("clock_anomaly".to_string(), v);
+                    }
+                    Err(e) => tracing::warn!("Failed to serialize clock_anomaly: {e}"),
+                }
+            }
+        }
+
         let metadata_json = serde_json::to_string_pretty(&metadata_value)?;
         durable_write::write_atomic_async(&metadata_path, metadata_json.into_bytes()).await?;
 
@@ -1006,6 +1306,38 @@ impl LocalRecording {
             "session_dir_timezone".to_string(),
             serde_json::Value::from("local"),
         );
+    }
+
+    /// Promote the encoder that ACTUALLY encoded this recording to a top-level
+    /// `encoder_used` string, copied verbatim from `recorder_extra.encoder` when
+    /// present.
+    ///
+    /// WHY a top-level mirror: the buyer PRD wants each session self-describing
+    /// ("encoder actually used") without reaching into the recorder-specific
+    /// `recorder_extra` blob, whose shape varies per backend. The embedded OBS
+    /// recorder writes the actually-constructed encoder id there (including any
+    /// runtime fallback to a different encoder), so this is the truthful value.
+    ///
+    /// HONESTY: we ONLY set the field when `recorder_extra.encoder` is a real
+    /// string. The socket recorder returns no settings (`recorder_extra` is
+    /// `null`), so the field is simply ABSENT for those sessions rather than a
+    /// fabricated guess — same data-integrity rule as `camera_intrinsics`'
+    /// `source` tag. Purely additive: never overwrites an existing key.
+    fn inject_encoder_used(metadata_value: &mut serde_json::Value) {
+        let Some(obj) = metadata_value.as_object_mut() else {
+            return;
+        };
+        if obj.contains_key("encoder_used") {
+            return;
+        }
+        if let Some(encoder) = obj
+            .get("recorder_extra")
+            .and_then(|extra| extra.get("encoder"))
+            .and_then(|enc| enc.as_str())
+            .map(str::to_owned)
+        {
+            obj.insert("encoder_used".to_string(), serde_json::Value::from(encoder));
+        }
     }
 }
 

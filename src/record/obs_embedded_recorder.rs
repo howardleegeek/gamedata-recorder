@@ -1205,6 +1205,36 @@ impl RecorderState {
             software_encoder,
         ))?;
 
+        // ── REMOTE DIAGNOSTICS ──────────────────────────────────────────────
+        // PURELY ADDITIVE. One consolidated, greppable line capturing the
+        // runtime recording configuration we otherwise fly blind on when a
+        // tester reports a bad run (we cannot reproduce: this only runs on
+        // Windows + a real GPU). Grep target: `RECORDING CONFIG`.
+        //
+        // All values below are already decided/in-scope at this point — the
+        // encoder has been constructed (`actual_encoder_type`) and the 720p
+        // software cap resolved (`software_encoder` → `reset_video`). Nothing
+        // here is plumbed in or can fail the recording: `get_version()` returns
+        // a `Result` but is funnelled through `.ok()` so a (currently
+        // impossible) error logs `None` rather than propagating.
+        //
+        // `request.video_settings.encoder` is the encoder we asked OBS to build
+        // (already reconciled against `available_encoders` above), so
+        // `encoder_fell_back` flags a *construction-time* runtime fallback
+        // (e.g. NVENC session cap, parked Optimus dGPU) distinct from the
+        // selection-time degrade already logged earlier.
+        tracing::info!(
+            actual_encoder = %actual_encoder_type,
+            requested_encoder = %request.video_settings.encoder,
+            encoder_fell_back = actual_encoder_type != request.video_settings.encoder,
+            software_encoder,
+            adapter_index = self.adapter_index,
+            game_resolution = ?request.game_resolution,
+            available_encoders = ?self.available_encoders,
+            obs_version = ?self.obs_context.get_version().ok(),
+            "RECORDING CONFIG: runtime recorder configuration"
+        );
+
         // Resolve the effective capture mode again here — `Recording::start`
         // already computed one for the resolution pick, but recomputing is
         // cheap and keeps this call site self-contained (no extra IPC field
