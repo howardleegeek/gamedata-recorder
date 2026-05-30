@@ -425,6 +425,47 @@ impl Recording {
             );
         }
 
+        // Collect the MC mod's game_state.jsonl into this session (ISC-DATA-GS).
+        //
+        // The Oyster Fabric mod (world.oyster.recorder.OysterRecorderMod) streams
+        // per-tick player pose/orientation/velocity/state to a FIXED legacy path it
+        // hard-codes in SessionDir.java:
+        //     ~/Documents/OysterClips/active_session/game_state.jsonl
+        // That convention predates the Rust recorder (it was the old Python
+        // OysterRecorder.exe's session dir), so the data is produced correctly but
+        // never lands in THIS recorder's session dir. Copy it in now so game_state
+        // ships with the rest of the session. Best-effort: the mod writes the whole
+        // MC session (from world-join, not record-start), so the server pipeline
+        // trims to this recording's [wall_clock_start, wall_clock_end] window by
+        // each row's `timestamp_ms`. Absence is non-fatal (mod off / not installed).
+        if let Some(home) = dirs::home_dir() {
+            let mod_game_state = home
+                .join("Documents")
+                .join("OysterClips")
+                .join("active_session")
+                .join("game_state.jsonl");
+            if mod_game_state.exists() {
+                let dest = self
+                    .recording_location
+                    .join(constants::filename::recording::GAME_STATE);
+                match tokio::fs::copy(&mod_game_state, &dest).await {
+                    Ok(n) => tracing::info!(
+                        "Collected MC mod game_state.jsonl ({n} bytes) into session {}",
+                        self.recording_location.display()
+                    ),
+                    Err(e) => tracing::warn!(
+                        "Failed to collect game_state.jsonl into session (non-fatal): {e}"
+                    ),
+                }
+            } else {
+                tracing::warn!(
+                    "MC mod game_state.jsonl not found at {} — session will lack game_state \
+                     (mod not running, or wrote elsewhere)",
+                    mod_game_state.display()
+                );
+            }
+        }
+
         let gamepads = input_capture.gamepads();
         LocalRecording::write_metadata_and_validate(
             self.recording_location,

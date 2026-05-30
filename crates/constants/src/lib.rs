@@ -429,6 +429,11 @@ pub mod filename {
         /// Per-frame timestamp log — one `{idx, t_ns}` JSON object per line.
         /// Enables precise frame-to-input alignment downstream.
         pub const FRAMES_JSONL: &str = "frames.jsonl";
+        /// Per-tick player pose/orientation/velocity/state from the Oyster MC
+        /// mod (world.oyster.recorder). The recorder collects it into the
+        /// session at stop; the server pipeline trims it to the recording's
+        /// wall-clock window by each row's `timestamp_ms`. See ISC-DATA-GS.
+        pub const GAME_STATE: &str = "game_state.jsonl";
     }
 
     pub mod persistent {

@@ -641,15 +641,21 @@ impl LocalRecording {
                 0.0
             });
 
-        // Effective FPS from frame count and duration — mirrors competitor semantics
-        // and will differ from `average_fps` when frames were dropped at the edges.
-        let fps_effective = frame_count.and_then(|n| {
-            if duration > 0.0 {
-                Some(n as f64 / duration)
-            } else {
-                None
-            }
-        });
+        // fps_effective / frame_count fix (ISC-DATA-FPS): the `frame_count` arg comes
+        // from `fps_logger`, whose `on_frame()` is driven by the ~1 Hz `update_fps`
+        // poll (embedded libobs exposes no per-frame callback), so it counts SECONDS,
+        // not frames. Dividing it by duration yielded a bogus ~1 fps even though the
+        // encoded mp4 is a real 30 fps — and `average_fps` (derived from
+        // obs_output_get_total_frames) proves it. A buyer / PRD-audit reading the old
+        // `fps_effective` would misclassify real 30 fps footage as a frozen 1 fps
+        // capture. Report the TRUE OBS frame rate, and derive a real frame count from
+        // it so the two fields agree with the mp4. Fall back to the heartbeat count
+        // only when OBS reported no fps at all.
+        let fps_effective = average_fps.filter(|_| duration > 0.0);
+        let frame_count = match average_fps {
+            Some(f) if duration > 0.0 => Some((f * duration).round() as u64),
+            _ => frame_count,
+        };
 
         // Wall-clock strings in RFC 3339 for human-friendly audit trails.
         let wall_clock_start = chrono::DateTime::<chrono::Utc>::from(start_time).to_rfc3339();
