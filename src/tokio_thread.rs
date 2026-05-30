@@ -902,13 +902,23 @@ async fn main(
                     }
                 }
 
+                // Poison-tolerant writes: this is the recording-pipeline tick. A
+                // panic here (poisoned RwLock) would kill the whole thread and
+                // bypass the shutdown `recorder.stop()` below, leaving the mp4
+                // unflushed. Recover the guard instead of cascading-panicking.
                 if let Some(ref fg) = foregrounded
                     && fg.is_recordable()
                     && fg.exe_name.is_some()
                 {
-                    *app_state.last_recordable_game.write().unwrap() = fg.exe_name.clone();
+                    *app_state
+                        .last_recordable_game
+                        .write()
+                        .unwrap_or_else(|p| p.into_inner()) = fg.exe_name.clone();
                 }
-                *app_state.last_foregrounded_game.write().unwrap() = foregrounded;
+                *app_state
+                    .last_foregrounded_game
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner()) = foregrounded;
                 // Tick state machine
                 if let Some((to_state, task)) = state.tick().await {
                     if let Err(e) = state.handle_transition(to_state).await {
@@ -1170,8 +1180,21 @@ impl State {
     async fn tick(&mut self) -> Option<(RecordingState, &'static str)> {
         if let RecordingState::Recording = self.recording_state {
             let Some(recording) = self.recorder.recording() else {
-                tracing::error!("Expected recording to exist in Recording state, but found None");
-                return None;
+                // Inconsistent state: the state machine believes we're Recording,
+                // but the recorder has no active recording. This can happen if a
+                // recording restart stopped the old recording but failed to start
+                // a new one. Rather than returning None (which would re-detect the
+                // same inconsistency every tick forever — perpetual error spam with
+                // no recovery), drive the machine back to Idle so the next tick can
+                // cleanly re-trigger auto-record.
+                tracing::error!(
+                    "Inconsistent state: Recording state with no active recording; \
+                     recovering to Idle"
+                );
+                return Some((
+                    RecordingState::Idle,
+                    "recover from inconsistent recording state",
+                ));
             };
 
             // Extract game name early to avoid borrow issues later
@@ -1620,6 +1643,16 @@ impl State {
                 RecordingState::Paused { pid }
             }
             (RecordingState::Paused { .. }, RecordingState::Idle) => {
+                // Defense-in-depth: entering Paused always stops the active
+                // recording, so by the time we transition Paused -> Idle the
+                // recorder must have no active recording. The invariant holds
+                // today but isn't otherwise enforced; assert it in debug builds
+                // so a future regression surfaces loudly rather than silently
+                // leaving a dangling recording.
+                debug_assert!(
+                    self.recorder.recording().is_none(),
+                    "Paused->Idle: recorder still has active recording"
+                );
                 let honk = self.app_state.config.read().unwrap().preferences.honk;
                 // When user stop keys recording while paused, or when the paused app closes
                 *self.app_state.state.write().unwrap() = RecordingStatus::Stopped;
@@ -1661,7 +1694,18 @@ impl State {
                 // Restart the currently active recording
                 // Here we intentionally set honk to false, we don't want audio cue to occur
                 // on an intended recording restart and confuse the user
-                let unsupported_games = self.app_state.unsupported_games.read().unwrap().clone();
+                //
+                // Poison-tolerant read: this runs on the recording-pipeline thread.
+                // If the unsupported_games RwLock is poisoned (a writer panicked
+                // while holding it), `.unwrap()` would panic and kill this thread,
+                // bypassing the shutdown `recorder.stop()` and leaving the mp4
+                // unflushed. Degrade gracefully: recover the last-known value.
+                let unsupported_games = self
+                    .app_state
+                    .unsupported_games
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone();
                 let _ = stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
@@ -1669,14 +1713,32 @@ impl State {
                     &mut self.cue_cache,
                 )
                 .await?;
-                start_recording_safely(
+                // At this point the old recording has been stopped, so
+                // `recorder.recording()` is now None and the RecordingStatus has
+                // already been set to Stopped by `recorder.stop()`. If the restart
+                // fails, we MUST drive the state machine back to Idle before
+                // returning the error — otherwise `recording_state` stays
+                // `Recording` while there is no active recording, which wedges the
+                // machine: every subsequent `tick()` would re-detect the
+                // inconsistency and auto-record would never fire again until app
+                // restart. Setting `recording_state = Idle` here lets the next tick
+                // cleanly re-trigger auto-record.
+                if let Err(e) = start_recording_safely(
                     &mut self.recorder,
                     &self.input_capture,
                     &unsupported_games,
                     self.sink.as_ref().map(|s| (s, false, &*self.app_state)),
                     &mut self.cue_cache,
                 )
-                .await?;
+                .await
+                {
+                    tracing::error!(
+                        e = ?e,
+                        "Failed to restart recording; recovering to Idle so auto-record can re-fire"
+                    );
+                    self.recording_state = RecordingState::Idle;
+                    return Err(e);
+                }
                 self.last_active = Instant::now();
                 RecordingState::Recording
             }

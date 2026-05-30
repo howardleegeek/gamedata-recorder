@@ -24,6 +24,21 @@ use crate::{
 use super::fps_logger::FpsLogger;
 use super::local_recording::LocalRecording;
 
+/// Upper bound on how many bytes of the MC mod's `game_state.jsonl` we will
+/// pull into memory during `stop()`.
+///
+/// The Oyster Fabric mod APPENDS to that file for the WHOLE Minecraft session
+/// (from world-join, not record-start), so a multi-hour session can grow it to
+/// hundreds of MB. Reading the whole thing with `tokio::fs::read` during the
+/// critical stop window — while OBS is still flushing/encoding — risks OOM or a
+/// multi-second stall on a low-RAM machine. Above this cap we do a bounded TAIL
+/// read instead: the server pipeline only needs the rows whose `timestamp_ms`
+/// fall inside this recording's window, and those are at the END of the file,
+/// so dropping the head of a giant file is acceptable (we LOG a warn so it's
+/// honest). 50 MiB of JSONL pose rows is far more than any single recording's
+/// window needs while staying trivially safe to hold in RAM.
+const MAX_GAME_STATE_BYTES: u64 = 50 * 1024 * 1024;
+
 /// Parameters for starting a recording
 pub(crate) struct RecordingParams {
     pub recording_location: PathBuf,
@@ -262,6 +277,111 @@ impl Recording {
         self.fps_logger.on_frame();
     }
 
+    /// Bounded TAIL read of a too-large `game_state.jsonl`, returning only
+    /// COMPLETE JSONL lines that fall within the last `MAX_GAME_STATE_BYTES`.
+    ///
+    /// Invoked only when the file is already known to be larger than the cap
+    /// (caller stat's it first and passes `file_len`). The tail window starts at
+    /// `file_len - MAX_GAME_STATE_BYTES`, which almost certainly lands in the
+    /// MIDDLE of a line, so after reading we:
+    ///   1. Drop everything up to AND INCLUDING the first `\n` (the partial head
+    ///      line we sliced into), and
+    ///   2. Drop everything after the last `\n` (the partial trailing line the
+    ///      mod may be mid-append on).
+    /// What's left is a run of whole lines. If the window contains zero or one
+    /// `\n` (degenerate — e.g. an absurdly long single line), there are no two
+    /// newlines to bracket a complete line, so we return an empty buffer rather
+    /// than a partial record.
+    ///
+    /// We LOG a warn that the head was dropped so the lossy collection is
+    /// honest in the field. Every failure path returns `None` (warn + continue);
+    /// this can never fail the recording, and contains no unwrap/panic.
+    async fn read_game_state_tail(path: &std::path::Path, file_len: u64) -> Option<Vec<u8>> {
+        use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+
+        // Safe because the caller only calls us when file_len > the cap, so the
+        // subtraction can't underflow; saturating_sub keeps it panic-free even
+        // if that contract ever changes (a 0 offset just reads the whole file,
+        // which the trimming below still handles correctly).
+        let tail_len = MAX_GAME_STATE_BYTES;
+        let start = file_len.saturating_sub(tail_len);
+
+        let mut file = match tokio::fs::File::open(path).await {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to open large MC mod game_state.jsonl for tail read \
+                     (non-fatal): {e}"
+                );
+                return None;
+            }
+        };
+        if let Err(e) = file.seek(std::io::SeekFrom::Start(start)).await {
+            tracing::warn!(
+                "Failed to seek into large MC mod game_state.jsonl for tail read \
+                 (non-fatal): {e}"
+            );
+            return None;
+        }
+
+        // Read the tail window. The file may have grown between stat and read
+        // (the mod is still appending), so cap the buffer at the window size we
+        // intended and read until EOF or full — extra appended bytes past the
+        // window are simply not read this pass, which is fine.
+        let mut buf = Vec::with_capacity(tail_len as usize);
+        let mut limited = (&mut file).take(tail_len);
+        if let Err(e) = limited.read_to_end(&mut buf).await {
+            tracing::warn!(
+                "Failed to read tail of large MC mod game_state.jsonl \
+                 (non-fatal): {e}"
+            );
+            return None;
+        }
+
+        // Drop the partial HEAD line: everything up to and including the first
+        // newline (our seek almost certainly split a line). If there is no
+        // newline at all, the whole window is one partial line -> nothing
+        // complete to keep.
+        let after_head = match buf.iter().position(|&b| b == b'\n') {
+            Some(idx) => idx + 1,
+            None => {
+                tracing::warn!(
+                    "Tail window of MC mod game_state.jsonl had no newline; \
+                     collecting empty game_state (file dominated by one oversized line)"
+                );
+                return Some(Vec::new());
+            }
+        };
+
+        // Drop the partial TRAILING line: everything after the last newline.
+        // Search only within the post-head region so we never keep the head.
+        let tail_region = &buf[after_head..];
+        let complete_end = match tail_region.iter().rposition(|&b| b == b'\n') {
+            Some(idx) => idx + 1, // relative to tail_region start
+            None => {
+                // Only the head line's newline existed; no further complete
+                // line in the window.
+                tracing::warn!(
+                    "Tail window of MC mod game_state.jsonl held no complete line after \
+                     dropping the partial head; collecting empty game_state"
+                );
+                return Some(Vec::new());
+            }
+        };
+
+        let complete = tail_region[..complete_end].to_vec();
+        tracing::warn!(
+            "MC mod game_state.jsonl is {} bytes (> {} cap); collected only the trailing \
+             {} bytes of complete lines and DROPPED the head. Server trims by timestamp_ms \
+             so this is expected for very long sessions, but the early part of game_state \
+             is not in this session.",
+            file_len,
+            MAX_GAME_STATE_BYTES,
+            complete.len()
+        );
+        Some(complete)
+    }
+
     pub(crate) async fn stop(
         self,
         recorder: &mut dyn VideoRecorder,
@@ -270,6 +390,19 @@ impl Recording {
     ) -> Result<()> {
         let window_name = self.get_window_name();
         let mut result = recorder.stop_recording().await;
+
+        // Snapshot the dropped-event count BEFORE consuming the writer. The
+        // writer's `stop()` takes `self` by value, so once it errors we can no
+        // longer read its counter — but `input_stream` (not consumed by stop)
+        // shares the SAME `Arc<AtomicU64>` (see InputEventStream::clone_shared),
+        // so this snapshot reflects the writer's real accumulated drop count.
+        // Used as the fallback below so a stop error doesn't zero out the count
+        // that feeds the INVALID-reason diagnostics in metadata.
+        let dropped_snapshot = self
+            .input_stream
+            .dropped_counter()
+            .map(|c| c.get())
+            .unwrap_or(0);
 
         // Don't propagate input_writer errors — treat like recorder errors
         // (write INVALID marker instead of returning Err which skips metadata)
@@ -280,7 +413,10 @@ impl Recording {
                 if result.is_ok() {
                     result = Err(e);
                 }
-                0 // Default to 0 if error occurred
+                // The consuming `stop()` failed, so its return count is gone;
+                // fall back to the pre-stop snapshot (same shared counter) so we
+                // preserve the real drop count for diagnostics instead of 0.
+                dropped_snapshot
             }
         };
 
@@ -451,49 +587,83 @@ impl Recording {
                 // The Fabric mod APPENDS to this file concurrently, so a plain
                 // `tokio::fs::copy` can capture a partial final JSONL line (a
                 // torn read between the mod's `write` and its newline) or hit
-                // ERROR_SHARING_VIOLATION mid-flight. Instead: read the bytes,
-                // drop any trailing partial line (keep only through the last
-                // `\n`), and write the result with the same atomic-write helper
-                // used for the INVALID marker. Result: every collected
-                // game_state.jsonl ends on a complete line, and this step can
-                // never fail the recording (absence stays warn + continue).
-                match tokio::fs::read(&mod_game_state).await {
-                    Ok(bytes) => {
-                        // Keep only up to and including the last newline so a
-                        // half-written final line is discarded. If there is no
-                        // newline at all the file holds no complete line yet, so
-                        // we collect an empty file rather than a partial record.
-                        let complete_len = match bytes.iter().rposition(|&b| b == b'\n') {
-                            Some(idx) => idx + 1,
-                            None => 0,
-                        };
-                        let dropped = bytes.len() - complete_len;
-                        if dropped > 0 {
-                            tracing::debug!(
-                                "Dropping {dropped} trailing byte(s) of partial final line from \
-                                 game_state.jsonl before collecting (concurrent mod append)"
-                            );
-                        }
-                        let complete = bytes[..complete_len].to_vec();
-                        let n = complete.len();
-                        // Atomic write (write-tmp → fsync → rename), same crash-safe
-                        // pattern as the INVALID marker above. Errors are logged and
-                        // swallowed — collecting game_state must never fail the recording.
-                        match durable_write::write_atomic_async(dest.clone(), complete).await {
-                            Ok(()) => tracing::info!(
-                                "Collected MC mod game_state.jsonl ({n} complete bytes) into \
-                                 session {}",
-                                self.recording_location.display()
-                            ),
-                            Err(e) => tracing::warn!(
-                                "Failed to write collected game_state.jsonl into session \
-                                 (non-fatal): {e}"
-                            ),
+                // ERROR_SHARING_VIOLATION mid-flight. Instead we read the bytes
+                // and trim to whole lines before the atomic write.
+                //
+                // But the file can be hundreds of MB for a multi-hour MC session
+                // (the mod appends from world-join, not record-start), and a full
+                // `tokio::fs::read` would pull all of that into RAM during the
+                // critical stop window — alongside OBS encoding — risking OOM /
+                // a multi-second stall on a low-RAM machine. So: stat the file
+                // first, and only above MAX_GAME_STATE_BYTES fall back to a
+                // BOUNDED TAIL read (the server trims by `timestamp_ms` and only
+                // needs the tail, so dropping the head of a giant file is
+                // acceptable — we warn so it's honest). Under the cap we keep the
+                // existing full-read + trailing-trim path. Every error path here
+                // stays non-fatal (warn + continue); this step must NEVER fail
+                // the recording, and there is no unwrap/panic.
+                let collected = match tokio::fs::metadata(&mod_game_state).await {
+                    Ok(meta) if meta.len() > MAX_GAME_STATE_BYTES => {
+                        Self::read_game_state_tail(&mod_game_state, meta.len()).await
+                    }
+                    Ok(_) => {
+                        // Under the cap: read the whole file and drop only the
+                        // (possibly torn) trailing partial line.
+                        match tokio::fs::read(&mod_game_state).await {
+                            Ok(bytes) => {
+                                // Keep only up to and including the last newline
+                                // so a half-written final line is discarded. With
+                                // no newline at all the file holds no complete
+                                // line yet, so we collect an empty file rather
+                                // than a partial record.
+                                let complete_len = match bytes.iter().rposition(|&b| b == b'\n') {
+                                    Some(idx) => idx + 1,
+                                    None => 0,
+                                };
+                                let dropped = bytes.len() - complete_len;
+                                if dropped > 0 {
+                                    tracing::debug!(
+                                        "Dropping {dropped} trailing byte(s) of partial final \
+                                         line from game_state.jsonl before collecting \
+                                         (concurrent mod append)"
+                                    );
+                                }
+                                Some(bytes[..complete_len].to_vec())
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to read MC mod game_state.jsonl for collection \
+                                     (non-fatal): {e}"
+                                );
+                                None
+                            }
                         }
                     }
-                    Err(e) => tracing::warn!(
-                        "Failed to read MC mod game_state.jsonl for collection (non-fatal): {e}"
-                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to stat MC mod game_state.jsonl for collection \
+                             (non-fatal): {e}"
+                        );
+                        None
+                    }
+                };
+
+                if let Some(complete) = collected {
+                    let n = complete.len();
+                    // Atomic write (write-tmp → fsync → rename), same crash-safe
+                    // pattern as the INVALID marker above. Errors are logged and
+                    // swallowed — collecting game_state must never fail the recording.
+                    match durable_write::write_atomic_async(dest.clone(), complete).await {
+                        Ok(()) => tracing::info!(
+                            "Collected MC mod game_state.jsonl ({n} complete bytes) into \
+                             session {}",
+                            self.recording_location.display()
+                        ),
+                        Err(e) => tracing::warn!(
+                            "Failed to write collected game_state.jsonl into session \
+                             (non-fatal): {e}"
+                        ),
+                    }
                 }
             } else {
                 tracing::warn!(
