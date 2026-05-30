@@ -345,19 +345,21 @@ impl App {
         // the disclosure. Any other view (main, recording controls, tray
         // menu interactions that drive recording) is gated behind it.
         //
-        // We key on `Credentials::consent_given_at_version` against the
-        // running `CARGO_PKG_VERSION`. This invalidates stored consent any
-        // time the package version bumps, so updated disclosure text is
-        // always re-acknowledged. The stale `has_consented` boolean is kept
-        // in sync but is no longer authoritative on its own — the version
-        // match is.
+        // We key on `Credentials::consent_given_at_version` against the active
+        // consent DISCLOSURE version (`constants::CONSENT_DISCLOSURE_VERSION`),
+        // NOT the running `CARGO_PKG_VERSION`. Re-prompting therefore happens
+        // only when the disclosure text changes — patch/minor app updates keep
+        // prior consent valid. The stale `has_consented` boolean is kept in
+        // sync but is no longer authoritative on its own — the version match
+        // is.
         //
         // API-key / login routing remains disabled while we focus on local
         // recording; re-enable by reinstating the commented match below once
         // backend integration is required.
         let needs_consent = {
-            let current = crate::config::current_pkg_version();
-            self.local_credentials.consent_status(&current) != input_capture::ConsentStatus::Granted
+            let disclosure = crate::config::consent_disclosure_version();
+            self.local_credentials.consent_status(&disclosure)
+                != input_capture::ConsentStatus::Granted
         };
         if needs_consent {
             self.consent_view(ctx);
@@ -395,11 +397,12 @@ impl App {
     }
 
     fn go_to_main(&mut self) {
-        // R46: record acceptance at the current binary version. A future
-        // version bump will invalidate this and re-prompt. Both the boolean
-        // and the version are written so legacy read paths keep working,
-        // while the gate keys on the version match.
+        // R46: record acceptance at the current consent DISCLOSURE version
+        // (not the app's binary version). A future *disclosure* change will
+        // bump that constant and re-prompt; ordinary patch/minor app updates
+        // will not. Both the boolean and the version are written so legacy
+        // read paths keep working, while the gate keys on the version match.
         self.local_credentials
-            .record_consent(crate::config::current_pkg_version());
+            .record_consent(crate::config::consent_disclosure_version());
     }
 }

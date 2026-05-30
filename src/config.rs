@@ -549,16 +549,22 @@ where
 pub struct Credentials {
     pub api_key: String,
     pub has_consented: bool,
-    /// R46 (GDPR/CCPA): the application version the user was shown when they
-    /// accepted the consent disclosure. `None` means the user has never
-    /// accepted any version. If this does not match the currently-running
-    /// `CARGO_PKG_VERSION`, the ConsentView is shown again so the user must
-    /// re-consent to any updated disclosure text.
+    /// R46 (GDPR/CCPA): the consent **disclosure** version the user accepted.
+    /// `None` means the user has never accepted any version. If this does not
+    /// match the active `constants::CONSENT_DISCLOSURE_VERSION`, the ConsentView
+    /// is shown again so the user must re-consent to the updated disclosure
+    /// text.
+    ///
+    /// IMPORTANT: this is the disclosure-text version, NOT the app's
+    /// `CARGO_PKG_VERSION`. Comparing against the disclosure version (rather
+    /// than the binary version) means patch/minor app updates keep consent
+    /// valid; only a disclosure-text change re-prompts. See
+    /// `consent_disclosure_version` for the full rationale.
     ///
     /// This field gates every code path that installs a global input hook or
     /// opens a video/audio capture pipeline — see `Credentials::consent_status`
     /// and `input_capture::ConsentGuard`. Serialized as a semver string (e.g.
-    /// `"2.5.5"`); `None` round-trips as `null` / missing.
+    /// `"2.6.0"`); `None` round-trips as `null` / missing.
     ///
     /// Credentials uses a manual Serialize/Deserialize via `CredentialsOnDisk`
     /// (the DPAPI wrap path), so `#[serde(default)]` would be a no-op here
@@ -703,25 +709,34 @@ impl Credentials {
         Ok(())
     }
 
-    /// Compute the consent status for the currently-running binary.
+    /// Compute the consent status against the active consent **disclosure**
+    /// version.
     ///
-    /// Returns `Granted` iff the stored `consent_given_at_version` parses as
-    /// semver and equals `current_version`. Returns `NotGranted` if no
-    /// version has ever been accepted, and `VersionMismatch` if a prior
-    /// version was accepted but this binary is newer/older.
-    pub fn consent_status(&self, current_version: &Version) -> ConsentStatus {
+    /// `disclosure_version` is the version of the consent disclosure *text*
+    /// (see [`consent_disclosure_version`] /
+    /// [`constants::CONSENT_DISCLOSURE_VERSION`]), NOT the app's
+    /// `CARGO_PKG_VERSION`. Returns `Granted` iff the stored
+    /// `consent_given_at_version` equals `disclosure_version`, `NotGranted` if
+    /// no version has ever been accepted, and `VersionMismatch` if the user
+    /// accepted a different (older) disclosure that has since changed.
+    ///
+    /// Because the disclosure version only moves when the disclosure text
+    /// changes, patch/minor app updates no longer invalidate stored consent.
+    pub fn consent_status(&self, disclosure_version: &Version) -> ConsentStatus {
         match &self.consent_given_at_version {
             None => ConsentStatus::NotGranted,
-            Some(v) if v == current_version => ConsentStatus::Granted,
+            Some(v) if v == disclosure_version => ConsentStatus::Granted,
             Some(_) => ConsentStatus::VersionMismatch,
         }
     }
 
     /// Record that the user has accepted the consent disclosure at the given
-    /// version. The UI calls this when the user clicks "Accept".
-    pub fn record_consent(&mut self, current_version: Version) {
+    /// version. The UI calls this when the user clicks "Accept", passing the
+    /// active disclosure version (see [`consent_disclosure_version`]) so the
+    /// stored value matches what the gate later compares against.
+    pub fn record_consent(&mut self, disclosure_version: Version) {
         self.has_consented = true;
-        self.consent_given_at_version = Some(current_version);
+        self.consent_given_at_version = Some(disclosure_version);
     }
 }
 
@@ -729,16 +744,45 @@ impl Credentials {
 ///
 /// Panics only if the Cargo.toml version literal is malformed — which would
 /// be caught at build time. Callers can treat this as infallible at runtime.
+///
+/// NOTE: This is the *application* version. It is intentionally NOT used to
+/// gate consent anymore — see [`consent_disclosure_version`] for why. Keeping
+/// it because other call sites (telemetry, update checks) still want the live
+/// binary version.
 pub fn current_pkg_version() -> Version {
     // `env!` is compile-time; the value comes straight from Cargo.toml.
     Version::parse(env!("CARGO_PKG_VERSION"))
         .expect("CARGO_PKG_VERSION must be valid semver; this is a build-time contract")
 }
 
-/// Build a [`ConsentGuard`] from the current config and running binary version.
+/// The version of the **consent disclosure text** the consent gate keys on.
+///
+/// R46 fix: the gate previously compared stored consent against
+/// `CARGO_PKG_VERSION`, so EVERY app version bump silently invalidated consent
+/// and blocked auto-recording (a tester hit exactly this on the 2.6.0 -> 2.6.3
+/// bumps: the recorder booted but never recorded). We now compare against the
+/// disclosure-text version in [`constants::CONSENT_DISCLOSURE_VERSION`], which
+/// is bumped only when the disclosure itself changes. Patch/minor app updates
+/// therefore keep consent valid; only a disclosure change re-prompts.
+///
+/// Panics only if the constant is malformed — a build-time contract, exactly
+/// like [`current_pkg_version`].
+pub fn consent_disclosure_version() -> Version {
+    Version::parse(constants::CONSENT_DISCLOSURE_VERSION).expect(
+        "constants::CONSENT_DISCLOSURE_VERSION must be valid semver; this is a build-time contract",
+    )
+}
+
+/// Build a [`ConsentGuard`] from the current config and the active consent
+/// disclosure version.
 ///
 /// This is the single entry point for every recording path that needs to
 /// verify consent — input capture, OBS recorder, etc.
+///
+/// The comparison is against [`consent_disclosure_version`] (the disclosure
+/// text version), NOT [`current_pkg_version`] (the app version), so a patch or
+/// minor app update keeps prior consent valid. The legal gate is preserved:
+/// the user must still have consented at the current disclosure version.
 ///
 /// CI mode (see [`ci_mode`]) short-circuits to a session-only granted guard
 /// without consulting the on-disk config. This is a test-scaffolding bypass:
@@ -748,8 +792,8 @@ pub fn consent_guard_from_config(config: &Config) -> ConsentGuard {
     if ci_mode() {
         return ConsentGuard::granted();
     }
-    let current = current_pkg_version();
-    ConsentGuard::new(config.credentials.consent_status(&current))
+    let disclosure = consent_disclosure_version();
+    ConsentGuard::new(config.credentials.consent_status(&disclosure))
 }
 
 /// Returns `true` when the recorder is running under the automated CI test
@@ -1710,13 +1754,72 @@ mod consent_tests {
     }
 
     #[test]
+    fn consent_disclosure_version_parses() {
+        // Build-time contract: CONSENT_DISCLOSURE_VERSION parses as semver.
+        // If this panics, the constant literal is broken.
+        let _ = consent_disclosure_version();
+    }
+
+    #[test]
     fn consent_guard_from_config_respects_stored_version() {
         let mut cfg = Config::default();
         // Without consent: guard refuses.
         assert!(!consent_guard_from_config(&cfg).is_granted());
 
-        // With consent at the current binary version: guard permits.
-        cfg.credentials.record_consent(current_pkg_version());
+        // With consent at the active disclosure version: guard permits. The
+        // guard keys on the disclosure version, so this is the value the UI
+        // records on Accept.
+        cfg.credentials.record_consent(consent_disclosure_version());
         assert!(consent_guard_from_config(&cfg).is_granted());
+    }
+
+    #[test]
+    fn patch_bump_does_not_invalidate_consent() {
+        // R46 regression: consent must survive an app patch/minor bump. The
+        // gate compares against the DISCLOSURE version, which does NOT move
+        // when CARGO_PKG_VERSION bumps. A tester hit the old bug (2.6.0 ->
+        // 2.6.3 bumps silently invalidated consent, so the recorder booted but
+        // never recorded).
+        //
+        // Self-contained replay of that scenario: the user consented under the
+        // disclosure shipped at 2.6.0, then the app patched forward. As long as
+        // the stored consent equals the active *disclosure* version, the status
+        // is Granted regardless of how far the binary version has moved.
+        let disclosure = Version::parse("2.6.0").unwrap();
+        let mut cfg = Config::default();
+        cfg.credentials.record_consent(disclosure.clone());
+
+        // The binary is now several patches ahead (2.6.3), but the gate keys on
+        // the disclosure version, so consent stands.
+        assert_eq!(
+            cfg.credentials.consent_status(&disclosure),
+            ConsentStatus::Granted,
+            "an app patch/minor bump must NOT invalidate consent — only a \
+             disclosure-text change (CONSENT_DISCLOSURE_VERSION bump) may"
+        );
+
+        // And end-to-end through the real entry point against the live
+        // disclosure constant: consenting at the active disclosure version
+        // yields a granted guard.
+        let mut cfg2 = Config::default();
+        cfg2.credentials
+            .record_consent(consent_disclosure_version());
+        assert!(consent_guard_from_config(&cfg2).is_granted());
+    }
+
+    #[test]
+    fn changed_disclosure_version_forces_reconsent() {
+        // The legal gate is preserved: if the user accepted an OLDER disclosure
+        // than the active one, they must re-consent.
+        let mut cfg = Config::default();
+        cfg.credentials
+            .record_consent(Version::parse("0.0.1").unwrap());
+        assert_eq!(
+            cfg.credentials
+                .consent_status(&consent_disclosure_version()),
+            ConsentStatus::VersionMismatch,
+            "a stored consent at a different disclosure version must re-prompt"
+        );
+        assert!(!consent_guard_from_config(&cfg).is_granted());
     }
 }

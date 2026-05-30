@@ -109,6 +109,25 @@ async fn main(
                 tracing::warn!("Currently-set encoder is no longer available, resetting to x264");
                 config.preferences.encoder.encoder = constants::encoding::VideoEncoderType::X264;
             }
+
+            // v2.6.4 graceful degrade: if the FINAL chosen encoder is software
+            // x264 (no NVENC/AMF/QSV available on this machine), pin the x264
+            // preset to the fastest option so weak/iGPU CPUs aren't pegged.
+            // Native-resolution software H.264 at a slower preset was confirmed
+            // ~1 FPS + system-wide lag on an AMD Radeon 780M iGPU. The matching
+            // 720p output cap is applied in `obs_embedded_recorder::video_info`.
+            // Hardware-encoder machines never enter this branch and keep their
+            // user-selected preset and native resolution.
+            if config.preferences.encoder.encoder == constants::encoding::VideoEncoderType::X264 {
+                let fastest = constants::encoding::X264_PRESETS[0];
+                if config.preferences.encoder.x264.preset != fastest {
+                    tracing::warn!(
+                        previous = %config.preferences.encoder.x264.preset,
+                        "Software x264 encoder in use; forcing '{fastest}' preset to protect weak/iGPU CPU"
+                    );
+                    config.preferences.encoder.x264.preset = fastest.to_string();
+                }
+            }
         }
 
         app_state

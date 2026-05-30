@@ -291,6 +291,14 @@ pub const FPS: u32 = 30;
 pub const RECORDING_WIDTH: u32 = 1920;
 pub const RECORDING_HEIGHT: u32 = 1080;
 
+/// Output-height ceiling applied ONLY when the final video encoder is software
+/// x264 (no NVENC/AMF/QSV available). v2.6.4 graceful-degrade: software H.264
+/// at native 1080p pegs weak/iGPU CPUs (confirmed ~1 FPS + system-wide lag on
+/// an AMD Radeon 780M iGPU). Capping the OUTPUT to 720p (the capture base stays
+/// native, OBS bicubic-downscales) plus the `veryfast` x264 preset keeps those
+/// machines usable. Hardware-encoder machines are unaffected and stay native.
+pub const SOFTWARE_ENCODER_MAX_OUTPUT_HEIGHT: u32 = 720;
+
 /// Minimum free space required to record (in megabytes)
 pub const MIN_FREE_SPACE_MB: u64 = 512;
 
@@ -371,6 +379,32 @@ pub const PLAY_TIME_SAVE_INTERVAL: Duration = if PLAY_TIME_TESTING {
 pub const GH_ORG: &str = "howardleegeek";
 /// GitHub repository
 pub const GH_REPO: &str = "gamedata-recorder";
+
+/// R46 (GDPR/CCPA) consent disclosure version.
+///
+/// This is the version of the **consent disclosure text** the user is shown
+/// in the ConsentView — NOT the application's `CARGO_PKG_VERSION`. The consent
+/// gate (`config::Credentials::consent_status`) compares the user's stored
+/// `consent_given_at_version` against THIS constant, so:
+///
+///   - Patch / minor app updates (e.g. 2.6.3 -> 2.6.4) keep prior consent
+///     valid and do NOT re-prompt — the disclosure text is unchanged.
+///   - The user is still required to consent once at the current disclosure
+///     version, preserving the legal gate.
+///
+/// Bump this ONLY when the disclosure text itself materially changes (new data
+/// collected, new processing purpose, new third party, etc.). Bumping it forces
+/// every user to re-acknowledge the updated disclosure on next launch.
+///
+/// History:
+///   - "2.6.0": baseline disclosure carried by the local-recording builds. Set
+///     here (not the live `CARGO_PKG_VERSION`) so the 2.6.0 -> 2.6.4 patch
+///     bumps no longer silently invalidate consent and block auto-recording
+///     (regression a tester hit: recorder booted but never recorded).
+///
+/// Must parse as semver — `config::consent_disclosure_version()` calls
+/// `semver::Version::parse` on it and treats the result as infallible.
+pub const CONSENT_DISCLOSURE_VERSION: &str = "2.6.0";
 
 pub mod filename {
     pub mod recording {

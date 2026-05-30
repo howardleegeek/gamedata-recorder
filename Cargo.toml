@@ -5,7 +5,7 @@ exclude = ["tools/vm", "test_game"]
 default-members = ["."]
 
 [workspace.package]
-version = "2.6.3"
+version = "2.6.4"
 
 [workspace.dependencies]
 input-capture = { path = "crates/input-capture" }
@@ -48,8 +48,11 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 # `semver` is already in the tree as a transitive (see Cargo.lock). We pin it
 # to the workspace here because `config::Config::consent_given_at_version`
-# stores a parsed `semver::Version` so a bumped `CARGO_PKG_VERSION` invalidates
-# stored consent and re-prompts the user (see R46 / GDPR+CCPA consent gate).
+# stores a parsed `semver::Version`. The R46 consent gate compares it against
+# the consent *disclosure* version (`constants::CONSENT_DISCLOSURE_VERSION`),
+# NOT `CARGO_PKG_VERSION`, so ordinary app version bumps no longer invalidate
+# stored consent — only a disclosure-text change re-prompts (see R46 /
+# GDPR+CCPA consent gate, `config::consent_disclosure_version`).
 semver = { version = "1.0", features = ["serde"] }
 git-version = "0.3"
 sysinfo = "0.32.1"

@@ -893,9 +893,16 @@ impl RecorderState {
                     skipped_frames_notify: skipped_frames_notify.clone(),
                     access_lost_flag: access_lost_flag.clone(),
                 }))
+                // Placeholder video info for context init only — the real
+                // per-recording resolution (and the software-encoder 720p cap)
+                // is applied later via `reset_video` in `start_recording`, once
+                // the game resolution and chosen encoder are known. Pass
+                // `software_encoder = false` here: no encoder is selected yet
+                // and this is the full-res default context.
                 .set_video_info(video_info(
                     adapter_index,
                     (RECORDING_WIDTH, RECORDING_HEIGHT),
+                    false,
                 )),
         )?;
         tracing::debug!("OBS context created successfully");
@@ -990,8 +997,15 @@ impl RecorderState {
             self.obs_context.scene(OWL_SCENE_NAME)?
         };
 
-        self.obs_context
-            .reset_video(video_info(self.adapter_index, request.game_resolution))?;
+        // v2.6.4: x264 is the only software (CPU) encoder; everything else is
+        // hardware (NVENC/AMF/QSV). On software we cap the output to 720p inside
+        // `video_info` so weak/iGPU CPUs aren't pegged at native resolution.
+        let software_encoder = request.video_settings.encoder == VideoEncoderType::X264;
+        self.obs_context.reset_video(video_info(
+            self.adapter_index,
+            request.game_resolution,
+            software_encoder,
+        ))?;
 
         // Resolve the effective capture mode again here — `Recording::start`
         // already computed one for the resolution pick, but recomputing is
@@ -1864,7 +1878,47 @@ fn set_output_source_on_channel(
     Ok(())
 }
 
-fn video_info(adapter_index: usize, (base_width, base_height): (u32, u32)) -> ObsVideoInfo {
+/// Downscale `(base_width, base_height)` so the height fits within `max_height`
+/// while preserving aspect ratio, rounding both dimensions to even values
+/// (H.264/HEVC require even dimensions). If the source is already at or below
+/// `max_height`, it is returned unchanged (only rounded to even). This is the
+/// v2.6.4 software-encoder degrade: cap the OUTPUT to 720p while leaving the
+/// capture base at native resolution so OBS bicubic-downscales for the weak CPU.
+fn fit_output_within_height(base_width: u32, base_height: u32, max_height: u32) -> (u32, u32) {
+    // Defensive: never divide by zero (callers already coerce 0 -> fallback,
+    // but keep this pure helper self-contained for its unit tests).
+    if base_height == 0 || base_width == 0 {
+        return (base_width.max(2), base_height.max(2));
+    }
+
+    let (out_w, out_h) = if base_height > max_height {
+        // Scale width by the same factor we scale height (max_height/base_height),
+        // computed in u64 to avoid overflow on large monitors.
+        let scaled_w =
+            ((base_width as u64) * (max_height as u64) / (base_height as u64)).max(1) as u32;
+        (scaled_w, max_height)
+    } else {
+        (base_width, base_height)
+    };
+
+    // Round DOWN to even; clamp to a 2px floor so we never emit a 0 dimension.
+    let even = |v: u32| (v & !1).max(2);
+    (even(out_w), even(out_h))
+}
+
+/// Build the OBS video-pipeline config.
+///
+/// `software_encoder` is `true` when the final chosen encoder is software x264
+/// (no hardware encoder available). In that case the OUTPUT is capped to
+/// [`constants::SOFTWARE_ENCODER_MAX_OUTPUT_HEIGHT`] (720p) to keep weak/iGPU
+/// CPUs usable; the capture base stays native so we still composite the full
+/// surface and OBS downscales. Hardware-encoder machines pass `false` and stay
+/// at native resolution.
+fn video_info(
+    adapter_index: usize,
+    (base_width, base_height): (u32, u32),
+    software_encoder: bool,
+) -> ObsVideoInfo {
     // Ensure valid dimensions — OBS returns "invalid parameter" if width or height is 0.
     // This can happen when the game window hasn't fully initialized or when using
     // process scan to detect games that don't have a visible window yet.
@@ -1884,14 +1938,36 @@ fn video_info(adapter_index: usize, (base_width, base_height): (u32, u32)) -> Ob
     // Output at the same resolution as the source to preserve aspect ratio.
     // Previously forced 1920x1080 output which stretched non-16:9 content.
     // Monitor capture grabs the full screen, so base = screen resolution.
+    //
+    // v2.6.4: when running on the software x264 encoder, cap the OUTPUT to 720p
+    // (base stays native; OBS bicubic-downscales). Hardware encoders keep native.
+    let (output_width, output_height) = if software_encoder {
+        let (w, h) = fit_output_within_height(
+            base_width,
+            base_height,
+            constants::SOFTWARE_ENCODER_MAX_OUTPUT_HEIGHT,
+        );
+        if (w, h) != (base_width, base_height) {
+            tracing::info!(
+                base = ?(base_width, base_height),
+                output = ?(w, h),
+                "Software x264 encoder: capping output to {}p to protect weak/iGPU CPU",
+                constants::SOFTWARE_ENCODER_MAX_OUTPUT_HEIGHT
+            );
+        }
+        (w, h)
+    } else {
+        (base_width, base_height)
+    };
+
     ObsVideoInfoBuilder::new()
         .adapter(adapter_index as u32)
         .fps_num(FPS)
         .fps_den(1)
         .base_width(base_width)
         .base_height(base_height)
-        .output_width(base_width)
-        .output_height(base_height)
+        .output_width(output_width)
+        .output_height(output_height)
         .scale_type(ObsScaleType::Bicubic)
         .build()
 }
@@ -1981,27 +2057,36 @@ fn prepare_source(
     state: &SourceCreationState,
     last_state: Option<&SourceCreationState>,
 ) -> Result<ObsSourceRef> {
-    // Audio capture disabled to save resources and avoid the WASAPI audio
-    // companion infinite retry loop bug on second recording. With audio disabled:
-    // - Saves ~1-3% CPU, 5-15 MB memory, and ~15% disk space
-    // - Eliminates the second recording crash (no WASAPI companion = no retry loop)
-    // - Recordings are video-only (no game audio)
-    let capture_audio = false;
+    // v2.6.4: audio capture RE-ENABLED. The PRD audit requires a valid audio
+    // track on every recording (QM3/QM4/V6/V7/U2). For GameHook/WGC this turns
+    // the source's own audio tap (the "WASAPI process-loopback companion") back
+    // on; for monitor capture the separate `attach_monitor_capture_audio` path
+    // (channel 1) already supplies desktop audio. Every recording now has audio.
+    //
+    // Audio was previously disabled (v2.6.0-2.6.3) to dodge a 2nd-recording
+    // freeze: the process-loopback companion binds to the game window handle,
+    // and when that handle changes between recordings (e.g. resolution change
+    // in GTA V) the stale companion enters an infinite retry loop ("window
+    // disappeared" → "Device invalidated. Retrying" every ~3s) that starves the
+    // OBS output. The mitigation below now carries the load.
+    let capture_audio = true;
 
-    // Force recreate WGC and GameHook sources to fix the second recording crash.
-    // These capture modes spawn a WASAPI process-loopback audio companion that
-    // binds to the game window handle. When the window changes (e.g., resolution
-    // change in GTA V), the old audio companion enters an infinite retry loop
-    // ("window disappeared" → "Device invalidated. Retrying" every ~3s), which
-    // starves the OBS output and causes the app to appear frozen.
+    // FIX for the 2nd-recording WASAPI freeze: force-recreate the WGC/GameHook
+    // source every recording. Tearing the old source out of the scene drops its
+    // audio companion with it, so the new source binds a FRESH process-loopback
+    // companion to the CURRENT window handle. There is therefore never a stale
+    // companion left polling a dead handle — the retry loop can't start.
     //
-    // By always recreating these sources, we ensure a fresh audio companion is
-    // bound to the current window. This is a simpler and more reliable fix than
-    // trying to detect when the window has changed.
+    // This is the load-bearing mitigation now that `capture_audio = true`
+    // (previously it was defense-in-depth while audio was off). It only fires
+    // when `last_source` is `Some` — i.e. the 2nd and subsequent recordings,
+    // which is exactly the case that used to freeze. The 1st recording has no
+    // prior source/companion to leak, so there is nothing to recreate.
     //
-    // NOTE: With capture_audio=false, the WASAPI companion is never created,
-    // so this issue is bypassed entirely. The force-recreate logic remains
-    // as defense-in-depth.
+    // Recreating (vs. trying to detect a window change and rebind in place) is
+    // both simpler and strictly safer: libobs's WASAPI source does not reliably
+    // rebind to a new window handle, so a fresh source is the only dependable
+    // way to guarantee a healthy companion per recording.
     if matches!(
         state.effective_mode,
         crate::config::EffectiveCaptureMode::Wgc | crate::config::EffectiveCaptureMode::GameHook
@@ -2009,7 +2094,7 @@ fn prepare_source(
         if let Some(source) = last_source.take() {
             tracing::info!(
                 mode = ?state.effective_mode,
-                "Force recreating source (fixes second recording crash with stale WASAPI audio companion)"
+                "Force recreating source so a fresh WASAPI audio companion binds to the current window (prevents 2nd-recording freeze)"
             );
             // Ignore removal errors - we're about to create a new source anyway
             let _ = scene.remove_source(&source);
@@ -2448,6 +2533,48 @@ mod tests {
             crate::config::EffectiveCaptureMode::GameHook,
             false
         ));
+    }
+
+    // --- v2.6.4 software-encoder 720p output cap -----------------------
+    //
+    // `fit_output_within_height` is the pure core of FIX 3: when the final
+    // encoder is software x264 we cap the OUTPUT height (base stays native).
+    // These lock in the aspect-preserving, even-dimension behaviour without a
+    // live OBS context.
+
+    #[test]
+    fn software_cap_downscales_1080p_to_720p_16x9() {
+        // 1920x1080 -> 1280x720 (exact 16:9, both even).
+        assert_eq!(fit_output_within_height(1920, 1080, 720), (1280, 720));
+    }
+
+    #[test]
+    fn software_cap_leaves_below_threshold_untouched() {
+        // A 1366x768 panel is above 720 -> scaled. A 1280x720 source is at the
+        // ceiling -> unchanged. A sub-720 source is left as-is (even already).
+        assert_eq!(fit_output_within_height(1280, 720, 720), (1280, 720));
+        assert_eq!(fit_output_within_height(1024, 576, 720), (1024, 576));
+    }
+
+    #[test]
+    fn software_cap_preserves_aspect_and_rounds_even() {
+        // 1366x768 -> height 720, width = 1366*720/768 = 1280.6 -> 1280 (even).
+        assert_eq!(fit_output_within_height(1366, 768, 720), (1280, 720));
+        // Ultrawide 3440x1440 -> height 720, width = 3440*720/1440 = 1720 (even).
+        assert_eq!(fit_output_within_height(3440, 1440, 720), (1720, 720));
+        // 4K 3840x2160 -> 1280x720.
+        assert_eq!(fit_output_within_height(3840, 2160, 720), (1280, 720));
+    }
+
+    #[test]
+    fn software_cap_never_emits_zero_or_odd_dimension() {
+        // Degenerate inputs must still yield a valid (even, >=2) pair.
+        let (w, h) = fit_output_within_height(0, 0, 720);
+        assert!(w >= 2 && h >= 2 && w % 2 == 0 && h % 2 == 0);
+        // A very tall, 1px-wide sliver must not round width to 0.
+        let (w, h) = fit_output_within_height(1, 4000, 720);
+        assert!(w >= 2 && w % 2 == 0, "width must be even and >= 2, got {w}");
+        assert_eq!(h, 720);
     }
 
     #[test]
