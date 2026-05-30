@@ -1007,12 +1007,18 @@ struct StabilityTracker {
 }
 
 /// Minimum window client-rect dimensions (in physical pixels) we require
-/// before auto-record will fire. Corresponds to standard 720p — anything
-/// smaller is almost certainly a transient boot/loading window.
+/// before auto-record will fire. Lowered 1280x720 -> 800x450 in v2.6.2:
+/// Minecraft Java opens *windowed* at its 854x480 default (options.txt
+/// `overrideWidth/Height=0`, `fullscreen:false`), which the old 720p floor
+/// silently rejected — so on a windowed-MC tester rig the stability gate
+/// never fired and nothing recorded, even with a correctly-hooked window.
+/// 800x450 (16:9, 450p) accepts default windowed MC while still rejecting
+/// transient sub-VGA boot/loading windows. OBS scales the captured surface
+/// to the 1080p output canvas regardless, so output resolution is unchanged.
 #[cfg(windows)]
-const AUTO_RECORD_MIN_WIDTH: u32 = 1280;
+const AUTO_RECORD_MIN_WIDTH: u32 = 800;
 #[cfg(windows)]
-const AUTO_RECORD_MIN_HEIGHT: u32 = 720;
+const AUTO_RECORD_MIN_HEIGHT: u32 = 450;
 /// Minimum time the window must stay at or above the min dimensions before
 /// we commit to recording. Tuned against CS2's observed ~5-8s launch window
 /// inflation period; 10s gives headroom without feeling sluggish.
