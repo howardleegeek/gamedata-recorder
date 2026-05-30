@@ -1080,6 +1080,16 @@ impl RecorderState {
         // Update the output path settings (when output is not active)
         let mut output_settings = self.obs_context.data()?;
         output_settings.set_string("path", ObsPath::new(&request.recording_path).build())?;
+        // faststart (ISC-DATA-FASTSTART): OBS's ffmpeg_muxer writes the mp4 `moov`
+        // atom at the END of the file by default. Progressive players (Windows
+        // "Movies & TV", browsers, partial-download web players) need `moov` up
+        // front to read the seek index/duration, so without this they play only
+        // a few seconds even though the file is a complete 30 fps recording
+        // (this is exactly the "video is only a few seconds" symptom). Pass
+        // `movflags=faststart` to the muxer so it relocates `moov` to the front
+        // after finalizing — the mp4 then plays correctly everywhere. Costs one
+        // moov-relocation pass at stop.
+        output_settings.set_string("muxer_settings", "movflags=faststart")?;
         self.output.update_settings(output_settings)?;
 
         // Create or reuse video encoder
