@@ -312,6 +312,27 @@ pub const HOOK_TIMEOUT: Duration = Duration::from_secs(15);
 /// Even low-FPS recordings contain useful training data for AI world models.
 pub const MIN_AVERAGE_FPS: f64 = 5.0;
 
+/// How long a recording must run before the frozen-capture watchdog is
+/// allowed to fire. WGC (`window_capture`) is D3D-oriented and a game
+/// rendering through an OpenGL surface (notably Minecraft Java / GLFW)
+/// can capture as a black or frozen frame with no error. The existing
+/// hook-timeout fallback only covers the `game_capture` hook path, so a
+/// frozen WGC capture would otherwise record black for the whole
+/// session. We give the capture this grace period to deliver real frames
+/// before declaring it frozen — long enough that a slow first-frame /
+/// swapchain handshake isn't mistaken for a freeze, short enough that we
+/// rescue the session early.
+pub const FROZEN_CAPTURE_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Real delivered FPS at or below which a recording is considered frozen
+/// (black/stuck capture) once `FROZEN_CAPTURE_TIMEOUT` has elapsed. A
+/// healthy capture delivers ~`FPS` frames per second; a frozen WGC
+/// surface delivers effectively zero. Set just above zero so a capture
+/// that is merely very slow (e.g. 2-3 FPS on a weak iGPU) is still
+/// treated as alive and left on the working WGC path — only a genuinely
+/// stuck capture trips the monitor-capture fallback.
+pub const FROZEN_CAPTURE_FPS_THRESHOLD: f64 = 1.0;
+
 // Play-time tracker
 /// Whether or not to use testing constants (should always be false in production)
 pub const PLAY_TIME_TESTING: bool = false;

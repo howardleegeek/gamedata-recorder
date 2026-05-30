@@ -433,7 +433,7 @@ impl VideoRecorder for ObsEmbeddedRecorder {
         // timeout" and let the next poll try again. A failed send here
         // means recording is already torn down, so suppressing the flag
         // is the safe choice — the upstream stop path will run either way.
-        let workstation_locked_timeout = {
+        let outcome = {
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
             if self
                 .obs_tx
@@ -441,14 +441,21 @@ impl VideoRecorder for ObsEmbeddedRecorder {
                 .await
                 .is_err()
             {
-                false
+                PollOutcome::default()
             } else {
-                reply_rx.await.unwrap_or(false)
+                reply_rx.await.unwrap_or_default()
             }
         };
         PollUpdate {
-            active_fps: Some(unsafe { libobs_wrapper::sys::obs_get_active_fps() }),
-            workstation_locked_timeout,
+            // `active_fps` is the REAL delivered frame rate measured on the
+            // OBS thread from `obs_output_get_total_frames` deltas — NOT
+            // `obs_get_active_fps()`, which only reports OBS's *configured*
+            // output FPS (a constant `FPS`) and can never reveal a frozen
+            // capture. `None` on start-up ticks / when the counter can't be
+            // read, in which case the downstream cumulative average and the
+            // `MIN_AVERAGE_FPS` gate simply skip this tick.
+            active_fps: outcome.real_fps,
+            workstation_locked_timeout: outcome.workstation_locked_timeout,
         }
     }
 
@@ -461,6 +468,19 @@ impl VideoRecorder for ObsEmbeddedRecorder {
         if self
             .obs_tx
             .send(RecorderMessage::CheckHookTimeout { result_tx })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        result_rx.await.unwrap_or(false)
+    }
+
+    async fn check_frozen_capture_timeout(&mut self) -> bool {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        if self
+            .obs_tx
+            .send(RecorderMessage::CheckFrozenCaptureTimeout { result_tx })
             .await
             .is_err()
         {
@@ -579,16 +599,40 @@ enum RecorderMessage {
     },
     /// Periodic (~1Hz) tick from the tokio thread. Drives the monitor-
     /// capture DXGI_ERROR_ACCESS_LOST recovery state machine and the
-    /// "game window closed" source-teardown check. Replies with
-    /// `workstation_locked_timeout = true` exactly once, when the 5-minute
-    /// resume window expires on a locked workstation; the tokio caller
-    /// then calls `Recorder::stop` to flush the MP4.
+    /// "game window closed" source-teardown check. Replies with a
+    /// `PollOutcome` carrying the real delivered frame rate (computed from
+    /// `obs_output_get_total_frames` deltas, see `RecorderState::poll`)
+    /// and `workstation_locked_timeout = true` exactly once, when the
+    /// 5-minute resume window expires on a locked workstation; the tokio
+    /// caller then calls `Recorder::stop` to flush the MP4.
     Poll {
-        reply_tx: tokio::sync::oneshot::Sender<bool>,
+        reply_tx: tokio::sync::oneshot::Sender<PollOutcome>,
     },
     CheckHookTimeout {
         result_tx: tokio::sync::oneshot::Sender<bool>,
     },
+    /// Periodic check from the tokio thread asking whether the current WGC
+    /// capture has frozen (black/stuck), so it can fall back to monitor
+    /// capture. Mirrors `CheckHookTimeout` but for the WGC path; see
+    /// `RecorderState::check_frozen_capture_timeout`.
+    CheckFrozenCaptureTimeout {
+        result_tx: tokio::sync::oneshot::Sender<bool>,
+    },
+}
+
+/// Reply payload for `RecorderMessage::Poll`. Carries both the
+/// workstation-lock graceful-stop verdict and the real delivered frame
+/// rate measured on the OBS thread this tick.
+#[derive(Debug, Default, Clone, Copy)]
+struct PollOutcome {
+    /// See `RecorderMessage::Poll` / `PollUpdate::workstation_locked_timeout`.
+    workstation_locked_timeout: bool,
+    /// Real frames-per-second delivered by the OBS output since the
+    /// previous poll, or `None` when it can't be computed yet (first poll
+    /// of a recording, no active recording, or the frame counter couldn't
+    /// be read). `None` is propagated as "no sample" rather than `0.0` so
+    /// the downstream cumulative average isn't polluted by start-up ticks.
+    real_fps: Option<f64>,
 }
 
 struct RecordingRequest {
@@ -715,24 +759,29 @@ fn recorder_thread_impl(
                     .ok();
             }
             RecorderMessage::Poll { reply_tx } => {
-                // `poll` reports `true` in exactly one case: monitor-capture
-                // was paused on DXGI_ERROR_ACCESS_LOST, the user's
-                // workstation is still locked, and we've crossed the
-                // resume deadline. Returning `Err(_)` from the inner poll
-                // (e.g. a libobs scene lookup blew up) is unrelated to
-                // workstation-lock handling and must not fire the graceful
-                // stop, so we coerce errors to `false` and log them.
-                let workstation_locked_timeout = match state.poll() {
-                    Ok(flag) => flag,
+                // `poll` reports `workstation_locked_timeout = true` in
+                // exactly one case: monitor-capture was paused on
+                // DXGI_ERROR_ACCESS_LOST, the user's workstation is still
+                // locked, and we've crossed the resume deadline. Returning
+                // `Err(_)` from the inner poll (e.g. a libobs scene lookup
+                // blew up) is unrelated to workstation-lock handling and
+                // must not fire the graceful stop, so we coerce errors to
+                // the default outcome (no timeout, no fps sample) and log
+                // them.
+                let outcome = match state.poll() {
+                    Ok(outcome) => outcome,
                     Err(e) => {
                         tracing::error!("Failed to poll OBS embedded recorder: {e}");
-                        false
+                        PollOutcome::default()
                     }
                 };
-                reply_tx.send(workstation_locked_timeout).ok();
+                reply_tx.send(outcome).ok();
             }
             RecorderMessage::CheckHookTimeout { result_tx } => {
                 result_tx.send(state.check_hook_timeout()).ok();
+            }
+            RecorderMessage::CheckFrozenCaptureTimeout { result_tx } => {
+                result_tx.send(state.check_frozen_capture_timeout()).ok();
             }
         }
     }
@@ -778,6 +827,25 @@ struct RecorderState {
     last_source_creation_state: Option<SourceCreationState>,
     is_recording: bool,
     recording_start_time: Option<Instant>,
+
+    /// Real-FPS measurement state, sampled once per `poll()` (~1Hz).
+    /// `last_total_frames` is the value of `obs_output_get_total_frames`
+    /// at the previous poll; `last_fps_instant` is the wall-clock time of
+    /// that read. The delta between consecutive polls divided by the
+    /// elapsed wall-clock seconds is the REAL delivered frame rate. All
+    /// reset to `None` when a recording starts so the first poll of each
+    /// recording only establishes a baseline (no fps sample yet).
+    last_total_frames: Option<i32>,
+    last_fps_instant: Option<Instant>,
+    /// Most recent real delivered FPS computed in `poll()`. Read by
+    /// `check_frozen_capture_timeout` to decide whether the WGC capture
+    /// has frozen. `None` until the second poll of a recording.
+    last_real_fps: Option<f64>,
+    /// Latched `true` once the frozen-capture monitor-capture fallback has
+    /// fired for the current recording, so the watchdog reports the freeze
+    /// at most once and the tokio side doesn't thrash restart attempts.
+    /// Reset on every `start_recording`.
+    frozen_capture_fallback_fired: bool,
 
     // Store video encoders by type to reuse them
     video_encoders: HashMap<VideoEncoderType, Arc<ObsVideoEncoder>>,
@@ -891,6 +959,10 @@ impl RecorderState {
                 last_source_creation_state: None,
                 is_recording: false,
                 recording_start_time: None,
+                last_total_frames: None,
+                last_fps_instant: None,
+                last_real_fps: None,
+                frozen_capture_fallback_fired: false,
                 video_encoders: HashMap::new(),
                 audio_encoder,
                 hook_monitor_thread: None,
@@ -1178,6 +1250,14 @@ impl RecorderState {
         self.is_recording = true;
         self.recording_start_time = Some(Instant::now());
 
+        // Reset real-FPS measurement + frozen-capture watchdog state for the
+        // new recording. The first poll establishes a baseline frame count;
+        // FPS samples (and any freeze verdict) only start on the second poll.
+        self.last_total_frames = None;
+        self.last_fps_instant = None;
+        self.last_real_fps = None;
+        self.frozen_capture_fallback_fired = false;
+
         Ok(())
     }
 
@@ -1209,6 +1289,12 @@ impl RecorderState {
             tracing::debug!("OBS recording stopped");
             self.is_recording = false;
             self.recording_start_time = None;
+            // Clear real-FPS measurement state so a stale baseline from this
+            // recording can't bleed into the next one's first sample.
+            self.last_total_frames = None;
+            self.last_fps_instant = None;
+            self.last_real_fps = None;
+            self.frozen_capture_fallback_fired = false;
         } else {
             tracing::warn!("No active recording to stop");
         }
@@ -1292,12 +1378,15 @@ impl RecorderState {
         Ok(settings)
     }
 
-    /// Periodic tick (~1Hz). Returns `true` exactly once, when the
+    /// Periodic tick (~1Hz). Returns a `PollOutcome` whose
+    /// `workstation_locked_timeout` is `true` exactly once, when the
     /// monitor-capture DXGI_ERROR_ACCESS_LOST recovery window has expired
-    /// and the caller should gracefully stop the recording. All other
-    /// internal bookkeeping (source teardown when the game closes, pause /
-    /// resume around workstation lock) is advanced in place.
-    fn poll(&mut self) -> eyre::Result<bool> {
+    /// and the caller should gracefully stop the recording, and whose
+    /// `real_fps` carries the actual delivered frame rate measured this
+    /// tick (see `measure_real_fps`). All other internal bookkeeping
+    /// (source teardown when the game closes, pause / resume around
+    /// workstation lock) is advanced in place.
+    fn poll(&mut self) -> eyre::Result<PollOutcome> {
         if self
             .last_application
             .as_ref()
@@ -1327,7 +1416,104 @@ impl RecorderState {
             false
         };
 
-        Ok(workstation_locked_timeout)
+        // Measure the REAL delivered frame rate from the OBS output's
+        // total-frame counter. Only meaningful while recording; when idle
+        // we leave the baseline cleared so the next recording's first poll
+        // starts fresh.
+        let real_fps = if self.is_recording {
+            self.measure_real_fps()
+        } else {
+            self.last_total_frames = None;
+            self.last_fps_instant = None;
+            self.last_real_fps = None;
+            None
+        };
+
+        Ok(PollOutcome {
+            workstation_locked_timeout,
+            real_fps,
+        })
+    }
+
+    /// Compute the real delivered FPS from `obs_output_get_total_frames`
+    /// deltas over wall-clock time, caching the result in `last_real_fps`.
+    ///
+    /// `obs_get_active_fps()` (the value this code used to report) returns
+    /// OBS's *configured* output FPS — a constant `FPS` — so it can never
+    /// reveal a stalled/black capture. The output's total-frame counter,
+    /// by contrast, only advances when the encoder actually receives
+    /// frames, so `(total_now - total_last) / elapsed_secs` is the genuine
+    /// delivered rate.
+    ///
+    /// Returns `None` (no sample) on the first poll of a recording (we only
+    /// have a baseline), when the frame counter can't be read, when the
+    /// counter went backwards (output restarted underneath us), or when the
+    /// elapsed time is too small to divide safely. `None` is deliberately
+    /// not folded into the downstream cumulative average.
+    fn measure_real_fps(&mut self) -> Option<f64> {
+        let now = Instant::now();
+        let total_now = match self.read_output_total_frames() {
+            Some(n) => n,
+            None => {
+                // Couldn't read the counter this tick; keep the previous
+                // baseline so the next successful read spans the gap rather
+                // than resetting. Report no sample for this tick.
+                return None;
+            }
+        };
+
+        let sample = match (self.last_total_frames, self.last_fps_instant) {
+            (Some(total_last), Some(instant_last)) => {
+                let elapsed = now.duration_since(instant_last).as_secs_f64();
+                let delta = total_now - total_last;
+                if delta < 0 {
+                    // Frame counter went backwards — the output was stopped
+                    // and restarted between polls. Re-baseline and skip.
+                    None
+                } else if elapsed <= f64::EPSILON {
+                    // Two polls landed in the same instant (shouldn't happen
+                    // at ~1Hz, but guard the divide).
+                    None
+                } else {
+                    Some(delta as f64 / elapsed)
+                }
+            }
+            // First poll of the recording: establish the baseline only.
+            _ => None,
+        };
+
+        self.last_total_frames = Some(total_now);
+        self.last_fps_instant = Some(now);
+        self.last_real_fps = sample;
+        sample
+    }
+
+    /// Read `obs_output_get_total_frames` for the current output, marshalled
+    /// onto the OBS thread via the runtime (all libobs calls must run there).
+    ///
+    /// Returns `None` if the dispatch fails (e.g. the OBS runtime is tearing
+    /// down). The raw pointer is captured as a `usize` and re-cast inside the
+    /// closure so the closure stays `Send`; this mirrors the established
+    /// `set_output_source_on_channel` pattern in this file. The output
+    /// pointer is owned by `self.output` (an `ObsOutputRef`) which outlives
+    /// this synchronous call, so dereferencing it on the OBS thread is sound.
+    fn read_output_total_frames(&self) -> Option<i32> {
+        let output_ptr = self.output.as_ptr().0 as usize;
+        let runtime = self.obs_context.runtime().clone();
+        match runtime.run_with_obs_result(move || {
+            let ptr = output_ptr as *const libobs_wrapper::sys::obs_output_t;
+            unsafe { libobs_wrapper::sys::obs_output_get_total_frames(ptr) }
+        }) {
+            Ok(total) => Some(total),
+            Err(e) => {
+                tracing::debug!(
+                    e = ?e,
+                    "Failed to read obs_output_get_total_frames for real-FPS \
+                     measurement; skipping this sample"
+                );
+                None
+            }
+        }
     }
 
     /// Advance the monitor-capture DXGI_ERROR_ACCESS_LOST recovery state
@@ -1449,6 +1635,70 @@ impl RecorderState {
         } else {
             false
         }
+    }
+
+    /// Detect a frozen/black WGC capture and report (exactly once per
+    /// recording) that the tokio side should fall back to monitor capture.
+    ///
+    /// WGC (`window_capture`) is D3D-oriented; a game rendering through an
+    /// OpenGL surface (notably Minecraft Java / GLFW) can capture as a
+    /// black or frozen frame with no error from libobs. The existing
+    /// hook-timeout fallback only covers the `game_capture` *hook* path, so
+    /// without this watchdog a frozen WGC capture records black for the
+    /// entire session. This is purely a recovery net — the working WGC path
+    /// is left untouched for every healthy capture.
+    ///
+    /// Fires when ALL hold:
+    ///   - a recording is in progress,
+    ///   - the active capture mode is WGC (monitor/game-hook have their own
+    ///     recovery paths and aren't subject to this freeze mode),
+    ///   - the recording has been running longer than `FROZEN_CAPTURE_TIMEOUT`
+    ///     (grace period for the swapchain/first-frame handshake),
+    ///   - the most recent real delivered FPS (`last_real_fps`, from
+    ///     `measure_real_fps`) is at or below `FROZEN_CAPTURE_FPS_THRESHOLD`.
+    ///
+    /// Latches `frozen_capture_fallback_fired` so it reports the freeze only
+    /// once; the tokio side switches the game to monitor capture and
+    /// restarts, after which the mode is no longer WGC and this check is
+    /// inert for the rest of the session.
+    fn check_frozen_capture_timeout(&mut self) -> bool {
+        if !self.is_recording || self.frozen_capture_fallback_fired {
+            return false;
+        }
+
+        // Only the WGC path is covered here. GameHook has the hook-timeout
+        // fallback; Monitor is already the safest path and has the DXGI
+        // access-lost recovery machine.
+        let is_wgc = matches!(
+            self.last_source_creation_state
+                .as_ref()
+                .map(|s| s.effective_mode),
+            Some(crate::config::EffectiveCaptureMode::Wgc)
+        );
+        if !is_wgc {
+            return false;
+        }
+
+        let elapsed_ok = self
+            .recording_start_time
+            .is_some_and(|start| start.elapsed() > constants::FROZEN_CAPTURE_TIMEOUT);
+        if !elapsed_ok {
+            return false;
+        }
+
+        // `last_real_fps` is `None` until the second poll; treat "no sample
+        // yet" as not-frozen so we never fire on missing data.
+        let frozen = self
+            .last_real_fps
+            .is_some_and(|fps| fps <= constants::FROZEN_CAPTURE_FPS_THRESHOLD);
+        if frozen {
+            self.frozen_capture_fallback_fired = true;
+            // Reset last_application for the same reason check_hook_timeout
+            // does: the restart must re-evaluate the (now monitor) source
+            // from scratch rather than assuming the previous one was good.
+            self.last_application = None;
+        }
+        frozen
     }
 
     /// Create (or reuse) the WASAPI desktop-output source, and optionally the

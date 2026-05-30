@@ -67,6 +67,11 @@ pub trait VideoRecorder {
     fn is_window_capturable(&self, hwnd: HWND) -> bool;
     /// Returns true if the recording has failed to hook after the timeout period
     async fn check_hook_timeout(&mut self) -> bool;
+    /// Returns true (at most once per recording) when a WGC capture has
+    /// frozen — delivered effectively zero real FPS past
+    /// `constants::FROZEN_CAPTURE_TIMEOUT` — so the caller can fall back to
+    /// monitor capture. Recorders without a WGC freeze mode return `false`.
+    async fn check_frozen_capture_timeout(&mut self) -> bool;
 }
 #[derive(Default)]
 pub struct PollUpdate {
@@ -366,6 +371,10 @@ impl Recorder {
 
     pub async fn check_hook_timeout(&mut self) -> bool {
         self.video_recorder.check_hook_timeout().await
+    }
+
+    pub async fn check_frozen_capture_timeout(&mut self) -> bool {
+        self.video_recorder.check_frozen_capture_timeout().await
     }
 
     /// Returns the current game exe name if recording, None otherwise

@@ -936,6 +936,45 @@ fn enable_window_capture_for_game(app_state: &AppState, game_exe: &str) -> Resul
     Ok(())
 }
 
+/// Force monitor capture for a game and persist the choice. Used by the
+/// frozen-capture watchdog when a WGC capture comes back black/stuck
+/// (see `State::tick`'s frozen-capture branch).
+///
+/// Unlike the (now no-op) `enable_window_capture_for_game`, this sets
+/// `capture_mode = CaptureMode::Monitor` explicitly. That's the only
+/// resolution that yields `EffectiveCaptureMode::Monitor`
+/// (`use_window_capture` alone still resolves to WGC under `Auto`), and
+/// monitor capture "guarantees visible content" — it composites whatever
+/// is on the display regardless of the game's render API, so it rescues an
+/// OpenGL surface that WGC couldn't grab. The preference is saved so
+/// subsequent recordings of the same game skip the broken WGC attempt.
+fn enable_monitor_capture_for_game(app_state: &AppState, game_exe: &str) -> Result<()> {
+    let exe_without_ext = std::path::Path::new(game_exe)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| game_exe.to_string())
+        .to_lowercase();
+
+    let mut config = app_state.config.write().unwrap();
+    let game_config = config
+        .preferences
+        .games
+        .entry(exe_without_ext.clone())
+        .or_default();
+    game_config.capture_mode = crate::config::CaptureMode::Monitor;
+
+    if let Err(e) = config.save() {
+        tracing::error!(
+            e = ?e,
+            game = exe_without_ext,
+            "Failed to persist monitor-capture fallback preference; the \
+             in-memory switch still takes effect for this session"
+        );
+    }
+
+    Ok(())
+}
+
 /// This then indicates that we should move all the variables into RecordingState, but thats not possible with enums we would
 /// have to split it into a struct and the enum portion. This seems the cleanest possible, and we would have
 /// on_input/tick() as non-arg accepting fns (or like maybe 1 arg for the tracing str reason, something consistent),
@@ -1277,6 +1316,73 @@ impl State {
                 Some((
                     RecordingState::Recording,
                     "restart recording with window capture",
+                ))
+            } else if self.recorder.check_frozen_capture_timeout().await {
+                // FROZEN-CAPTURE FALLBACK (additive safety net for the WGC
+                // path). The recorder reports this at most once per
+                // recording when a WGC capture has delivered effectively
+                // zero real frames past FROZEN_CAPTURE_TIMEOUT — i.e. the
+                // capture is black/frozen (Minecraft's OpenGL surface is the
+                // canonical case). WGC stays the primary path for everyone;
+                // this only rescues the genuinely-frozen case by switching
+                // to monitor capture, which composites whatever is on the
+                // display regardless of render API.
+                //
+                // Structurally mirrors the hook-timeout fallback above:
+                // log → mutate config → stop → restart. The difference is we
+                // force Monitor (not the hook path), since the freeze is
+                // specific to WGC and monitor capture guarantees visible
+                // content.
+                let game_exe = match self.recorder.current_game_exe() {
+                    Some(exe) => exe,
+                    None => {
+                        tracing::error!(
+                            "No active recording when frozen-capture timeout detected for {}. \
+                             Will retry on next detection cycle.",
+                            game_name
+                        );
+                        return Some((
+                            RecordingState::Idle,
+                            "stop recording on frozen-capture timeout",
+                        ));
+                    }
+                };
+
+                tracing::warn!(
+                    game = game_exe,
+                    "WGC capture appears frozen/black (real FPS at or below {:.1} for over {}s) — \
+                     falling back to monitor capture, which guarantees visible content. \
+                     This commonly affects OpenGL games (e.g. Minecraft) where WGC can't grab \
+                     the swapchain surface.",
+                    constants::FROZEN_CAPTURE_FPS_THRESHOLD,
+                    constants::FROZEN_CAPTURE_TIMEOUT.as_secs(),
+                );
+
+                // Persist the switch to monitor capture for this game so the
+                // restart (and future recordings) skip the broken WGC path.
+                if let Err(e) = enable_monitor_capture_for_game(&self.app_state, &game_exe) {
+                    tracing::error!(e=?e, "Failed to update game config for monitor capture fallback");
+                }
+
+                // Stop the frozen recording before restarting. The MP4 so far
+                // is mostly black, but stopping cleanly flushes it; the
+                // restart immediately begins a fresh monitor-capture
+                // recording for the same game.
+                tracing::info!(
+                    game = game_exe,
+                    "Stopping frozen WGC recording to restart with monitor capture"
+                );
+                if let Err(e) = self.recorder.stop(&self.input_capture).await {
+                    tracing::error!(e=?e, "Failed to stop recording before frozen-capture fallback");
+                }
+
+                tracing::info!(
+                    game = game_exe,
+                    "Restarting recording with monitor capture mode"
+                );
+                Some((
+                    RecordingState::Recording,
+                    "restart recording with monitor capture",
                 ))
             } else {
                 None
