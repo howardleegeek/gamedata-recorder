@@ -105,9 +105,21 @@ async fn main(
 
         {
             let mut config = app_state.config.write().unwrap();
-            if !encoders.contains(&config.preferences.encoder.encoder) {
-                tracing::warn!("Currently-set encoder is no longer available, resetting to x264");
-                config.preferences.encoder.encoder = constants::encoding::VideoEncoderType::X264;
+            // Reconcile the saved encoder against what OBS actually probed.
+            // Previously this collapsed straight to software x264 whenever the
+            // saved encoder was unavailable, which degraded e.g. a QSV-but-not-
+            // NVENC machine all the way to software and denied it the
+            // NVENC>AMF>QSV>x264 step-down. Use the same selector the embedded
+            // recorder uses at start_recording so startup and start agree.
+            let requested = config.preferences.encoder.encoder;
+            let best = crate::config::select_best_available_encoder(requested, &encoders);
+            if best != requested {
+                tracing::warn!(
+                    ?requested,
+                    selected = ?best,
+                    "Currently-set encoder is unavailable; stepping down to best available encoder"
+                );
+                config.preferences.encoder.encoder = best;
             }
 
             // v2.6.4 graceful degrade: if the FINAL chosen encoder is software
@@ -1318,16 +1330,15 @@ impl State {
                      Preference saved for future recordings."
                 );
 
-                // Stop current recording and restart with window capture
-                tracing::info!(
-                    game = game_exe,
-                    "Stopping current recording to restart with window capture mode"
-                );
-                if let Err(e) = self.recorder.stop(&self.input_capture).await {
-                    tracing::error!(e=?e, "Failed to stop recording before fallback");
-                }
-
-                // Restart recording with window capture enabled
+                // Restart the recording with window capture enabled. We DON'T
+                // stop here: returning Recording→Recording drives
+                // `handle_transition`, whose (Recording, Recording) arm already
+                // does a single clean stop (`stop_recording_with_notification`)
+                // followed by `start_recording_safely`. Stopping here too caused
+                // a DOUBLE STOP — the first left recording_state==Recording while
+                // recorder.recording()==None (inconsistent), and the second
+                // stop's None session_path made auto-upload fire a Manual rescan
+                // instead of a targeted one, risking a duplicate upload.
                 tracing::info!(
                     game = game_exe,
                     "Restarting recording with window capture mode"
@@ -1383,18 +1394,16 @@ impl State {
                     tracing::error!(e=?e, "Failed to update game config for monitor capture fallback");
                 }
 
-                // Stop the frozen recording before restarting. The MP4 so far
-                // is mostly black, but stopping cleanly flushes it; the
-                // restart immediately begins a fresh monitor-capture
-                // recording for the same game.
-                tracing::info!(
-                    game = game_exe,
-                    "Stopping frozen WGC recording to restart with monitor capture"
-                );
-                if let Err(e) = self.recorder.stop(&self.input_capture).await {
-                    tracing::error!(e=?e, "Failed to stop recording before frozen-capture fallback");
-                }
-
+                // Restart with monitor capture. As with the hook-timeout
+                // fallback above, we DON'T stop here: returning
+                // Recording→Recording drives `handle_transition`, whose
+                // (Recording, Recording) arm does a single clean stop
+                // (`stop_recording_with_notification`, which cleanly flushes the
+                // mostly-black MP4 so far) followed by `start_recording_safely`.
+                // A direct stop here too was a DOUBLE STOP that left
+                // recording_state and recorder.recording() inconsistent and made
+                // the second stop's None session_path trigger a Manual rescan in
+                // auto-upload (duplicate-upload risk).
                 tracing::info!(
                     game = game_exe,
                     "Restarting recording with monitor capture mode"

@@ -7,6 +7,21 @@ use crate::output_types::Metadata;
 pub fn validate(video_path: &Path, metadata: &Metadata) -> Vec<String> {
     let mut invalid_reasons = vec![];
 
+    // Data-honesty guard: a failed/empty recording can report duration == 0
+    // (or, defensively, a negative/NaN value). Every bitrate computation below
+    // divides by `metadata.duration`; with a zero duration that yields NaN/Inf,
+    // and NaN comparisons (`<`, `>`) always evaluate false — so the size checks
+    // would SILENTLY PASS a zero-length recording as valid. Flag it invalid and
+    // return before any division so a broken recording can never be scored
+    // valid. (`!(x > 0.0)` also catches NaN, which `<= 0.0` would let slip.)
+    if !(metadata.duration > 0.0) {
+        invalid_reasons.push(format!(
+            "Video has zero/negative duration ({}); recording is invalid.",
+            metadata.duration
+        ));
+        return invalid_reasons;
+    }
+
     let duration = Duration::from_secs_f64(metadata.duration);
     if duration < MIN_FOOTAGE {
         invalid_reasons.push(format!("Video length {} too short.", metadata.duration));

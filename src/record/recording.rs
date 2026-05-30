@@ -448,13 +448,51 @@ impl Recording {
                 let dest = self
                     .recording_location
                     .join(constants::filename::recording::GAME_STATE);
-                match tokio::fs::copy(&mod_game_state, &dest).await {
-                    Ok(n) => tracing::info!(
-                        "Collected MC mod game_state.jsonl ({n} bytes) into session {}",
-                        self.recording_location.display()
-                    ),
+                // The Fabric mod APPENDS to this file concurrently, so a plain
+                // `tokio::fs::copy` can capture a partial final JSONL line (a
+                // torn read between the mod's `write` and its newline) or hit
+                // ERROR_SHARING_VIOLATION mid-flight. Instead: read the bytes,
+                // drop any trailing partial line (keep only through the last
+                // `\n`), and write the result with the same atomic-write helper
+                // used for the INVALID marker. Result: every collected
+                // game_state.jsonl ends on a complete line, and this step can
+                // never fail the recording (absence stays warn + continue).
+                match tokio::fs::read(&mod_game_state).await {
+                    Ok(bytes) => {
+                        // Keep only up to and including the last newline so a
+                        // half-written final line is discarded. If there is no
+                        // newline at all the file holds no complete line yet, so
+                        // we collect an empty file rather than a partial record.
+                        let complete_len = match bytes.iter().rposition(|&b| b == b'\n') {
+                            Some(idx) => idx + 1,
+                            None => 0,
+                        };
+                        let dropped = bytes.len() - complete_len;
+                        if dropped > 0 {
+                            tracing::debug!(
+                                "Dropping {dropped} trailing byte(s) of partial final line from \
+                                 game_state.jsonl before collecting (concurrent mod append)"
+                            );
+                        }
+                        let complete = bytes[..complete_len].to_vec();
+                        let n = complete.len();
+                        // Atomic write (write-tmp → fsync → rename), same crash-safe
+                        // pattern as the INVALID marker above. Errors are logged and
+                        // swallowed — collecting game_state must never fail the recording.
+                        match durable_write::write_atomic_async(dest.clone(), complete).await {
+                            Ok(()) => tracing::info!(
+                                "Collected MC mod game_state.jsonl ({n} complete bytes) into \
+                                 session {}",
+                                self.recording_location.display()
+                            ),
+                            Err(e) => tracing::warn!(
+                                "Failed to write collected game_state.jsonl into session \
+                                 (non-fatal): {e}"
+                            ),
+                        }
+                    }
                     Err(e) => tracing::warn!(
-                        "Failed to collect game_state.jsonl into session (non-fatal): {e}"
+                        "Failed to read MC mod game_state.jsonl for collection (non-fatal): {e}"
                     ),
                 }
             } else {

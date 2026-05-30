@@ -684,7 +684,11 @@ impl KbmCapture {
         unsafe {
             // Per MSDN, only process the event when code == HC_ACTION; for any
             // negative code we MUST pass it straight to the next hook untouched.
-            if code == HC_ACTION as i32 {
+            // Defensive null check: only dereference `lparam` (the OS-provided
+            // KBDLLHOOKSTRUCT pointer) when it is non-null. A null deref here
+            // would be UB across the `extern "system"` boundary; on a null/non-
+            // HC_ACTION call we simply fall through to CallNextHookEx below.
+            if code == HC_ACTION as i32 && lparam.0 != 0 {
                 let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
                 let key = kb.vkCode as u16;
                 let message = wparam.0 as u32;
@@ -758,7 +762,12 @@ impl KbmCapture {
         // SAFETY: Windows hook callback — unsafe for the FFI boundary and for
         // dereferencing the OS-provided MSLLHOOKSTRUCT pointer.
         unsafe {
-            if code == HC_ACTION as i32 {
+            // Defensive null check: only dereference `lparam` (the OS-provided
+            // MSLLHOOKSTRUCT pointer) when it is non-null, mirroring the
+            // keyboard hook. A null deref would be UB across the
+            // `extern "system"` boundary; otherwise we fall through to the
+            // always-CallNextHookEx tail below.
+            if code == HC_ACTION as i32 && lparam.0 != 0 {
                 let ms = &*(lparam.0 as *const MSLLHOOKSTRUCT);
                 let message = wparam.0 as u32;
 
@@ -769,10 +778,19 @@ impl KbmCapture {
                         // branch of parse_wm_input (saturating_sub, push only on
                         // non-zero delta).
                         let (cur_x, cur_y) = (ms.pt.x, ms.pt.y);
+                        // Single mutable borrow: read the previous position,
+                        // overwrite it with the current one, and derive the
+                        // delta from the copied-out previous value. Holding an
+                        // immutable `Ref` (from `*cell.borrow()`) live while
+                        // taking `cell.borrow_mut()` panics with
+                        // BorrowMutError; on `WH_MOUSE_LL` that panic would
+                        // unwind across the `extern "system"` FFI boundary (UB).
+                        // One `borrow_mut` read-copy-update avoids that entirely.
                         let delta = LL_HOOK_LAST_MOUSE.with(|cell| {
-                            let last = *cell.borrow();
-                            *cell.borrow_mut() = Some((cur_x, cur_y));
-                            last.map(|(lx, ly)| {
+                            let mut r = cell.borrow_mut();
+                            let prev = *r;
+                            *r = Some((cur_x, cur_y));
+                            prev.map(|(lx, ly)| {
                                 (cur_x.saturating_sub(lx), cur_y.saturating_sub(ly))
                             })
                         });
@@ -834,20 +852,34 @@ impl KbmCapture {
     fn ll_push_mouse_button(key: u16, press_state: PressState) {
         match press_state {
             PressState::Pressed => {
-                ll_hook_with_active_keys(|active_keys| {
-                    active_keys.mouse.insert(key);
-                });
+                // Mirror keyboard_ll_proc / parse_wm_input: `insert` returns
+                // true only when the button was NOT already held, so we emit a
+                // MousePress only on the newly-pressed transition and suppress
+                // duplicates from repeated DOWN messages. If the active-key set
+                // was never installed we cannot dedupe; default to emitting
+                // (true) so a press is never silently dropped.
+                let newly_pressed =
+                    ll_hook_with_active_keys(|active_keys| active_keys.mouse.insert(key))
+                        .unwrap_or(true);
+                if newly_pressed {
+                    LL_HOOK_EVENTS.with(|q| {
+                        q.borrow_mut()
+                            .push_back(Event::MousePress { key, press_state });
+                    });
+                }
             }
             PressState::Released => {
+                // Release: always remove and always emit, matching both
+                // keyboard_ll_proc and the WM_INPUT (parse_wm_input) path.
                 ll_hook_with_active_keys(|active_keys| {
                     active_keys.mouse.remove(&key);
                 });
+                LL_HOOK_EVENTS.with(|q| {
+                    q.borrow_mut()
+                        .push_back(Event::MousePress { key, press_state });
+                });
             }
         }
-        LL_HOOK_EVENTS.with(|q| {
-            q.borrow_mut()
-                .push_back(Event::MousePress { key, press_state });
-        });
     }
 
     /// Parse raw input from GetRawInputBuffer batch reading.

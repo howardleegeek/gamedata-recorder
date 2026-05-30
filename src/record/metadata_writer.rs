@@ -366,7 +366,13 @@ impl MetadataWriter {
     async fn write_recorder_metadata(&self, settings: &EncoderSettings) -> Result<()> {
         let metadata = RecorderMetadata {
             recorder_version: env!("CARGO_PKG_VERSION").to_string(),
-            target_fps: 60,
+            // Data-honesty fix: was hardcoded `60`, but the recorder targets
+            // `constants::FPS` (30) — the same value OBS is configured with and
+            // that `MIN_AVERAGE_FPS` validates against. A hardcoded 60 claimed a
+            // frame rate the encoder never produces, poisoning downstream
+            // training metadata. Source the real target so this field can never
+            // drift from the actual encode config again.
+            target_fps: constants::FPS,
             video_codec: match settings.encoder {
                 VideoEncoderType::X264 => "h264".to_string(),
                 VideoEncoderType::NvEnc => "h264_nvenc".to_string(),
@@ -376,7 +382,12 @@ impl MetadataWriter {
                 VideoEncoderType::Qsv => "h264_qsv".to_string(),
                 VideoEncoderType::QsvHevc => "hevc_qsv".to_string(),
             },
-            video_bitrate_mbps: 10,
+            // Verified correct (NOT a lie): `constants::encoding::BITRATE` is
+            // 10_000 kbps == 10 Mbps, so the previously hardcoded `10` already
+            // matched reality. Derive it from the source constant (kbps -> Mbps)
+            // so it stays correct if the encode bitrate ever changes, instead of
+            // re-introducing a magic number a future reviewer would re-flag.
+            video_bitrate_mbps: (constants::encoding::BITRATE / 1000) as u32,
             capture_method: "game_capture".to_string(),
             record_audio: false,
             audio_bitrate: 128,
