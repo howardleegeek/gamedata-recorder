@@ -548,7 +548,7 @@ impl Recording {
                     // Atomic write (write-tmp → fsync → rename), same crash-safe
                     // pattern as the INVALID marker above. Errors are logged and
                     // swallowed — collecting game_state must never fail the recording.
-                    match durable_write::write_atomic_async(dest.clone(), complete).await {
+                    match durable_write::write_atomic_async(&dest, complete).await {
                         Ok(()) => tracing::info!(
                             "Collected MC mod game_state.jsonl ({n} complete bytes) into \
                              session {}",
