@@ -1560,6 +1560,31 @@ impl ObsX264Settings {
     }
 }
 
+/// NVENC default preset for "record while gaming".
+///
+/// We record at 1080p30 / ~10 Mbps WHILE the user plays the same game on the
+/// same GPU, so the encoder must stay out of the game's way. NVENC presets run
+/// `p1` (fastest, lowest GPU load) .. `p7` (slowest, max quality, highest GPU +
+/// VRAM contention). The old default was `NVENC_PRESETS[0]` == `p7`, which
+/// maximises contention — the opposite of what this workload wants. `p5` is the
+/// balanced preset and is exactly OBS's own shipped default for the modern
+/// `obs-nvenc` encoder (`obs_data_set_default_string(settings, "preset", "p5")`
+/// in plugins/obs-nvenc/nvenc-properties.c), so it is a conservative, proven
+/// choice rather than an aggressive one. We resolve it by value from the
+/// validated `NVENC_PRESETS` list (never reordering that list — it also drives
+/// the settings-UI dropdown order) and fall back to the list's first element if
+/// `p5` is ever removed upstream.
+const NVENC_BALANCED_PRESET: &str = "p5";
+
+fn nvenc_default_preset() -> String {
+    constants::encoding::NVENC_PRESETS
+        .iter()
+        .copied()
+        .find(|p| *p == NVENC_BALANCED_PRESET)
+        .unwrap_or(constants::encoding::NVENC_PRESETS[0])
+        .to_string()
+}
+
 /// NVENC (NVIDIA GPU) encoder specific settings
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -1570,7 +1595,14 @@ pub struct FfmpegNvencSettings {
 impl Default for FfmpegNvencSettings {
     fn default() -> Self {
         Self {
-            preset2: constants::encoding::NVENC_PRESETS[0].to_string(),
+            // `preset2` is the field/JSON name kept for config back-compat; the
+            // value is the balanced `p5` preset (see `nvenc_default_preset`).
+            preset2: nvenc_default_preset(),
+            // `hq` (high quality) — kept as-is. Dropping the preset p7 -> p5 is
+            // the load reduction we want; `hq` remains OBS's default tune and is
+            // the safest choice without runtime A/B data. `ll`/`ull` (low
+            // latency) are available in NVENC_TUNE_OPTIONS if a future,
+            // GPU-tested change wants to lean further toward latency.
             tune: constants::encoding::NVENC_TUNE_OPTIONS[0].to_string(),
         }
     }
@@ -1580,10 +1612,43 @@ impl FfmpegNvencSettings {
         &self,
         updater: libobs_wrapper::data::ObsDataUpdater,
     ) -> libobs_wrapper::data::ObsDataUpdater {
+        // Set BOTH `preset` and `preset2` to the same value. This recorder
+        // instantiates the modern texture NVENC encoders (OBS_NVENC_H264_TEX /
+        // OBS_NVENC_HEVC_TEX); that plugin reads the `preset` key
+        // (plugins/obs-nvenc/nvenc-properties.c) and IGNORES `preset2`, while
+        // the legacy ffmpeg-nvenc plugin reads `preset2`
+        // (plugins/obs-ffmpeg/obs-ffmpeg-nvenc.c). Writing both means whichever
+        // NVENC plugin OBS ends up using honours our preset; the unused key is
+        // harmlessly ignored. Both keys accept the identical `p1`..`p7` enum.
         updater
+            .set_string("preset", self.preset2.as_str())
             .set_string("preset2", self.preset2.as_str())
             .set_string("tune", self.tune.as_str())
     }
+}
+
+/// QuickSync default `target_usage` for "record while gaming".
+///
+/// QSV `target_usage` maps speed/quality (obs-qsv11.c `update_targetusage`):
+/// `quality`/`veryslow` -> TU1 (slowest, most encoder passes), `balanced`/
+/// `medium` -> TU4, `speed`/`veryfast` -> TU7 (fastest). Intel QSV usually runs
+/// on the integrated GPU, which shares silicon and memory bandwidth with the
+/// game's own rendering, so the old default `QSV_TARGET_USAGES[0]` == `quality`
+/// (TU1) is the worst case for stutter. `balanced` (TU4) is OBS's own shipped
+/// default (`obs_data_set_default_string(settings, "target_usage", "TU4")` in
+/// obs-qsv11.c) — a conservative middle that frees iGPU headroom while keeping
+/// quality fine for AI-world-model training video. Resolved by value from the
+/// validated list (which also feeds the settings-UI dropdown, so it is NOT
+/// reordered), falling back to the list head if `balanced` is removed upstream.
+const QSV_BALANCED_TARGET_USAGE: &str = "balanced";
+
+fn qsv_default_target_usage() -> String {
+    constants::encoding::QSV_TARGET_USAGES
+        .iter()
+        .copied()
+        .find(|t| *t == QSV_BALANCED_TARGET_USAGE)
+        .unwrap_or(constants::encoding::QSV_TARGET_USAGES[0])
+        .to_string()
 }
 
 /// QuickSync H.264 encoder specific settings
@@ -1595,7 +1660,7 @@ pub struct ObsQsvSettings {
 impl Default for ObsQsvSettings {
     fn default() -> Self {
         Self {
-            target_usage: constants::encoding::QSV_TARGET_USAGES[0].to_string(),
+            target_usage: qsv_default_target_usage(),
         }
     }
 }
@@ -2065,6 +2130,121 @@ mod tests {
             runtime_fallback_chain(VE::NvEncHevc, &[VE::NvEncHevc]),
             vec![VE::NvEncHevc, VE::X264],
             "x264 terminal is appended regardless of the probed list"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Encoder-SETTINGS defaults (record-while-gaming, low GPU contention).
+    //
+    // These pin the per-encoder preset / rate-control defaults so we record at
+    // 1080p30 ~10 Mbps without the encoder fighting the game for GPU/VRAM.
+    // They assert pure `Default` values only — `apply_to_data_updater` needs a
+    // live OBS runtime (Windows/GPU) and is not unit-testable here.
+    //
+    // Every asserted value is also checked to be a member of the validated,
+    // OBS-recognised constant list for that key, so a typo can never ship a
+    // string the encoder would silently ignore.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nvenc_default_preset_is_balanced_not_max_quality() {
+        let s = FfmpegNvencSettings::default();
+        // Balanced `p5` (OBS's own default), NOT the slowest/max-contention p7.
+        assert_eq!(
+            s.preset2, "p5",
+            "NVENC default preset must be the balanced p5, not p7"
+        );
+        assert_ne!(
+            s.preset2,
+            constants::encoding::NVENC_PRESETS[0],
+            "NVENC default must no longer be NVENC_PRESETS[0] (p7, max quality)"
+        );
+        // Must be a value the obs-nvenc/ffmpeg-nvenc plugins recognise.
+        assert!(
+            constants::encoding::NVENC_PRESETS.contains(&s.preset2.as_str()),
+            "NVENC preset must be a recognised p1..p7 value, got {:?}",
+            s.preset2
+        );
+        // Tune stays a recognised option (hq/ll/ull); we kept hq.
+        assert!(
+            constants::encoding::NVENC_TUNE_OPTIONS.contains(&s.tune.as_str()),
+            "NVENC tune must be a recognised value, got {:?}",
+            s.tune
+        );
+    }
+
+    #[test]
+    fn nvenc_default_preset_resolver_falls_back_to_list_head() {
+        // The resolver picks the balanced preset by value; if it is ever
+        // missing from the list it must degrade to the first element rather
+        // than panic or emit an empty string.
+        let p = nvenc_default_preset();
+        assert!(
+            constants::encoding::NVENC_PRESETS.contains(&p.as_str()),
+            "resolved NVENC preset must come from the validated list, got {p:?}"
+        );
+        assert!(!p.is_empty(), "resolved NVENC preset must be non-empty");
+    }
+
+    #[test]
+    fn qsv_default_target_usage_is_balanced_not_max_quality() {
+        let s = ObsQsvSettings::default();
+        // Balanced (TU4, OBS's own default), NOT `quality` (TU1, slowest).
+        assert_eq!(
+            s.target_usage, "balanced",
+            "QSV default target_usage must be balanced, not quality"
+        );
+        assert_ne!(
+            s.target_usage,
+            constants::encoding::QSV_TARGET_USAGES[0],
+            "QSV default must no longer be QSV_TARGET_USAGES[0] (quality, slowest)"
+        );
+        assert!(
+            constants::encoding::QSV_TARGET_USAGES.contains(&s.target_usage.as_str()),
+            "QSV target_usage must be a recognised value, got {:?}",
+            s.target_usage
+        );
+    }
+
+    #[test]
+    fn qsv_default_target_usage_resolver_falls_back_to_list_head() {
+        let t = qsv_default_target_usage();
+        assert!(
+            constants::encoding::QSV_TARGET_USAGES.contains(&t.as_str()),
+            "resolved QSV target_usage must come from the validated list, got {t:?}"
+        );
+        assert!(!t.is_empty(), "resolved QSV target_usage must be non-empty");
+    }
+
+    #[test]
+    fn amf_default_preset_stays_speed() {
+        // AMF was already tuned to `speed` (v2.6.4) for iGPU contention; this is
+        // a regression guard so it is never bumped back to quality/balanced.
+        let s = ObsAmfSettings::default();
+        assert_eq!(
+            s.preset, "speed",
+            "AMF default preset must stay speed for low GPU contention"
+        );
+        assert!(
+            constants::encoding::AMF_PRESETS.contains(&s.preset.as_str()),
+            "AMF preset must be a recognised value, got {:?}",
+            s.preset
+        );
+    }
+
+    #[test]
+    fn x264_default_preset_stays_fast() {
+        // x264 is the CPU fallback (720p-capped elsewhere); it must stay on a
+        // fast preset so software encoding stays light. Regression guard.
+        let s = ObsX264Settings::default();
+        assert_eq!(
+            s.preset, "veryfast",
+            "x264 default preset must stay veryfast so the CPU fallback is light"
+        );
+        assert!(
+            constants::encoding::X264_PRESETS.contains(&s.preset.as_str()),
+            "x264 preset must be a recognised value, got {:?}",
+            s.preset
         );
     }
 }

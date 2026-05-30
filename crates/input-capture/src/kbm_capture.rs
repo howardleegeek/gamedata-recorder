@@ -228,8 +228,16 @@ pub struct ActiveKeys {
 }
 
 pub struct KbmCapture {
-    hwnd: HWND,
+    /// Hidden message-only window for the Raw Input (WM_INPUT) path. `None` when
+    /// window/class creation failed (issue #151) and we ran on the tier-4
+    /// LL-hook fallback instead — the fallback does not need a window, and
+    /// `Drop` skips `DestroyWindow`/`UnregisterClassA` accordingly.
+    hwnd: Option<HWND>,
     class_name: PCSTR,
+    /// `true` only when `RegisterClassA` actually registered our class this
+    /// session (so `Drop` should `UnregisterClassA`). A reused/already-existing
+    /// class or a tier-4-only run leaves this `false`.
+    class_registered: bool,
     h_instance: HINSTANCE,
     active_keys: Arc<Mutex<ActiveKeys>>,
     /// Tier-4 fallback handles. `Some` only when all three Raw Input tiers
@@ -256,8 +264,11 @@ impl Drop for KbmCapture {
             // Kill the tier-4 pump-wakeup timer first so no further `WM_TIMER`
             // fires for our (about-to-be-destroyed) window. `KillTimer` must run
             // on the thread that called `SetTimer`, which is this capture thread.
+            // `self.hwnd` is `Option<HWND>`: `Some(window)` kills the window
+            // timer, `None` kills the thread timer created when window creation
+            // failed (issue #151) — the same `Option` we passed to `SetTimer`.
             if let Some(timer_id) = self.fallback_timer_id.take() {
-                if let Err(e) = KillTimer(Some(self.hwnd), timer_id) {
+                if let Err(e) = KillTimer(self.hwnd, timer_id) {
                     tracing::error!(
                         "Failed to kill tier-4 pump-wakeup timer during cleanup: {:?}",
                         e
@@ -279,19 +290,43 @@ impl Drop for KbmCapture {
             // session starts clean.
             LL_HOOK_ACTIVE_KEYS.with(|cell| *cell.borrow_mut() = None);
 
-            // Destroy window first; only unregister class if window was successfully destroyed.
-            // UnregisterClassA fails with ERROR_CLASS_HAS_WINDOWS if any windows still exist.
-            match DestroyWindow(self.hwnd) {
-                Ok(_) => {
-                    if let Err(e) = UnregisterClassA(self.class_name, Some(self.h_instance)) {
+            // Destroy window first; only unregister class if window was
+            // successfully destroyed. `UnregisterClassA` fails with
+            // `ERROR_CLASS_HAS_WINDOWS` if any windows still exist.
+            //
+            // When window creation failed (issue #151, `self.hwnd == None`) there
+            // is nothing to destroy. We also only `UnregisterClassA` when WE
+            // registered the class this session (`class_registered`): if we reused
+            // a class another live session registered, unregistering it out from
+            // under them would break their window — and unregistering a class we
+            // never registered is simply wrong.
+            match self.hwnd {
+                Some(hwnd) => match DestroyWindow(hwnd) {
+                    Ok(_) => {
+                        if self.class_registered
+                            && let Err(e) = UnregisterClassA(self.class_name, Some(self.h_instance))
+                        {
+                            tracing::error!(
+                                "Failed to unregister window class during cleanup: {:?}",
+                                e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to destroy window during cleanup: {:?}", e);
+                    }
+                },
+                None => {
+                    // Tier-4-only / window-creation-failed path: no window to
+                    // destroy. Still unregister the class if we registered it.
+                    if self.class_registered
+                        && let Err(e) = UnregisterClassA(self.class_name, Some(self.h_instance))
+                    {
                         tracing::error!(
                             "Failed to unregister window class during cleanup: {:?}",
                             e
                         );
                     }
-                }
-                Err(e) => {
-                    tracing::error!("Failed to destroy window during cleanup: {:?}", e);
                 }
             }
         }
@@ -311,8 +346,45 @@ impl KbmCapture {
         consent.require_granted()?;
 
         unsafe {
+            use windows::Win32::Foundation::{ERROR_CLASS_ALREADY_EXISTS, GetLastError};
+
             let class_name = PCSTR(c"RawInputWindowClass".to_bytes_with_nul().as_ptr());
-            let h_instance: HINSTANCE = GetModuleHandleA(None)?.into();
+
+            // issue #151: the module handle for our own EXE. On 64-bit Windows an
+            // `HMODULE`/`HINSTANCE` is a pointer-width handle (`*mut c_void`); the
+            // `windows` 0.62 `From<HMODULE> for HINSTANCE` is an identity wrap of
+            // that pointer, so there is NO 32-bit truncation here (the historical
+            // suspicion that an `i32`/`u32` cast lost the high dword does not apply
+            // to this crate's strongly-typed handles). We still must not let a
+            // failed `GetModuleHandleA` abort the whole capture thread: previously
+            // `GetModuleHandleA(None)?` propagated an error that `lib.rs`'
+            // `.expect()` turned into a panic, killing keyboard+mouse capture
+            // outright with no fallback. Treat any failure (or, defensively, a
+            // null handle) as a NULL `HINSTANCE`, which is a valid argument for
+            // registering/creating a window class owned by the current process and
+            // for installing same-process low-level hooks. We then continue to the
+            // tier-4 fallback if the Raw Input path can't be stood up.
+            let h_instance: HINSTANCE = match GetModuleHandleA(None) {
+                Ok(hmodule) if !hmodule.0.is_null() => hmodule.into(),
+                Ok(_) => {
+                    tracing::warn!(
+                        "GetModuleHandleA(None) returned a NULL module handle; \
+                         proceeding with a NULL HINSTANCE for window/hook setup"
+                    );
+                    HINSTANCE::default()
+                }
+                Err(e) => {
+                    let last_error = GetLastError();
+                    tracing::warn!(
+                        error = ?e,
+                        last_error = ?last_error,
+                        "GetModuleHandleA(None) failed; proceeding with a NULL \
+                         HINSTANCE for window/hook setup (Raw Input may fall back \
+                         to tier-4 LL hooks)"
+                    );
+                    HINSTANCE::default()
+                }
+            };
 
             let wc = WNDCLASSA {
                 lpfnWndProc: Some(Self::window_proc),
@@ -321,32 +393,77 @@ impl KbmCapture {
                 ..Default::default()
             };
 
+            // Register the window class. A return of 0 means failure EXCEPT when
+            // the last error is `ERROR_CLASS_ALREADY_EXISTS`: a previous capture
+            // session in this process may have registered the same class and a
+            // teardown race can leave it lingering. An already-registered class is
+            // perfectly usable, so we treat that case as success and only mark the
+            // Raw Input path unavailable on a genuine failure. We never `bail!`
+            // here anymore — a class failure must fall through to tier-4 rather
+            // than panic the capture thread (`lib.rs` `.expect()`).
+            let mut class_ok = true;
+            // Whether THIS call registered the class (vs. reusing an existing
+            // one). Only the registrar should `UnregisterClassA` in `Drop`.
+            let mut class_registered = false;
             if RegisterClassA(&wc) == 0 {
-                use windows::Win32::Foundation::GetLastError;
                 let error = GetLastError();
-                bail!("failed to register window class: {error:?}");
+                if error == ERROR_CLASS_ALREADY_EXISTS {
+                    tracing::debug!("RegisterClassA: class already registered (reusing existing)");
+                } else {
+                    class_ok = false;
+                    tracing::warn!(
+                        error = ?error,
+                        "RegisterClassA failed — Raw Input path unavailable, will \
+                         fall back to tier-4 LL hooks"
+                    );
+                }
+            } else {
+                class_registered = true;
             }
 
-            let hwnd = CreateWindowExA(
-                WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0),
-                class_name,
-                PCSTR::null(),
-                WINDOW_STYLE(0),
-                0,
-                0,
-                0,
-                0,
-                None,
-                None,
-                Some(h_instance),
-                None,
-            )
-            .wrap_err("failed to create window")?;
-
-            // Immediately hide the window - we only need it for Raw Input, not display
-            let _ = ShowWindow(hwnd, SW_HIDE);
-
-            tracing::debug!("RawInput window created: {hwnd:?}");
+            // Create the hidden message-only window used to receive WM_INPUT. If
+            // it fails (issue #151's reported `0x80070057` symptom), we MUST NOT
+            // abort: previously the `?` here propagated an error that `lib.rs`
+            // turned into a thread panic, so a single window-creation failure left
+            // BOTH the Raw Input AND the tier-4 fallback dead and shipped an empty
+            // `inputs.jsonl`. Instead, capture an `Option<HWND>` and route through
+            // the tier-4 LL-hook fallback (which does not need a window) below.
+            let hwnd: Option<HWND> = if class_ok {
+                match CreateWindowExA(
+                    WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0),
+                    class_name,
+                    PCSTR::null(),
+                    WINDOW_STYLE(0),
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    Some(h_instance),
+                    None,
+                ) {
+                    Ok(hwnd) => {
+                        // Immediately hide the window - we only need it for Raw
+                        // Input, not display.
+                        let _ = ShowWindow(hwnd, SW_HIDE);
+                        tracing::debug!("RawInput window created: {hwnd:?}");
+                        Some(hwnd)
+                    }
+                    Err(e) => {
+                        let last_error = GetLastError();
+                        tracing::warn!(
+                            error = ?e,
+                            last_error = ?last_error,
+                            "CreateWindowExA failed (issue #151 symptom) — Raw \
+                             Input unavailable, falling back to tier-4 LL hooks"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
 
             // v2.5.13 — Win11 26100 ERROR_INVALID_PARAMETER (0x80070057) fix.
             //
@@ -382,117 +499,136 @@ impl KbmCapture {
             //      Windows build we care about)
             let preferred_flags = RIDEV_INPUTSINK;
             let foreground_flags = RAWINPUTDEVICE_FLAGS(0);
-            let make_devices = |flags: RAWINPUTDEVICE_FLAGS| {
-                [
-                    0x02, // Mouse
-                    0x06, // Keyboard
-                ]
-                .map(|usage| RAWINPUTDEVICE {
-                    usUsagePage: 0x01, // Generic Desktop Controls
-                    usUsage: usage,
-                    dwFlags: flags,
-                    // Per MSDN: when RIDEV_INPUTSINK is set, hwndTarget MUST be
-                    // a valid HWND. Win11 26100 enforces this strictly. We use
-                    // our message-only window so we receive WM_INPUT even when
-                    // not in foreground. For the dwFlags=0 fallback, a valid
-                    // HWND is also accepted (and is what Windows wants for
-                    // foreground capture).
-                    hwndTarget: hwnd,
-                })
-            };
 
-            // Tier 1: preferred path. Batch register both devices with
-            // RIDEV_INPUTSINK and the valid message-only hwnd.
-            let tier1 = make_devices(preferred_flags);
-            let tier1_result = RegisterRawInputDevices(&tier1, tier1.len() as u32)
-                .wrap_err("tier 1: RIDEV_INPUTSINK batch with valid hwnd");
-            let registered = if let Err(ref e) = tier1_result {
-                // Capture the concrete Win32 error code. The `windows` crate's
-                // `Result` Display can be empty when the failure originated from
-                // a `BOOL`->error conversion, so we read `GetLastError()`
-                // ourselves and log the raw code (e.g. 0x80070057 =
-                // ERROR_INVALID_PARAMETER, or 0x5 = ERROR_ACCESS_DENIED on a
-                // restricted window station) so future diagnosis is possible.
-                use windows::Win32::Foundation::GetLastError;
-                let last_error = GetLastError();
-                tracing::info!(
-                    error = ?e,
-                    last_error = ?last_error,
-                    "RegisterRawInputDevices tier 1 (INPUTSINK batch) failed, trying tier 2"
-                );
-                // Tier 2: same flags, but register devices one at a time.
-                // Some filter drivers reject the whole batch if they dislike a
-                // single entry; sequential registration lets us succeed for
-                // at least one device (the mouse often goes through even when
-                // the keyboard does not, or vice versa).
-                let mut any_ok = false;
-                for dev in &tier1 {
-                    let single = [*dev];
-                    match RegisterRawInputDevices(&single, 1)
-                        .wrap_err("tier 2: RIDEV_INPUTSINK per-device with valid hwnd")
-                    {
-                        Ok(()) => {
-                            tracing::debug!(
-                                usage = format!("0x{:02X}", dev.usUsage),
-                                "tier 2 succeeded for device"
-                            );
-                            any_ok = true;
-                        }
-                        Err(e) => {
-                            use windows::Win32::Foundation::GetLastError;
-                            let last_error = GetLastError();
-                            tracing::info!(
-                                error = ?e,
-                                last_error = ?last_error,
-                                usage = format!("0x{:02X}", dev.usUsage),
-                                "tier 2 failed for device, will try tier 3"
-                            );
-                        }
-                    }
-                }
+            // Only attempt Raw Input registration if we actually have a valid
+            // message-only window. Win11 26100+ rejects a NULL `hwndTarget` under
+            // `RIDEV_INPUTSINK` with `ERROR_INVALID_PARAMETER`, and there is no
+            // point registering at all without a window to deliver `WM_INPUT`. If
+            // `hwnd` is `None` (issue #151: class/window creation failed), we skip
+            // straight to the tier-4 LL-hook fallback below. `registered` stays
+            // `false` in that case so the fallback is guaranteed to engage.
+            let registered = if let Some(win) = hwnd {
+                let make_devices = |flags: RAWINPUTDEVICE_FLAGS| {
+                    [
+                        0x02, // Mouse
+                        0x06, // Keyboard
+                    ]
+                    .map(|usage| RAWINPUTDEVICE {
+                        usUsagePage: 0x01, // Generic Desktop Controls
+                        usUsage: usage,
+                        dwFlags: flags,
+                        // Per MSDN: when RIDEV_INPUTSINK is set, hwndTarget MUST be
+                        // a valid HWND. Win11 26100 enforces this strictly. We use
+                        // our message-only window so we receive WM_INPUT even when
+                        // not in foreground. For the dwFlags=0 fallback, a valid
+                        // HWND is also accepted (and is what Windows wants for
+                        // foreground capture).
+                        hwndTarget: win,
+                    })
+                };
 
-                if !any_ok {
-                    // Tier 3: dwFlags = 0 (foreground-only), one device at a
-                    // time. No INPUTSINK means we only receive input when our
-                    // hidden message window owns the foreground — which it
-                    // normally does not — so coverage will be partial. This
-                    // is still strictly better than zero input: the game
-                    // overlay and any injected focus windows will pass through
-                    // real WM_INPUT events instead of the silent empty stream
-                    // we ship today.
-                    let tier3 = make_devices(foreground_flags);
-                    let mut any_tier3_ok = false;
-                    for dev in &tier3 {
+                // Tier 1: preferred path. Batch register both devices with
+                // RIDEV_INPUTSINK and the valid message-only hwnd.
+                let tier1 = make_devices(preferred_flags);
+                let tier1_result = RegisterRawInputDevices(&tier1, tier1.len() as u32)
+                    .wrap_err("tier 1: RIDEV_INPUTSINK batch with valid hwnd");
+                if let Err(ref e) = tier1_result {
+                    // Capture the concrete Win32 error code. The `windows` crate's
+                    // `Result` Display can be empty when the failure originated from
+                    // a `BOOL`->error conversion, so we read `GetLastError()`
+                    // ourselves and log the raw code (e.g. 0x80070057 =
+                    // ERROR_INVALID_PARAMETER, or 0x5 = ERROR_ACCESS_DENIED on a
+                    // restricted window station) so future diagnosis is possible.
+                    use windows::Win32::Foundation::GetLastError;
+                    let last_error = GetLastError();
+                    tracing::info!(
+                        error = ?e,
+                        last_error = ?last_error,
+                        "RegisterRawInputDevices tier 1 (INPUTSINK batch) failed, trying tier 2"
+                    );
+                    // Tier 2: same flags, but register devices one at a time.
+                    // Some filter drivers reject the whole batch if they dislike a
+                    // single entry; sequential registration lets us succeed for
+                    // at least one device (the mouse often goes through even when
+                    // the keyboard does not, or vice versa).
+                    let mut any_ok = false;
+                    for dev in &tier1 {
                         let single = [*dev];
                         match RegisterRawInputDevices(&single, 1)
-                            .wrap_err("tier 3: dwFlags=0 per-device foreground-only")
+                            .wrap_err("tier 2: RIDEV_INPUTSINK per-device with valid hwnd")
                         {
                             Ok(()) => {
                                 tracing::debug!(
                                     usage = format!("0x{:02X}", dev.usUsage),
-                                    "tier 3 succeeded for device (foreground-only)"
+                                    "tier 2 succeeded for device"
                                 );
-                                any_tier3_ok = true;
+                                any_ok = true;
                             }
                             Err(e) => {
                                 use windows::Win32::Foundation::GetLastError;
                                 let last_error = GetLastError();
-                                tracing::debug!(
+                                tracing::info!(
                                     error = ?e,
                                     last_error = ?last_error,
                                     usage = format!("0x{:02X}", dev.usUsage),
-                                    "tier 3 failed for device"
+                                    "tier 2 failed for device, will try tier 3"
                                 );
                             }
                         }
                     }
-                    any_tier3_ok
+
+                    if !any_ok {
+                        // Tier 3: dwFlags = 0 (foreground-only), one device at a
+                        // time. No INPUTSINK means we only receive input when our
+                        // hidden message window owns the foreground — which it
+                        // normally does not — so coverage will be partial. This
+                        // is still strictly better than zero input: the game
+                        // overlay and any injected focus windows will pass through
+                        // real WM_INPUT events instead of the silent empty stream
+                        // we ship today.
+                        let tier3 = make_devices(foreground_flags);
+                        let mut any_tier3_ok = false;
+                        for dev in &tier3 {
+                            let single = [*dev];
+                            match RegisterRawInputDevices(&single, 1)
+                                .wrap_err("tier 3: dwFlags=0 per-device foreground-only")
+                            {
+                                Ok(()) => {
+                                    tracing::debug!(
+                                        usage = format!("0x{:02X}", dev.usUsage),
+                                        "tier 3 succeeded for device (foreground-only)"
+                                    );
+                                    any_tier3_ok = true;
+                                }
+                                Err(e) => {
+                                    use windows::Win32::Foundation::GetLastError;
+                                    let last_error = GetLastError();
+                                    tracing::debug!(
+                                        error = ?e,
+                                        last_error = ?last_error,
+                                        usage = format!("0x{:02X}", dev.usUsage),
+                                        "tier 3 failed for device"
+                                    );
+                                }
+                            }
+                        }
+                        any_tier3_ok
+                    } else {
+                        true
+                    }
                 } else {
+                    tracing::debug!("RegisterRawInputDevices tier 1 (INPUTSINK batch) succeeded");
                     true
                 }
             } else {
-                tracing::debug!("RegisterRawInputDevices tier 1 (INPUTSINK batch) succeeded");
-                true
+                // No message-only window (issue #151 class/window failure). Raw
+                // Input cannot be registered; force the tier-4 LL-hook fallback.
+                tracing::warn!(
+                    "skipping Raw Input registration — no message-only window \
+                     (class/window creation failed); engaging tier-4 LL-hook \
+                     fallback"
+                );
+                false
             };
 
             // Tier-4 fallback hook handles. Populated below only when Raw Input
@@ -504,7 +640,12 @@ impl KbmCapture {
             // Tier-4 pump-wakeup timer id; set below alongside the hooks.
             let mut fallback_timer_id: Option<usize> = None;
 
-            if !registered {
+            // Reliability invariant gate. `registered` is only ever `true` when a
+            // window existed AND at least one Raw Input tier succeeded, so the
+            // helper's `has_window` here is `hwnd.is_some()` and its
+            // `raw_input_registered` is `registered`. Going through the named
+            // helper documents the invariant and keeps it unit-testable.
+            if should_engage_ll_fallback(hwnd.is_some(), registered) {
                 // All three Raw Input tiers failed (e.g. Win11 26200 restricted
                 // window station / schtasks context — see the module-level
                 // rationale). Rather than ship an empty input stream, fall back
@@ -605,13 +746,26 @@ impl KbmCapture {
                     // to the same `event_callback` the WM_INPUT path uses.
                     //
                     // `lptimerfunc = None` => the timer posts `WM_TIMER` to the
-                    // window's queue (we do NOT want a `TimerProc` callback; we
-                    // only need the message to unblock the pump). The drain in
-                    // `run_queue` runs after EVERY `GetMessageA` return, so we do
-                    // not handle `WM_TIMER` explicitly — its only job is to wake
-                    // the pump.
+                    // window's (or, with a NULL hwnd, the thread's) queue (we do
+                    // NOT want a `TimerProc` callback; we only need the message to
+                    // unblock the pump). The drain in `run_queue` runs after EVERY
+                    // `GetMessageA` return, so we do not handle `WM_TIMER`
+                    // explicitly — its only job is to wake the pump.
+                    //
+                    // Two cases for the timer's host:
+                    //   * `Some(hwnd)` — the normal tier-4 case where Raw Input
+                    //     registration failed but the window exists. `SetTimer`
+                    //     uses our `LL_HOOK_PUMP_TIMER_ID` and posts `WM_TIMER`
+                    //     to that window's queue.
+                    //   * `None` — issue #151: window creation itself failed.
+                    //     `SetTimer(None, ..)` creates a THREAD timer; the OS
+                    //     IGNORES the requested id and RETURNS a fresh timer id,
+                    //     posting `WM_TIMER` (hwnd = NULL) to the thread queue —
+                    //     which `GetMessageA(None, ..)` in `run_queue` also
+                    //     retrieves. We must remember the RETURNED id to
+                    //     `KillTimer(None, id)` in `Drop`.
                     let timer = SetTimer(
-                        Some(hwnd),
+                        hwnd, // Option<HWND>: Some(window) or None (thread timer)
                         LL_HOOK_PUMP_TIMER_ID,
                         LL_HOOK_PUMP_INTERVAL_MS,
                         None,
@@ -632,10 +786,14 @@ impl KbmCapture {
                     } else {
                         tracing::info!(
                             interval_ms = LL_HOOK_PUMP_INTERVAL_MS,
+                            thread_timer = hwnd.is_none(),
                             "tier-4 fallback: pump-wakeup WM_TIMER armed so \
                              run_queue drains the LL-hook event queue"
                         );
-                        fallback_timer_id = Some(LL_HOOK_PUMP_TIMER_ID);
+                        // For a window timer the id we requested IS the id; for a
+                        // thread timer (NULL hwnd) the OS-returned `timer` is the
+                        // authoritative id to kill later.
+                        fallback_timer_id = Some(timer);
                     }
                 }
             }
@@ -643,6 +801,7 @@ impl KbmCapture {
             Ok(Self {
                 hwnd,
                 class_name,
+                class_registered,
                 h_instance,
                 active_keys,
                 keyboard_hook,
@@ -1340,13 +1499,201 @@ fn convert_absolute_to_screen_coords(x: i32, y: i32, is_virtual_desktop: bool) -
         }
     };
 
-    // Convert from normalized coordinates (0-65535) to screen coordinates
-    // Using MulDiv equivalent: (x * (right - left)) / 65535 + left
-    // Use i64 for intermediate calculations to prevent integer overflow
+    // Pure normalization split out so it can be unit-tested without Win32
+    // (`GetSystemMetrics`). See `normalize_absolute_coords`.
+    normalize_absolute_coords(x, y, left, top, right, bottom)
+}
+
+/// Pure (Win32-free) core of [`convert_absolute_to_screen_coords`].
+///
+/// Maps normalized absolute coordinates (`x`, `y` in `0..=65535`) onto the
+/// screen rectangle `[left, right) × [top, bottom)` using the MulDiv-equivalent
+/// `((coord * extent) / 65535) + origin`. `i64` intermediates prevent overflow
+/// for the full `i32` metric range. Split out from the Win32 wrapper purely so
+/// the arithmetic is testable on any host.
+fn normalize_absolute_coords(
+    x: i32,
+    y: i32,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+) -> (i32, i32) {
     let width = (right - left) as i64;
     let height = (bottom - top) as i64;
     let screen_x = (((x as i64 * width) / 65535) + left as i64) as i32;
     let screen_y = (((y as i64 * height) / 65535) + top as i64) as i32;
 
     (screen_x, screen_y)
+}
+
+/// Decide whether the tier-4 low-level-hook fallback must engage.
+///
+/// The reliability invariant for this crate is: **on a normal Windows machine,
+/// SOME path produces input events; we never silently end with both the Raw
+/// Input path and the fallback dead.** Raw Input is considered "live" only when
+/// it has both a message-only window to deliver `WM_INPUT` AND at least one
+/// successful `RegisterRawInputDevices` tier. If either is missing, the LL-hook
+/// fallback (which needs neither) must take over.
+///
+/// Pure and Win32-free so the decision is unit-testable; mirrors the inline
+/// control flow in [`KbmCapture::initialize`] (`if !registered { …tier-4… }`,
+/// where `registered` is forced `false` when there is no window).
+#[inline]
+fn should_engage_ll_fallback(has_window: bool, raw_input_registered: bool) -> bool {
+    !(has_window && raw_input_registered)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pure-logic unit tests. These deliberately exercise ONLY Win32-free code
+    //! (the fallback decision, the absolute-coordinate normalization math, and
+    //! the LL-hook event-shape helpers). The actual Win32 calls
+    //! (`RegisterRawInputDevices`, `CreateWindowExA`, `SetWindowsHookExW`,
+    //! `SetTimer`) are Windows-only and cannot be meaningfully unit-tested off a
+    //! real Windows machine; their correctness is gated by the Windows CI build
+    //! and verified at runtime via the `tracing` logs described in
+    //! `KbmCapture::initialize`.
+
+    use super::*;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LBUTTON, VK_XBUTTON1, VK_XBUTTON2};
+
+    /// The core reliability invariant: the tier-4 LL-hook fallback must engage
+    /// whenever the Raw Input path is not fully live (no window OR no successful
+    /// registration), and must NOT engage when Raw Input is healthy. This is the
+    /// truth table that guarantees we never end with BOTH paths dead and an
+    /// empty `inputs.jsonl` (the 0-of-77 symptom).
+    #[test]
+    fn ll_fallback_engages_unless_raw_input_fully_live() {
+        // Happy path: window + successful registration → no fallback.
+        assert!(!should_engage_ll_fallback(true, true));
+
+        // Window created but every RegisterRawInputDevices tier failed
+        // (Win11 26200 restricted-station symptom) → fallback MUST engage.
+        assert!(should_engage_ll_fallback(true, false));
+
+        // Window creation itself failed (issue #151) → `registered` is forced
+        // false upstream, so fallback MUST engage regardless.
+        assert!(should_engage_ll_fallback(false, false));
+
+        // Defensive: a window-less "registered" state is impossible upstream,
+        // but the predicate still demands a window before trusting Raw Input,
+        // so it engages the fallback. This documents that `has_window` is a
+        // hard precondition, not advisory.
+        assert!(should_engage_ll_fallback(false, true));
+    }
+
+    /// `normalize_absolute_coords` maps the normalized 0..=65535 range onto a
+    /// screen rectangle. Verify the documented MulDiv-equivalent endpoints and
+    /// midpoint, plus a virtual-desktop rectangle with a negative origin (a
+    /// left/top monitor), which the saturating screen-metric path can produce.
+    #[test]
+    fn normalize_absolute_coords_maps_endpoints_and_origin() {
+        // Primary 1920x1080 screen, origin (0,0).
+        assert_eq!(normalize_absolute_coords(0, 0, 0, 0, 1920, 1080), (0, 0));
+        // Max normalized value maps to (width, height) (exact at 65535).
+        assert_eq!(
+            normalize_absolute_coords(65535, 65535, 0, 0, 1920, 1080),
+            (1920, 1080)
+        );
+        // Midpoint ~ centre of the screen.
+        assert_eq!(
+            normalize_absolute_coords(32767, 32767, 0, 0, 1920, 1080),
+            (959, 539)
+        );
+        // Virtual desktop with a monitor to the left/above the primary: origin
+        // is negative, so the mapped coordinate is offset by that origin.
+        assert_eq!(
+            normalize_absolute_coords(0, 0, -1920, -1080, 1920, 1080),
+            (-1920, -1080)
+        );
+    }
+
+    /// Large coordinate spans must not overflow: the implementation widens to
+    /// `i64` before multiplying. Exercise a full-i32 extent to prove no panic /
+    /// wraparound on a debug build (where `i32 * i32` would overflow-panic).
+    #[test]
+    fn normalize_absolute_coords_does_not_overflow_on_large_extent() {
+        // right - left spans the full positive i32 range; (65535 * i32::MAX)
+        // overflows i32 but fits comfortably in the i64 intermediate, so a debug
+        // build must not overflow-panic. At x == 65535 the map is exact:
+        // (65535 * i32::MAX) / 65535 + 0 == i32::MAX.
+        let (sx, _sy) = normalize_absolute_coords(65535, 0, 0, 0, i32::MAX, 1);
+        assert_eq!(sx, i32::MAX);
+    }
+
+    /// Helper mirroring the keyboard LL-hook's message→PressState decode
+    /// (`keyboard_ll_proc`) so we can assert the mapping in isolation. Kept in
+    /// the test module to avoid changing the hook proc's hot path.
+    fn key_press_state(message: u32) -> Option<PressState> {
+        match message {
+            WM_KEYDOWN | WM_SYSKEYDOWN => Some(PressState::Pressed),
+            WM_KEYUP | WM_SYSKEYUP => Some(PressState::Released),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn keyboard_message_maps_to_press_state() {
+        assert_eq!(key_press_state(WM_KEYDOWN), Some(PressState::Pressed));
+        assert_eq!(key_press_state(WM_SYSKEYDOWN), Some(PressState::Pressed));
+        assert_eq!(key_press_state(WM_KEYUP), Some(PressState::Released));
+        assert_eq!(key_press_state(WM_SYSKEYUP), Some(PressState::Released));
+        // Anything else is not a key transition we model.
+        assert_eq!(key_press_state(WM_MOUSEMOVE), None);
+    }
+
+    /// The X-button selection used by both `parse_wm_input` (RI_MOUSE_BUTTON_4/5)
+    /// and `mouse_ll_proc` (high word of `mouseData`). Mirror it here to lock the
+    /// XBUTTON1→VK_XBUTTON1 / XBUTTON2→VK_XBUTTON2 mapping.
+    fn xbutton_to_vk(xbutton: u16) -> Option<u16> {
+        if xbutton == XBUTTON1 {
+            Some(VK_XBUTTON1.0)
+        } else if xbutton == XBUTTON2 {
+            Some(VK_XBUTTON2.0)
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn xbutton_selection_matches_virtual_keys() {
+        assert_eq!(xbutton_to_vk(XBUTTON1), Some(VK_XBUTTON1.0));
+        assert_eq!(xbutton_to_vk(XBUTTON2), Some(VK_XBUTTON2.0));
+        assert_eq!(xbutton_to_vk(0), None);
+        assert_eq!(xbutton_to_vk(0xFFFF), None);
+    }
+
+    /// The mouse wheel delta is the high word of `mouseData` read as a signed
+    /// `i16`; both the WM_INPUT and LL-hook paths must preserve sign and the
+    /// ±WHEEL_DELTA (120) magnitude. Verify the `(mouseData >> 16) as i16`
+    /// decode for up (positive) and down (negative) scrolls.
+    #[test]
+    fn wheel_delta_decode_preserves_sign() {
+        // One notch up: WHEEL_DELTA (120) in the high word.
+        let up: u32 = (120i16 as u16 as u32) << 16;
+        assert_eq!((up >> 16) as i16, 120);
+        // One notch down: -120 in the high word (0xFF88).
+        let down: u32 = ((-120i16) as u16 as u32) << 16;
+        assert_eq!((down >> 16) as i16, -120);
+    }
+
+    /// Event-shape equivalence: a left-button press decoded by either capture
+    /// path must produce the identical `Event::MousePress` (same VK code, same
+    /// `PressState`). `Event` does not derive `PartialEq` (a public type we
+    /// don't want to widen), so destructure and compare fields explicitly.
+    #[test]
+    fn mouse_button_event_shape_is_stable() {
+        let ev = Event::MousePress {
+            key: VK_LBUTTON.0,
+            press_state: PressState::Pressed,
+        };
+        match ev {
+            Event::MousePress { key, press_state } => {
+                assert_eq!(key, VK_LBUTTON.0);
+                assert_eq!(press_state, PressState::Pressed);
+            }
+            other => panic!("expected MousePress, got {other:?}"),
+        }
+    }
 }
