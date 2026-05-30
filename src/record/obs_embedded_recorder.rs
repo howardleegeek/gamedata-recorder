@@ -852,6 +852,16 @@ struct RecorderState {
     // Audio encoder (created once upfront, reused always)
     audio_encoder: Arc<ObsAudioEncoder>,
 
+    /// The encoders OBS actually probed as available on this machine (the same
+    /// list returned to the tokio thread for UI display). Stored here so that
+    /// `start_recording` can reconcile the requested encoder against reality at
+    /// the exact point of use — a defense-in-depth guard ensuring we never try
+    /// to construct a hardware encoder that didn't register (old NVIDIA driver,
+    /// NVENC session cap, parked Optimus dGPU, missing AMD `obs-amf-test.exe`,
+    /// etc.). Without this, such a machine would fail to record entirely instead
+    /// of degrading to the best available encoder (or software x264).
+    available_encoders: Vec<VideoEncoderType>,
+
     // Track the hook monitoring thread handle to ensure proper cleanup
     hook_monitor_thread: Option<std::thread::JoinHandle<()>>,
 
@@ -972,6 +982,9 @@ impl RecorderState {
                 frozen_capture_fallback_fired: false,
                 video_encoders: HashMap::new(),
                 audio_encoder,
+                // Keep a copy on the state for start-time reconciliation; the
+                // original is returned below for the tokio-thread / UI layer.
+                available_encoders: available_encoders.clone(),
                 hook_monitor_thread: None,
                 obs_context,
             },
@@ -981,7 +994,11 @@ impl RecorderState {
 
     fn start_recording(
         &mut self,
-        request: Box<RecordingRequest>,
+        // `mut` so we can rebind `video_settings.encoder` after reconciling it
+        // against the actually-available encoders (see below). All downstream
+        // consumers — the 720p software cap, encoder construction, and the
+        // recorded metadata — then observe the reconciled value.
+        mut request: Box<RecordingRequest>,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> eyre::Result<()> {
         if self.is_recording {
@@ -997,9 +1014,43 @@ impl RecorderState {
             self.obs_context.scene(OWL_SCENE_NAME)?
         };
 
+        // Reconcile the requested encoder against what OBS actually probed as
+        // available on THIS machine, at the exact point of use. `config.rs`
+        // optimistically upgrades the encoder from the DXGI adapter vendor, and
+        // the tokio thread does a first-pass reconciliation for the UI — but a
+        // GPU being present doesn't guarantee its OBS encoder registered (old
+        // NVIDIA driver, saturated NVENC session cap, parked Optimus dGPU,
+        // missing/blocked AMD `obs-amf-test.exe`, unsupported Intel iGPU). If we
+        // constructed an unavailable encoder below, libobs would error and the
+        // whole recording would fail. Instead we degrade deterministically:
+        // best available hardware (NVENC > AMF > QSV), then software x264. This
+        // guard guarantees `encoder` is always constructible and is the single
+        // place the chosen encoder can never be left pointing at a phantom.
+        let selected_encoder = crate::config::select_best_available_encoder(
+            request.video_settings.encoder,
+            &self.available_encoders,
+        );
+        if selected_encoder != request.video_settings.encoder {
+            tracing::warn!(
+                requested = %request.video_settings.encoder,
+                selected = %selected_encoder,
+                available = ?self.available_encoders,
+                "Requested video encoder is not available on this machine; \
+                 degrading to the best available encoder"
+            );
+            request.video_settings.encoder = selected_encoder;
+        } else {
+            tracing::info!(
+                encoder = %selected_encoder,
+                "Using requested video encoder (confirmed available)"
+            );
+        }
+
         // v2.6.4: x264 is the only software (CPU) encoder; everything else is
         // hardware (NVENC/AMF/QSV). On software we cap the output to 720p inside
         // `video_info` so weak/iGPU CPUs aren't pegged at native resolution.
+        // NB: read AFTER the reconciliation above so a hardware->x264 degrade
+        // correctly triggers the 720p software cap.
         let software_encoder = request.video_settings.encoder == VideoEncoderType::X264;
         self.obs_context.reset_video(video_info(
             self.adapter_index,

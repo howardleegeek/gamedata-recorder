@@ -67,6 +67,110 @@ fn detect_gpu_vendor() -> Result<Option<GpuVendor>> {
     }
 }
 
+/// Hardware-encoder preference order, best first.
+///
+/// This is the single source of truth for "which hardware encoder do we
+/// prefer when more than one is actually available" and is consulted by
+/// [`select_best_available_encoder`]. Order rationale:
+///
+/// * NVENC first — discrete NVIDIA silicon has a dedicated encode ASIC that is
+///   essentially free of the render pipeline; it is the highest-quality and
+///   lowest-overhead option whenever it is present.
+/// * AMF second — AMD's VCN encoder. On the AMD Radeon 780M test machine this
+///   is the proven-working path; keeping it ahead of QSV preserves that pick.
+/// * QSV last — Intel QuickSync, typically the integrated fallback on Optimus /
+///   hybrid laptops where it shares the iGPU with rendering.
+///
+/// Within each vendor the HEVC (H.265) variant is preferred over H.264 to match
+/// the GameData Labs buyer spec, but H.264 is accepted when HEVC is absent (some
+/// older silicon / drivers expose only the H.264 encoder).
+const HW_ENCODER_PREFERENCE: &[VideoEncoderType] = &[
+    VideoEncoderType::NvEncHevc,
+    VideoEncoderType::NvEnc,
+    VideoEncoderType::AmfHevc,
+    VideoEncoderType::Amf,
+    VideoEncoderType::QsvHevc,
+    VideoEncoderType::Qsv,
+];
+
+/// Reconcile a *requested* encoder against the encoders OBS actually probed as
+/// available on this machine, returning an encoder that is GUARANTEED to be a
+/// safe choice for the recorder to construct.
+///
+/// This is the robustness keystone for multi-GPU compatibility. `config.rs`
+/// (`detect_gpu_vendor` → `Config::load`) optimistically upgrades the encoder
+/// to a vendor's hardware encoder based purely on which GPU adapter is present
+/// in DXGI. But a GPU being *present* does not mean its OBS encoder *registered*:
+///
+/// * NVIDIA NVENC can fail to register when the driver is too old, the
+///   consumer-driver NVENC session cap is already saturated by other apps, or
+///   (Optimus / hybrid laptops) the discrete GPU is parked and the display is
+///   driven by the iGPU.
+/// * AMD AMF is only listed when libobs's `obs-amf-test.exe` probe succeeds; if
+///   that helper is missing, blocked, or returns nothing, AMF silently drops
+///   out of the available list.
+/// * Intel QSV requires a supported iGPU + driver.
+///
+/// In every one of those cases the requested encoder will be ABSENT from
+/// `available`. Constructing it anyway makes libobs error out and the whole
+/// recording fail. Instead we degrade deterministically:
+///
+/// 1. If the requested encoder is genuinely available, keep it (this is the
+///    common path and keeps the proven AMD-AMF behaviour byte-for-byte
+///    identical).
+/// 2. If a HEVC encoder was requested but only its H.264 sibling is available
+///    (same vendor), step down to H.264 before changing vendor — the smallest
+///    possible degradation.
+/// 3. Otherwise pick the best *available* hardware encoder by
+///    [`HW_ENCODER_PREFERENCE`] (NVENC > AMF > QSV). This is what rescues an
+///    Optimus laptop whose NVENC didn't register but whose Intel QSV did: we
+///    use QSV instead of collapsing all the way to software.
+/// 4. If no hardware encoder is available at all, fall back to software
+///    [`VideoEncoderType::X264`]. x264 is OBS's built-in software encoder and is
+///    treated as always-constructible; the recorder additionally caps software
+///    output to 720p (see `obs_embedded_recorder::video_info`) so a weak/iGPU
+///    CPU isn't pegged.
+///
+/// The return value is therefore never "unset" and, whenever `available`
+/// contains at least one usable encoder, is always a member of `available`.
+/// In the degenerate case where the probe returned an empty list (or a list
+/// without x264), we still return `X264` as the universal last resort — that
+/// matches the recorder's existing "failed to probe, assume x264 only"
+/// contract and guarantees the caller always has *something* to construct.
+pub(crate) fn select_best_available_encoder(
+    requested: VideoEncoderType,
+    available: &[VideoEncoderType],
+) -> VideoEncoderType {
+    // 1. Honour the request when it's actually available. Keeps the working
+    //    AMD-AMF path (and any explicit user selection) identical.
+    if available.contains(&requested) {
+        return requested;
+    }
+
+    // 2. HEVC was requested but unavailable — try the same-vendor H.264 sibling
+    //    before switching vendor. `h264_fallback` is a no-op for non-HEVC
+    //    inputs, so this only ever fires for the HEVC variants.
+    if requested.is_hevc() {
+        let h264_sibling = requested.h264_fallback();
+        if h264_sibling != requested && available.contains(&h264_sibling) {
+            return h264_sibling;
+        }
+    }
+
+    // 3. Pick the best hardware encoder that genuinely registered.
+    if let Some(best) = HW_ENCODER_PREFERENCE
+        .iter()
+        .copied()
+        .find(|enc| available.contains(enc))
+    {
+        return best;
+    }
+
+    // 4. No hardware encoder available — software x264 is the guaranteed
+    //    terminal fallback (720p cap applied downstream in `video_info`).
+    VideoEncoderType::X264
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 // camel case renames are legacy from old existing configs, we want it to be backwards-compatible with previous owl releases that used electron
 #[serde(rename_all = "camelCase")]
@@ -1632,6 +1736,136 @@ mod tests {
             let dec = base64_decode(&enc).expect("decode");
             assert_eq!(dec.as_slice(), input, "round-trip for {input:?}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Encoder fallback-chain tests (multi-GPU compatibility hardening)
+    //
+    // These pin the guaranteed decision tree of `select_best_available_encoder`
+    // so the recorder can never be handed an encoder OBS didn't actually probe
+    // as available, and always degrades NVENC > AMF > QSV > x264.
+    // -----------------------------------------------------------------------
+    use constants::encoding::VideoEncoderType as VE;
+
+    #[test]
+    fn encoder_keeps_request_when_available() {
+        // The common path: the requested encoder is present, so it is kept
+        // verbatim. This is what preserves the proven AMD-AMF behaviour.
+        let available = [VE::AmfHevc, VE::Amf, VE::X264];
+        assert_eq!(
+            select_best_available_encoder(VE::Amf, &available),
+            VE::Amf,
+            "an available requested encoder must be kept unchanged"
+        );
+        assert_eq!(
+            select_best_available_encoder(VE::AmfHevc, &available),
+            VE::AmfHevc
+        );
+    }
+
+    #[test]
+    fn encoder_hevc_steps_down_to_same_vendor_h264() {
+        // HEVC requested, only the H.264 sibling registered → smallest possible
+        // degradation is the same-vendor H.264 encoder, NOT a vendor switch.
+        let available = [VE::NvEnc, VE::X264];
+        assert_eq!(
+            select_best_available_encoder(VE::NvEncHevc, &available),
+            VE::NvEnc,
+            "HEVC must step down to same-vendor H.264 before changing vendor"
+        );
+    }
+
+    #[test]
+    fn encoder_falls_through_to_best_available_hardware() {
+        // Optimus laptop scenario: config picked NVENC (NVIDIA adapter present)
+        // but NVENC never registered (old driver / session cap / parked dGPU).
+        // Intel QSV did register → we must use QSV, not collapse to software.
+        let available = [VE::QsvHevc, VE::Qsv, VE::X264];
+        assert_eq!(
+            select_best_available_encoder(VE::NvEnc, &available),
+            VE::QsvHevc,
+            "must pick the best AVAILABLE hardware encoder when the requested one is absent"
+        );
+        // And the HEVC-NVENC request degrades the same way.
+        assert_eq!(
+            select_best_available_encoder(VE::NvEncHevc, &available),
+            VE::QsvHevc
+        );
+    }
+
+    #[test]
+    fn encoder_prefers_nvenc_over_amf_over_qsv() {
+        // When several hardware encoders are simultaneously available and the
+        // request matches none of them, the priority order must hold.
+        let all_hw = [
+            VE::Qsv,
+            VE::QsvHevc,
+            VE::Amf,
+            VE::AmfHevc,
+            VE::NvEnc,
+            VE::NvEncHevc,
+            VE::X264,
+        ];
+        // Request something not in the list to force the preference walk.
+        // (Construct an impossible request by asking for a HW encoder we then
+        // exclude.) Easiest: request X264's "upgrade" by asking for QSV when
+        // everything is present — QSV IS present so it would be kept; instead
+        // exclude the requested one explicitly.
+        let without_request: Vec<VE> = all_hw.iter().copied().filter(|e| *e != VE::Qsv).collect();
+        assert_eq!(
+            select_best_available_encoder(VE::Qsv, &without_request),
+            VE::NvEncHevc,
+            "NVENC (HEVC) must win when present alongside AMF and QSV"
+        );
+
+        let nvenc_absent: Vec<VE> = without_request
+            .iter()
+            .copied()
+            .filter(|e| *e != VE::NvEncHevc && *e != VE::NvEnc)
+            .collect();
+        assert_eq!(
+            select_best_available_encoder(VE::Qsv, &nvenc_absent),
+            VE::AmfHevc,
+            "AMF (HEVC) must win over QSV when NVENC is absent"
+        );
+    }
+
+    #[test]
+    fn encoder_falls_back_to_x264_when_no_hardware() {
+        // No-discrete-GPU / iGPU-without-encoder machine: only software x264 is
+        // available. The requested hardware encoder must collapse to x264.
+        let available = [VE::X264];
+        assert_eq!(
+            select_best_available_encoder(VE::NvEncHevc, &available),
+            VE::X264,
+            "with no hardware encoder available, must fall back to software x264"
+        );
+        assert_eq!(select_best_available_encoder(VE::Amf, &available), VE::X264);
+    }
+
+    #[test]
+    fn encoder_x264_request_is_stable() {
+        // An explicit x264 request must stay x264 regardless of what hardware
+        // is available — we never silently "upgrade" a deliberate software pick
+        // here (the optimistic upgrade lives in Config::load, not in the
+        // availability-reconciliation path).
+        let available = [VE::NvEncHevc, VE::NvEnc, VE::X264];
+        assert_eq!(
+            select_best_available_encoder(VE::X264, &available),
+            VE::X264
+        );
+    }
+
+    #[test]
+    fn encoder_empty_probe_yields_x264() {
+        // Degenerate case: the probe returned nothing usable. We still hand the
+        // caller x264 (the universal software encoder) rather than something
+        // unconstructible or leaving the choice unset.
+        assert_eq!(
+            select_best_available_encoder(VE::NvEnc, &[]),
+            VE::X264,
+            "an empty availability list must still resolve to x264"
+        );
     }
 }
 

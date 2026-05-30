@@ -291,6 +291,15 @@ pub const FPS: u32 = 30;
 pub const RECORDING_WIDTH: u32 = 1920;
 pub const RECORDING_HEIGHT: u32 = 1080;
 
+/// Minecraft's default vertical FOV, in degrees. MC's video setting is
+/// labeled "FOV" and is the VERTICAL field of view (default 70°; the slider
+/// ranges 30–110). We use this to derive pinhole camera intrinsics for the
+/// recorded frame when no per-session FOV measurement is available — the
+/// emitted intrinsics are therefore marked `source: "assumed_mc_default"`,
+/// NOT a measured value. Override only if a real FOV is ever read from the
+/// game; until then every session honestly states this is the assumed default.
+pub const MC_DEFAULT_VFOV_DEG: f64 = 70.0;
+
 /// Output-height ceiling applied ONLY when the final video encoder is software
 /// x264 (no NVENC/AMF/QSV available). v2.6.4 graceful-degrade: software H.264
 /// at native 1080p pegs weak/iGPU CPUs (confirmed ~1 FPS + system-wide lag on

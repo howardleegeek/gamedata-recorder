@@ -26,7 +26,8 @@
 //! asserts the recording entry point errors until consent is set.
 
 use std::{
-    collections::HashSet,
+    cell::RefCell,
+    collections::{HashSet, VecDeque},
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -48,15 +49,20 @@ use windows::{
                 RegisterRawInputDevices,
             },
             WindowsAndMessaging::{
-                self, CreateWindowExA, DefWindowProcA, DestroyWindow, DispatchMessageA,
-                GetMessageA, GetSystemMetrics, MSG, PostQuitMessage, RI_KEY_BREAK,
-                RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
-                RI_MOUSE_BUTTON_5_UP, RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP,
-                RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN,
-                RI_MOUSE_RIGHT_BUTTON_UP, RI_MOUSE_WHEEL, RegisterClassA, SM_CXSCREEN,
-                SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-                SM_YVIRTUALSCREEN, SW_HIDE, ShowWindow, TranslateMessage, UnregisterClassA,
-                WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSA, WS_EX_TOOLWINDOW,
+                self, CallNextHookEx, CreateWindowExA, DefWindowProcA, DestroyWindow,
+                DispatchMessageA, GetMessageA, GetSystemMetrics, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
+                MSG, MSLLHOOKSTRUCT, PostQuitMessage, RI_KEY_BREAK, RI_MOUSE_BUTTON_4_DOWN,
+                RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_BUTTON_5_UP,
+                RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP, RI_MOUSE_MIDDLE_BUTTON_DOWN,
+                RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN, RI_MOUSE_RIGHT_BUTTON_UP,
+                RI_MOUSE_WHEEL, RegisterClassA, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
+                SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE,
+                SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
+                UnregisterClassA, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE,
+                WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+                WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+                WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSA, WS_EX_TOOLWINDOW, XBUTTON1,
+                XBUTTON2,
             },
         },
     },
@@ -64,6 +70,65 @@ use windows::{
 };
 
 use crate::{Event, PressState};
+
+// ---------------------------------------------------------------------------
+// Tier-4 fallback state: low-level global hooks (`WH_KEYBOARD_LL` /
+// `WH_MOUSE_LL`).
+//
+// WHY this exists — Win11 26200 Raw Input failure:
+//   On the target machine (Windows 11 build 26200, AMD) the recorder logged
+//   `RegisterRawInputDevices` failing at *every* fallback tier (INPUTSINK
+//   batch, per-device INPUTSINK, and foreground-only dwFlags=0). The resulting
+//   `inputs.jsonl` contained only lifecycle markers with empty `keyboard:[]`
+//   and `mouse:[]` — zero real input — even though the user demonstrably
+//   played (the MC-mod `game_state.jsonl` captured 2.7 MB of pose changes).
+//   This points at a restricted window-station / `schtasks`-launched context
+//   (or a 26200 tightening) where Raw Input registration is simply rejected
+//   for this process. Missing keyboard/mouse makes the data incomplete and
+//   useless for world-model training, so we need a path that does NOT depend
+//   on Raw Input registration at all.
+//
+// HOW the hook proc talks to `run_queue`:
+//   `SetWindowsHookEx(WH_*_LL, ..)` takes a bare `extern "system" fn` that the
+//   OS invokes *on the thread that installed it, while that thread pumps
+//   messages*. That callback cannot capture `self`, the user `event_callback`,
+//   or the mouse-delta state. So we bridge through THREAD-LOCAL state: the
+//   hook procs decode `KBDLLHOOKSTRUCT` / `MSLLHOOKSTRUCT` into the exact same
+//   `Event` shape the WM_INPUT path produces, push them onto a thread-local
+//   queue, and `run_queue` drains that queue every pump iteration and feeds
+//   the SAME `event_callback`. Because the hooks fire on the very thread that
+//   runs the pump, a thread-local is correct (and lock-free) here.
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Decoded events produced by the LL hook procedures, awaiting drain by
+    /// [`KbmCapture::run_queue`]. Only touched on the capture thread, which is
+    /// also the thread the hooks are installed on and fire on.
+    static LL_HOOK_EVENTS: RefCell<VecDeque<Event>> = const { RefCell::new(VecDeque::new()) };
+
+    /// Shared active-key set, mirrored from the owning [`KbmCapture`] so the LL
+    /// hook procs can perform the same autorepeat filtering and pressed-set
+    /// bookkeeping the WM_INPUT path does. `None` until the fallback installs.
+    static LL_HOOK_ACTIVE_KEYS: RefCell<Option<Arc<Mutex<ActiveKeys>>>> =
+        const { RefCell::new(None) };
+
+    /// Last absolute mouse position seen by the mouse LL hook, used to derive
+    /// relative deltas (the WM_INPUT path emits relative `MouseMove` deltas, so
+    /// we must too). `WH_MOUSE_LL` reports absolute screen coordinates in
+    /// `MSLLHOOKSTRUCT::pt`.
+    static LL_HOOK_LAST_MOUSE: RefCell<Option<(i32, i32)>> = const { RefCell::new(None) };
+}
+
+/// Lock the LL-hook active-key set the same poisoning-tolerant way the rest of
+/// this module does. Returns `None` if the fallback was never installed.
+fn ll_hook_with_active_keys<R>(f: impl FnOnce(&mut ActiveKeys) -> R) -> Option<R> {
+    LL_HOOK_ACTIVE_KEYS.with(|cell| {
+        cell.borrow().as_ref().map(|arc| {
+            let mut guard = arc.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            f(&mut guard)
+        })
+    })
+}
 
 /// Result of checking whether the user has consented to the current version.
 ///
@@ -153,10 +218,36 @@ pub struct KbmCapture {
     class_name: PCSTR,
     h_instance: HINSTANCE,
     active_keys: Arc<Mutex<ActiveKeys>>,
+    /// Tier-4 fallback handles. `Some` only when all three Raw Input tiers
+    /// failed and we installed `WH_KEYBOARD_LL` / `WH_MOUSE_LL` instead (see
+    /// the module-level rationale on the Win11 26200 Raw Input failure). These
+    /// MUST be unhooked in `Drop`, on the same thread that installed them.
+    keyboard_hook: Option<HHOOK>,
+    mouse_hook: Option<HHOOK>,
 }
 impl Drop for KbmCapture {
     fn drop(&mut self) {
         unsafe {
+            // Tier-4 teardown: unhook the low-level hooks before tearing the
+            // window down. `UnhookWindowsHookEx` must run on the thread that
+            // called `SetWindowsHookEx`; `Drop` runs on the capture thread
+            // (the one that owned `run_queue`), which is exactly that thread.
+            // Mirrors the DestroyWindow cleanup below.
+            if let Some(hook) = self.keyboard_hook.take() {
+                if let Err(e) = UnhookWindowsHookEx(hook) {
+                    tracing::error!("Failed to unhook WH_KEYBOARD_LL during cleanup: {:?}", e);
+                }
+            }
+            if let Some(hook) = self.mouse_hook.take() {
+                if let Err(e) = UnhookWindowsHookEx(hook) {
+                    tracing::error!("Failed to unhook WH_MOUSE_LL during cleanup: {:?}", e);
+                }
+            }
+            // Drop our reference to the shared active-key set from the hook
+            // thread-local so the `Arc` can be released and the next capture
+            // session starts clean.
+            LL_HOOK_ACTIVE_KEYS.with(|cell| *cell.borrow_mut() = None);
+
             // Destroy window first; only unregister class if window was successfully destroyed.
             // UnregisterClassA fails with ERROR_CLASS_HAS_WINDOWS if any windows still exist.
             match DestroyWindow(self.hwnd) {
@@ -285,8 +376,17 @@ impl KbmCapture {
             let tier1_result = RegisterRawInputDevices(&tier1, tier1.len() as u32)
                 .wrap_err("tier 1: RIDEV_INPUTSINK batch with valid hwnd");
             let registered = if let Err(ref e) = tier1_result {
+                // Capture the concrete Win32 error code. The `windows` crate's
+                // `Result` Display can be empty when the failure originated from
+                // a `BOOL`->error conversion, so we read `GetLastError()`
+                // ourselves and log the raw code (e.g. 0x80070057 =
+                // ERROR_INVALID_PARAMETER, or 0x5 = ERROR_ACCESS_DENIED on a
+                // restricted window station) so future diagnosis is possible.
+                use windows::Win32::Foundation::GetLastError;
+                let last_error = GetLastError();
                 tracing::info!(
                     error = ?e,
+                    last_error = ?last_error,
                     "RegisterRawInputDevices tier 1 (INPUTSINK batch) failed, trying tier 2"
                 );
                 // Tier 2: same flags, but register devices one at a time.
@@ -308,8 +408,11 @@ impl KbmCapture {
                             any_ok = true;
                         }
                         Err(e) => {
+                            use windows::Win32::Foundation::GetLastError;
+                            let last_error = GetLastError();
                             tracing::info!(
                                 error = ?e,
+                                last_error = ?last_error,
                                 usage = format!("0x{:02X}", dev.usUsage),
                                 "tier 2 failed for device, will try tier 3"
                             );
@@ -341,8 +444,11 @@ impl KbmCapture {
                                 any_tier3_ok = true;
                             }
                             Err(e) => {
+                                use windows::Win32::Foundation::GetLastError;
+                                let last_error = GetLastError();
                                 tracing::debug!(
                                     error = ?e,
+                                    last_error = ?last_error,
                                     usage = format!("0x{:02X}", dev.usUsage),
                                     "tier 3 failed for device"
                                 );
@@ -358,20 +464,92 @@ impl KbmCapture {
                 true
             };
 
+            // Tier-4 fallback hook handles. Populated below only when Raw Input
+            // registration failed at every tier and we successfully install the
+            // low-level global hooks. Plumbed into the constructor so `Drop` can
+            // unhook them on this same (capture) thread.
+            let mut keyboard_hook: Option<HHOOK> = None;
+            let mut mouse_hook: Option<HHOOK> = None;
+
             if !registered {
-                // All three tiers failed. This is very rare (e.g. session 0 /
-                // headless / certain kernel-mode anti-cheat filters). Log and
-                // proceed — the capture thread still pumps window messages so
-                // the rest of the pipeline (gamepad via XInput, video via OBS)
-                // is unaffected. Downstream validators will flag the empty
-                // input stream.
+                // All three Raw Input tiers failed (e.g. Win11 26200 restricted
+                // window station / schtasks context — see the module-level
+                // rationale). Rather than ship an empty input stream, fall back
+                // to TIER 4: low-level global hooks (`WH_KEYBOARD_LL` /
+                // `WH_MOUSE_LL`). These do not depend on RegisterRawInputDevices
+                // at all; the OS calls our hook procs on THIS thread while it
+                // pumps messages in `run_queue`, and they push decoded events
+                // onto a thread-local queue we drain there.
                 tracing::warn!(
                     "RegisterRawInputDevices failed at all fallback tiers \
                      (preferred INPUTSINK batch, per-device INPUTSINK, and \
-                     foreground-only) — continuing without keyboard/mouse \
-                     Raw Input. Video recording and gamepad input are \
-                     unaffected."
+                     foreground-only) — installing tier-4 low-level hook \
+                     fallback (WH_KEYBOARD_LL / WH_MOUSE_LL) to capture \
+                     keyboard/mouse without Raw Input. Video recording and \
+                     gamepad input are unaffected."
                 );
+
+                // Share the active-key set with the hook procs so they can
+                // perform the same autorepeat suppression and pressed-set
+                // bookkeeping the WM_INPUT path does. Must be set BEFORE the
+                // hooks are installed, since a hook can fire immediately.
+                LL_HOOK_ACTIVE_KEYS.with(|cell| {
+                    *cell.borrow_mut() = Some(active_keys.clone());
+                });
+
+                use windows::Win32::Foundation::GetLastError;
+
+                // WH_KEYBOARD_LL: global low-level keyboard hook. dwThreadId = 0
+                // installs it for the whole desktop on the calling thread, which
+                // is exactly the thread that runs `run_queue`'s message pump
+                // (required for low-level hooks to be serviced).
+                match SetWindowsHookExW(
+                    WH_KEYBOARD_LL,
+                    Some(Self::keyboard_ll_proc),
+                    Some(h_instance),
+                    0,
+                ) {
+                    Ok(hook) => {
+                        tracing::info!("tier-4 fallback: WH_KEYBOARD_LL installed");
+                        keyboard_hook = Some(hook);
+                    }
+                    Err(e) => {
+                        let last_error = GetLastError();
+                        tracing::error!(
+                            error = ?e,
+                            last_error = ?last_error,
+                            "tier-4 fallback: failed to install WH_KEYBOARD_LL"
+                        );
+                    }
+                }
+
+                // WH_MOUSE_LL: global low-level mouse hook, same threading rules.
+                match SetWindowsHookExW(WH_MOUSE_LL, Some(Self::mouse_ll_proc), Some(h_instance), 0)
+                {
+                    Ok(hook) => {
+                        tracing::info!("tier-4 fallback: WH_MOUSE_LL installed");
+                        mouse_hook = Some(hook);
+                    }
+                    Err(e) => {
+                        let last_error = GetLastError();
+                        tracing::error!(
+                            error = ?e,
+                            last_error = ?last_error,
+                            "tier-4 fallback: failed to install WH_MOUSE_LL"
+                        );
+                    }
+                }
+
+                // If neither hook installed, drop our shared reference to the
+                // active-key set so it does not linger in the thread-local.
+                if keyboard_hook.is_none() && mouse_hook.is_none() {
+                    LL_HOOK_ACTIVE_KEYS.with(|cell| *cell.borrow_mut() = None);
+                    tracing::error!(
+                        "tier-4 fallback: both WH_KEYBOARD_LL and WH_MOUSE_LL \
+                         failed to install — continuing without keyboard/mouse. \
+                         Downstream validators will flag the empty input stream."
+                    );
+                }
             }
 
             Ok(Self {
@@ -379,6 +557,8 @@ impl KbmCapture {
                 class_name,
                 h_instance,
                 active_keys,
+                keyboard_hook,
+                mouse_hook,
             })
         }
     }
@@ -406,6 +586,26 @@ impl KbmCapture {
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageA(&msg);
+
+                // Tier-4 fallback drain. When the LL hooks are installed (all
+                // Raw Input tiers failed), the OS invokes `keyboard_ll_proc` /
+                // `mouse_ll_proc` ON THIS THREAD during the message dispatch
+                // above, and they enqueue decoded events onto the thread-local
+                // `LL_HOOK_EVENTS`. Drain them here and feed the SAME
+                // `event_callback` the WM_INPUT path uses, so downstream sees an
+                // identical event stream regardless of which capture tier won.
+                // This is a no-op (empty queue) on the Raw Input happy path.
+                loop {
+                    let next = LL_HOOK_EVENTS.with(|q| q.borrow_mut().pop_front());
+                    match next {
+                        Some(event) => {
+                            if !event_callback(event) {
+                                return Ok(());
+                            }
+                        }
+                        None => break,
+                    }
+                }
 
                 if msg.message == WindowsAndMessaging::WM_INPUT {
                     // Process each WM_INPUT message individually via GetRawInputData.
@@ -453,6 +653,201 @@ impl KbmCapture {
         self.active_keys
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Tier-4 fallback: low-level keyboard hook procedure (`WH_KEYBOARD_LL`).
+    ///
+    /// Installed only when every `RegisterRawInputDevices` tier failed (see the
+    /// module-level Win11 26200 rationale). The OS invokes this on the capture
+    /// thread while it pumps messages, so it cannot capture `self` or the user
+    /// callback — instead it decodes into the EXACT same [`Event`] shape the
+    /// WM_INPUT path (`parse_wm_input`, `RIM_TYPEKEYBOARD`) produces and pushes
+    /// onto the thread-local [`LL_HOOK_EVENTS`] queue, which `run_queue` drains.
+    ///
+    /// Mirroring contract with `parse_wm_input`:
+    /// * `key` is the virtual-key code as `u16` (`parse_wm_input` reads
+    ///   `RAWKEYBOARD::VKey`, a `u16`; here we narrow `KBDLLHOOKSTRUCT::vkCode`,
+    ///   a `u32`, to `u16`).
+    /// * Press vs. release is decided by the message id in `wparam`
+    ///   (`WM_KEYDOWN`/`WM_SYSKEYDOWN` => pressed, `WM_KEYUP`/`WM_SYSKEYUP` =>
+    ///   released), matching the RI_KEY_BREAK split.
+    /// * On press we emit ONLY if the key was not already in the active set
+    ///   (`HashSet::insert` returns `true`), reproducing the autorepeat
+    ///   suppression. On release we always emit and remove from the set.
+    unsafe extern "system" fn keyboard_ll_proc(
+        code: i32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        // SAFETY: Windows hook callback — unsafe required for the FFI boundary
+        // and for dereferencing the OS-provided KBDLLHOOKSTRUCT pointer.
+        unsafe {
+            // Per MSDN, only process the event when code == HC_ACTION; for any
+            // negative code we MUST pass it straight to the next hook untouched.
+            if code == HC_ACTION as i32 {
+                let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+                let key = kb.vkCode as u16;
+                let message = wparam.0 as u32;
+                // WM_KEYDOWN/WM_SYSKEYDOWN => pressed, *_UP => released. This is
+                // the LL-hook equivalent of parse_wm_input's RI_KEY_BREAK split.
+                let press_state = match message {
+                    WM_KEYDOWN | WM_SYSKEYDOWN => PressState::Pressed,
+                    WM_KEYUP | WM_SYSKEYUP => PressState::Released,
+                    // Not a key transition we model; defer to the next hook.
+                    _ => return CallNextHookEx(None, code, wparam, lparam),
+                };
+
+                match press_state {
+                    PressState::Pressed => {
+                        // `insert` returns true only if the key was NOT already
+                        // pressed — exactly parse_wm_input's autorepeat filter.
+                        let newly_pressed = ll_hook_with_active_keys(|active_keys| {
+                            active_keys.keyboard.insert(key)
+                        })
+                        // If the active-key set was never installed we cannot
+                        // dedupe; default to emitting (true) so input is not
+                        // silently dropped. In practice the set is always set
+                        // alongside the hooks, so this is belt-and-suspenders.
+                        .unwrap_or(true);
+                        if newly_pressed {
+                            LL_HOOK_EVENTS.with(|q| {
+                                q.borrow_mut()
+                                    .push_back(Event::KeyPress { key, press_state });
+                            });
+                        }
+                    }
+                    PressState::Released => {
+                        ll_hook_with_active_keys(|active_keys| {
+                            active_keys.keyboard.remove(&key);
+                        });
+                        LL_HOOK_EVENTS.with(|q| {
+                            q.borrow_mut()
+                                .push_back(Event::KeyPress { key, press_state });
+                        });
+                    }
+                }
+            }
+
+            // ALWAYS chain to the next hook in the chain (MSDN requirement).
+            CallNextHookEx(None, code, wparam, lparam)
+        }
+    }
+
+    /// Tier-4 fallback: low-level mouse hook procedure (`WH_MOUSE_LL`).
+    ///
+    /// Companion to [`keyboard_ll_proc`]; same threading and queue contract.
+    /// Decodes `MSLLHOOKSTRUCT` into the EXACT same [`Event`] shapes the
+    /// WM_INPUT path (`parse_wm_input`, `RIM_TYPEMOUSE`) produces:
+    ///
+    /// * **Movement** — `parse_wm_input` emits a RELATIVE `MouseMove([dx, dy])`.
+    ///   `WH_MOUSE_LL` only reports ABSOLUTE screen coordinates in
+    ///   `MSLLHOOKSTRUCT::pt`, so we derive the delta from the previous absolute
+    ///   position held in [`LL_HOOK_LAST_MOUSE`] (saturating, like the absolute
+    ///   branch of `parse_wm_input`) and update it afterwards. We push only when
+    ///   the delta is non-zero, matching `parse_wm_input`.
+    /// * **Buttons** — `Event::MousePress { key, press_state }` with the SAME
+    ///   `VK_*BUTTON` codes `parse_wm_input` uses (`VK_LBUTTON.0`, etc.), plus
+    ///   the same `active_keys.mouse` insert/remove bookkeeping. The X button is
+    ///   selected from the high word of `mouseData` (XBUTTON1 => VK_XBUTTON1,
+    ///   XBUTTON2 => VK_XBUTTON2), mirroring RI_MOUSE_BUTTON_4/5.
+    /// * **Wheel** — `Event::MouseScroll { scroll_amount }`. `parse_wm_input`
+    ///   uses `usButtonData as i16` (signed WHEEL_DELTA multiples, ±120). For
+    ///   `WH_MOUSE_LL` the wheel delta is the high word of `mouseData`, read as a
+    ///   signed `i16`, preserving the identical encoding.
+    unsafe extern "system" fn mouse_ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        // SAFETY: Windows hook callback — unsafe for the FFI boundary and for
+        // dereferencing the OS-provided MSLLHOOKSTRUCT pointer.
+        unsafe {
+            if code == HC_ACTION as i32 {
+                let ms = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+                let message = wparam.0 as u32;
+
+                match message {
+                    WM_MOUSEMOVE => {
+                        // Relative delta from the last absolute position, then
+                        // update the stored position. Mirrors the absolute
+                        // branch of parse_wm_input (saturating_sub, push only on
+                        // non-zero delta).
+                        let (cur_x, cur_y) = (ms.pt.x, ms.pt.y);
+                        let delta = LL_HOOK_LAST_MOUSE.with(|cell| {
+                            let last = *cell.borrow();
+                            *cell.borrow_mut() = Some((cur_x, cur_y));
+                            last.map(|(lx, ly)| {
+                                (cur_x.saturating_sub(lx), cur_y.saturating_sub(ly))
+                            })
+                        });
+                        if let Some((dx, dy)) = delta
+                            && (dx != 0 || dy != 0)
+                        {
+                            LL_HOOK_EVENTS.with(|q| {
+                                q.borrow_mut().push_back(Event::MouseMove([dx, dy]));
+                            });
+                        }
+                    }
+                    WM_LBUTTONDOWN => Self::ll_push_mouse_button(VK_LBUTTON.0, PressState::Pressed),
+                    WM_LBUTTONUP => Self::ll_push_mouse_button(VK_LBUTTON.0, PressState::Released),
+                    WM_RBUTTONDOWN => Self::ll_push_mouse_button(VK_RBUTTON.0, PressState::Pressed),
+                    WM_RBUTTONUP => Self::ll_push_mouse_button(VK_RBUTTON.0, PressState::Released),
+                    WM_MBUTTONDOWN => Self::ll_push_mouse_button(VK_MBUTTON.0, PressState::Pressed),
+                    WM_MBUTTONUP => Self::ll_push_mouse_button(VK_MBUTTON.0, PressState::Released),
+                    WM_XBUTTONDOWN | WM_XBUTTONUP => {
+                        // Which X button is in the HIGH word of mouseData.
+                        // parse_wm_input maps RI_MOUSE_BUTTON_4 => VK_XBUTTON1
+                        // and BUTTON_5 => VK_XBUTTON2; do the same here.
+                        let xbutton = (ms.mouseData >> 16) as u16;
+                        let key = if xbutton == XBUTTON1 {
+                            VK_XBUTTON1.0
+                        } else if xbutton == XBUTTON2 {
+                            VK_XBUTTON2.0
+                        } else {
+                            // Unknown X button; chain on without emitting.
+                            return CallNextHookEx(None, code, wparam, lparam);
+                        };
+                        let press_state = if message == WM_XBUTTONDOWN {
+                            PressState::Pressed
+                        } else {
+                            PressState::Released
+                        };
+                        Self::ll_push_mouse_button(key, press_state);
+                    }
+                    WM_MOUSEWHEEL => {
+                        // High word of mouseData is the signed wheel delta
+                        // (±WHEEL_DELTA). parse_wm_input stores usButtonData as
+                        // i16, so the same ±120 values flow through unchanged.
+                        let scroll_amount = (ms.mouseData >> 16) as i16;
+                        LL_HOOK_EVENTS.with(|q| {
+                            q.borrow_mut()
+                                .push_back(Event::MouseScroll { scroll_amount });
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
+            CallNextHookEx(None, code, wparam, lparam)
+        }
+    }
+
+    /// Push a mouse button press/release Event and update the shared active-key
+    /// set the same way `parse_wm_input` does. Factored out so the LL mouse hook
+    /// stays readable; called only from `mouse_ll_proc` on the capture thread.
+    fn ll_push_mouse_button(key: u16, press_state: PressState) {
+        match press_state {
+            PressState::Pressed => {
+                ll_hook_with_active_keys(|active_keys| {
+                    active_keys.mouse.insert(key);
+                });
+            }
+            PressState::Released => {
+                ll_hook_with_active_keys(|active_keys| {
+                    active_keys.mouse.remove(&key);
+                });
+            }
+        }
+        LL_HOOK_EVENTS.with(|q| {
+            q.borrow_mut()
+                .push_back(Event::MousePress { key, press_state });
+        });
     }
 
     /// Parse raw input from GetRawInputBuffer batch reading.

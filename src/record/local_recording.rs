@@ -15,6 +15,92 @@ use crate::{
     util::durable_write,
 };
 
+/// Pinhole camera intrinsics for the recorded frame.
+///
+/// Derived analytically from the encoded resolution
+/// (`constants::RECORDING_WIDTH`/`HEIGHT`) and the game's vertical FOV — NOT
+/// measured from the running game. The `source` field states this honestly so
+/// downstream AI-training consumers never mistake an assumed default for a
+/// per-session measurement (the same data-integrity rule the FOV-in-LEM and
+/// fps_effective fixes followed: emit "unknown"/"assumed" rather than a
+/// plausible-looking lie).
+///
+/// Conventions:
+///   - `fx`/`fy` are focal lengths in pixels. For square pixels (the case for
+///     a standard 16:9 game render) `fx == fy`. `fy` is set from the vertical
+///     FOV and `fx` is set equal to it.
+///   - `cx`/`cy` are the principal point, assumed to be the image center.
+///   - This struct is serialized as the nested `camera_intrinsics` object that
+///     is injected into `metadata.json` (see `inject_extra_metadata_fields`).
+///     It is intentionally defined here rather than on the shared `Metadata`
+///     struct so the wire field can be added without disturbing that type.
+// `Serialize` only — the `&'static str` fields (`model`, `source`) make this
+// write-only. `#[derive(Deserialize)]` would not compile for borrowed-static
+// string fields, and nothing reads `camera_intrinsics` back into this struct
+// (downstream consumers parse the JSON object directly).
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct CameraIntrinsics {
+    /// Camera model. Always `"pinhole"` for this analytic derivation.
+    pub model: &'static str,
+    /// Image width in pixels (matches the encoded video width).
+    pub width: u32,
+    /// Image height in pixels (matches the encoded video height).
+    pub height: u32,
+    /// Horizontal focal length in pixels.
+    pub fx: f64,
+    /// Vertical focal length in pixels.
+    pub fy: f64,
+    /// Principal point x (image center) in pixels.
+    pub cx: f64,
+    /// Principal point y (image center) in pixels.
+    pub cy: f64,
+    /// Vertical field of view in degrees used to derive `fy`.
+    pub vfov_deg: f64,
+    /// Provenance of these intrinsics. `"assumed_mc_default"` marks the values
+    /// as derived from the assumed default FOV, NOT measured from the game.
+    pub source: &'static str,
+}
+
+impl CameraIntrinsics {
+    /// Compute pinhole intrinsics from a pixel resolution and a vertical FOV.
+    ///
+    /// Formula (standard pinhole, principal point at center, square pixels):
+    /// ```text
+    ///   vfov_rad = vfov_deg * PI / 180
+    ///   fy       = (height / 2) / tan(vfov_rad / 2)
+    ///   fx       = fy                       (square pixels)
+    ///   cx       = width  / 2
+    ///   cy       = height / 2
+    /// ```
+    ///
+    /// `source` is caller-supplied so the provenance label stays honest — the
+    /// recorder passes `"assumed_mc_default"` because the FOV is assumed, not
+    /// measured.
+    fn from_resolution_and_vfov(
+        width: u32,
+        height: u32,
+        vfov_deg: f64,
+        source: &'static str,
+    ) -> Self {
+        let vfov_rad = vfov_deg * std::f64::consts::PI / 180.0;
+        let fy = (height as f64 / 2.0) / (vfov_rad / 2.0).tan();
+        let fx = fy; // square pixels
+        let cx = width as f64 / 2.0;
+        let cy = height as f64 / 2.0;
+        Self {
+            model: "pinhole",
+            width,
+            height,
+            fx,
+            fy,
+            cx,
+            cy,
+            vfov_deg,
+            source,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UploadProgressState {
     pub upload_id: String,
@@ -190,6 +276,101 @@ fn parse_session_timestamp(folder_name: &str) -> Option<std::time::SystemTime> {
         .parse::<u64>()
         .ok()
         .map(|secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+}
+
+#[cfg(test)]
+mod camera_intrinsics_tests {
+    use super::CameraIntrinsics;
+
+    #[test]
+    fn pinhole_1080p_70deg_vfov_matches_expected() {
+        // Standard delivery shape: 1920x1080 @ 70° vertical FOV.
+        let k = CameraIntrinsics::from_resolution_and_vfov(1920, 1080, 70.0, "assumed_mc_default");
+
+        // fy = (1080/2) / tan(70°/2) = 540 / tan(35°) ≈ 771.199924
+        assert!((k.fy - 771.199_923_641).abs() < 1e-6, "fy was {}", k.fy);
+        // Square pixels: fx == fy.
+        assert_eq!(k.fx, k.fy, "fx must equal fy for square pixels");
+        // Principal point at image center.
+        assert_eq!(k.cx, 960.0);
+        assert_eq!(k.cy, 540.0);
+        assert_eq!(k.width, 1920);
+        assert_eq!(k.height, 1080);
+        assert_eq!(k.model, "pinhole");
+        assert_eq!(k.vfov_deg, 70.0);
+        // Provenance must stay honest.
+        assert_eq!(k.source, "assumed_mc_default");
+    }
+
+    #[test]
+    fn serializes_as_expected_nested_object() {
+        let k = CameraIntrinsics::from_resolution_and_vfov(1920, 1080, 70.0, "assumed_mc_default");
+        let v = serde_json::to_value(k).expect("intrinsics must serialize");
+        assert_eq!(v["model"], "pinhole");
+        assert_eq!(v["width"], 1920);
+        assert_eq!(v["height"], 1080);
+        assert_eq!(v["source"], "assumed_mc_default");
+        // fx/fy/cx/cy present and finite (valid JSON numbers, not NaN).
+        for key in ["fx", "fy", "cx", "cy", "vfov_deg"] {
+            assert!(v[key].is_number(), "{key} must be a JSON number");
+        }
+    }
+
+    #[test]
+    fn uses_repo_recording_constants_and_mc_fov() {
+        // Guards against the constants drifting out from under the metadata.
+        let k = CameraIntrinsics::from_resolution_and_vfov(
+            constants::RECORDING_WIDTH,
+            constants::RECORDING_HEIGHT,
+            constants::MC_DEFAULT_VFOV_DEG,
+            "assumed_mc_default",
+        );
+        assert_eq!(k.width, constants::RECORDING_WIDTH);
+        assert_eq!(k.height, constants::RECORDING_HEIGHT);
+        assert_eq!(k.cx, constants::RECORDING_WIDTH as f64 / 2.0);
+        assert_eq!(k.cy, constants::RECORDING_HEIGHT as f64 / 2.0);
+    }
+}
+
+#[cfg(test)]
+mod metadata_injection_tests {
+    use super::LocalRecording;
+
+    #[test]
+    fn injects_camera_intrinsics_and_timezone_fields() {
+        // Start from a JSON object shaped like a minimal serialized Metadata.
+        let mut value = serde_json::json!({
+            "game_exe": "javaw.exe",
+            "session_id": "tz-inject-0001",
+            "wall_clock_start": "2026-05-29T21:30:00+00:00",
+        });
+
+        LocalRecording::inject_extra_metadata_fields(&mut value);
+
+        // camera_intrinsics is a nested object with the honest source tag.
+        let ci = &value["camera_intrinsics"];
+        assert!(ci.is_object(), "camera_intrinsics must be a nested object");
+        assert_eq!(ci["model"], "pinhole");
+        assert_eq!(ci["source"], "assumed_mc_default");
+        assert_eq!(ci["width"], constants::RECORDING_WIDTH);
+        assert_eq!(ci["height"], constants::RECORDING_HEIGHT);
+
+        // Timezone disambiguation fields exist and are correctly typed.
+        assert!(
+            value["timezone_utc_offset_seconds"].is_i64(),
+            "offset must be an integer number of seconds"
+        );
+        assert_eq!(value["session_dir_timezone"], "local");
+    }
+
+    #[test]
+    fn non_object_value_is_a_noop_and_does_not_panic() {
+        // Defensive: if metadata ever serialized to a non-object, injection
+        // must not panic on the finalize path.
+        let mut value = serde_json::json!("not an object");
+        LocalRecording::inject_extra_metadata_fields(&mut value);
+        assert_eq!(value, serde_json::json!("not an object"));
+    }
 }
 
 #[cfg(test)]
@@ -734,7 +915,23 @@ impl LocalRecording {
         // Note: this runs via spawn_blocking inside write_atomic_async, so the
         // tokio reactor isn't pinned while the fsync stalls (fsync on a busy
         // NVMe can take tens of ms; on a networked drive, seconds).
-        let metadata_json = serde_json::to_string_pretty(&metadata)?;
+        //
+        // Two metadata fields can't live on the shared `output_types::Metadata`
+        // struct from here (it's owned by another module), so we serialize to a
+        // JSON object first and inject them as top-level keys:
+        //   1. `camera_intrinsics` — pinhole intrinsics derived from the encoded
+        //      resolution + MC's assumed default vertical FOV. Honestly tagged
+        //      `source: "assumed_mc_default"` so downstream never mistakes it
+        //      for a measured value.
+        //   2. timezone disambiguation — `wall_clock_start`/`wall_clock_end`
+        //      are UTC (+00:00) while the SESSION DIRECTORY name is LOCAL time
+        //      (`generate_session_dir_name` uses `Local::now()`). Emitting the
+        //      local UTC offset + an explicit `session_dir_timezone` label lets
+        //      a reader reconcile the two without guessing.
+        let mut metadata_value = serde_json::to_value(&metadata)?;
+        Self::inject_extra_metadata_fields(&mut metadata_value);
+
+        let metadata_json = serde_json::to_string_pretty(&metadata_value)?;
         durable_write::write_atomic_async(&metadata_path, metadata_json.into_bytes()).await?;
 
         // Validate the recording immediately after stopping to create [`constants::filename::recording::INVALID`] file if needed
@@ -748,6 +945,67 @@ impl LocalRecording {
         .ok();
 
         Ok(())
+    }
+
+    /// Inject metadata fields that can't be expressed on the shared
+    /// `output_types::Metadata` struct (owned by another module) directly into
+    /// the serialized JSON object as top-level keys.
+    ///
+    /// Adds:
+    ///   - `camera_intrinsics`: nested pinhole-intrinsics object derived from
+    ///     `constants::RECORDING_WIDTH`/`HEIGHT` and `MC_DEFAULT_VFOV_DEG`. Its
+    ///     `source` is `"assumed_mc_default"` — the FOV is assumed, not
+    ///     measured, and the field says so to keep the data honest.
+    ///   - `timezone_utc_offset_seconds`: the machine's current local UTC
+    ///     offset in seconds (e.g. `-25200` for UTC-7). This is the offset that
+    ///     applies to the LOCAL-time session directory name; the `wall_clock_*`
+    ///     fields remain UTC. A reader adds this offset to the UTC wall-clock to
+    ///     recover the local time embedded in the directory name.
+    ///   - `session_dir_timezone`: `"local"`, stating explicitly that the
+    ///     `session_YYYYMMDD_HHMMSS_*` directory name is in local time, NOT UTC.
+    ///
+    /// If the serialized metadata is somehow not a JSON object (it always is —
+    /// `Metadata` is a struct), this is a no-op so we never panic on the
+    /// finalize path.
+    fn inject_extra_metadata_fields(metadata_value: &mut serde_json::Value) {
+        let Some(obj) = metadata_value.as_object_mut() else {
+            tracing::warn!("Metadata did not serialize to a JSON object; skipping extra fields");
+            return;
+        };
+
+        // Camera intrinsics from the encoded resolution + assumed MC FOV.
+        let intrinsics = CameraIntrinsics::from_resolution_and_vfov(
+            constants::RECORDING_WIDTH,
+            constants::RECORDING_HEIGHT,
+            constants::MC_DEFAULT_VFOV_DEG,
+            "assumed_mc_default",
+        );
+        match serde_json::to_value(intrinsics) {
+            Ok(v) => {
+                obj.insert("camera_intrinsics".to_string(), v);
+            }
+            Err(e) => {
+                // Shouldn't happen for a plain struct of f64/u32/&str, but stay
+                // non-fatal: a missing intrinsics block is better than failing
+                // to write metadata at all.
+                tracing::warn!("Failed to serialize camera_intrinsics: {e}");
+            }
+        }
+
+        // Timezone disambiguation. `Local::now().offset()` yields the machine's
+        // current `FixedOffset`; `local_minus_utc()` is the offset in seconds
+        // (local = utc + offset). Captured at finalize time — close enough to
+        // the recording window that DST transitions mid-session are a
+        // negligible edge case for this disambiguation aid.
+        let utc_offset_seconds = chrono::Local::now().offset().local_minus_utc();
+        obj.insert(
+            "timezone_utc_offset_seconds".to_string(),
+            serde_json::Value::from(utc_offset_seconds),
+        );
+        obj.insert(
+            "session_dir_timezone".to_string(),
+            serde_json::Value::from("local"),
+        );
     }
 }
 
