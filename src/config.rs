@@ -211,6 +211,56 @@ pub(crate) fn select_best_available_encoder(
     VideoEncoderType::X264
 }
 
+/// Ordered list of encoders to *attempt to construct*, best first, when the
+/// already-selected `primary` encoder might fail to build at runtime.
+///
+/// [`select_best_available_encoder`] guarantees `primary` is *listed* by OBS,
+/// but a listed hardware encoder can still fail [`ObsVideoEncoder::new_from_info`]
+/// at construction time — the consumer-NVIDIA NVENC session cap is already
+/// saturated (another app, or our own prior session, holds all the encode
+/// sessions), the driver is stale, an Optimus dGPU is parked, or AMD's
+/// `obs-amf-test.exe` was blocked between probe and use. This chain lets the
+/// recorder degrade through the next-best *constructible* encoder instead of
+/// failing the whole recording with no video.
+///
+/// Ordering, deduplicated, with `primary` always first:
+///   1. `primary` (the encoder selection already settled on).
+///   2. Every hardware encoder in `available`, walked in [`HW_ENCODER_PREFERENCE`]
+///      order (NVENC-HEVC > NVENC > AMF-HEVC > AMF > QSV-HEVC > QSV), excluding
+///      `primary`. This is the SAME preference the rest of the pipeline uses.
+///   3. [`VideoEncoderType::X264`] as the terminal element — OBS's built-in
+///      software encoder is always constructible, so the chain can never end in
+///      "no encoder". (Skipped only if `primary` already *is* x264, since it's
+///      then already the first element.)
+///
+/// Purely a function of its inputs (no OBS state), so the degradation order is
+/// unit-tested below without a live OBS context.
+pub(crate) fn runtime_fallback_chain(
+    primary: VideoEncoderType,
+    available: &[VideoEncoderType],
+) -> Vec<VideoEncoderType> {
+    let mut chain = Vec::with_capacity(HW_ENCODER_PREFERENCE.len() + 2);
+    chain.push(primary);
+
+    // Next-best hardware encoders that actually registered, in canonical order,
+    // skipping the primary (already at the front) and any duplicates.
+    for enc in HW_ENCODER_PREFERENCE
+        .iter()
+        .copied()
+        .filter(|enc| available.contains(enc) && *enc != primary)
+    {
+        chain.push(enc);
+    }
+
+    // Terminal software fallback — always constructible. Only appended if it
+    // isn't already the primary, so x264-primary recordings don't list it twice.
+    if primary != VideoEncoderType::X264 {
+        chain.push(VideoEncoderType::X264);
+    }
+
+    chain
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 // camel case renames are legacy from old existing configs, we want it to be backwards-compatible with previous owl releases that used electron
 #[serde(rename_all = "camelCase")]
@@ -1930,6 +1980,91 @@ mod tests {
             select_best_available_encoder(VE::NvEnc, &[]),
             VE::X264,
             "an empty availability list must still resolve to x264"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Runtime construct-time fallback chain (a *listed* encoder can still fail
+    // to construct: saturated NVENC session cap, stale driver, parked Optimus
+    // dGPU, blocked AMD obs-amf-test). These pin the degradation ORDER, which
+    // is the only part testable without a live OBS context.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fallback_chain_tries_primary_first_then_x264_terminal() {
+        // The common multi-GPU machine: NVENC-HEVC primary, with its H.264
+        // sibling also listed. The chain must lead with the primary, walk the
+        // remaining available hardware in preference order, and ALWAYS end at
+        // x264 so a construction storm can still degrade to software.
+        let available = [VE::NvEncHevc, VE::NvEnc, VE::X264];
+        assert_eq!(
+            runtime_fallback_chain(VE::NvEncHevc, &available),
+            vec![VE::NvEncHevc, VE::NvEnc, VE::X264],
+            "primary first, then next-best hardware, then x264 terminal"
+        );
+    }
+
+    #[test]
+    fn fallback_chain_excludes_primary_from_hardware_walk() {
+        // Primary must never appear twice. Here AMF is primary; the hardware
+        // walk skips it and offers QSV next, then x264.
+        let available = [VE::AmfHevc, VE::Amf, VE::QsvHevc, VE::Qsv, VE::X264];
+        assert_eq!(
+            runtime_fallback_chain(VE::Amf, &available),
+            vec![VE::Amf, VE::AmfHevc, VE::QsvHevc, VE::Qsv, VE::X264],
+            "primary (AMF) appears once; rest follow HW preference order"
+        );
+    }
+
+    #[test]
+    fn fallback_chain_walks_full_preference_order() {
+        // Everything is available and the primary is the lowest-priority QSV:
+        // the remaining hardware must be walked NVENC>AMF>QSV (minus the
+        // primary), terminating in x264.
+        let all = [
+            VE::NvEncHevc,
+            VE::NvEnc,
+            VE::AmfHevc,
+            VE::Amf,
+            VE::QsvHevc,
+            VE::Qsv,
+            VE::X264,
+        ];
+        assert_eq!(
+            runtime_fallback_chain(VE::Qsv, &all),
+            vec![
+                VE::Qsv,
+                VE::NvEncHevc,
+                VE::NvEnc,
+                VE::AmfHevc,
+                VE::Amf,
+                VE::QsvHevc,
+                VE::X264,
+            ],
+        );
+    }
+
+    #[test]
+    fn fallback_chain_x264_primary_is_not_duplicated() {
+        // When x264 itself is the primary (no hardware registered), the chain
+        // is just [x264] — the terminal append is suppressed so it isn't listed
+        // twice.
+        assert_eq!(
+            runtime_fallback_chain(VE::X264, &[VE::X264]),
+            vec![VE::X264],
+            "x264 primary must not duplicate the terminal x264"
+        );
+    }
+
+    #[test]
+    fn fallback_chain_appends_x264_even_when_probe_omitted_it() {
+        // Defense-in-depth: even a degenerate `available` that somehow lacks
+        // x264 must still terminate in x264 (the always-constructible software
+        // encoder), so the recorder can never be left with "no encoder".
+        assert_eq!(
+            runtime_fallback_chain(VE::NvEncHevc, &[VE::NvEncHevc]),
+            vec![VE::NvEncHevc, VE::X264],
+            "x264 terminal is appended regardless of the probed list"
         );
     }
 }

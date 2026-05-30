@@ -992,6 +992,128 @@ impl RecorderState {
         ))
     }
 
+    /// Construct the video encoder for this recording, degrading through the
+    /// runtime fallback chain if a *listed* encoder fails to actually build.
+    ///
+    /// The selection guard (`select_best_available_encoder`) guarantees the
+    /// requested encoder is in OBS's probed list, but being listed does NOT
+    /// guarantee `ObsVideoEncoder::new_from_info` succeeds: a consumer NVENC
+    /// session cap can already be saturated, the driver can be stale, an
+    /// Optimus dGPU can be parked, or AMD's `obs-amf-test.exe` can have been
+    /// blocked since the probe. On any such construction failure we move to the
+    /// next-best *constructible* encoder
+    /// (`crate::config::runtime_fallback_chain`, NVENC>AMF>QSV>x264) instead of
+    /// killing the whole recording with the `?` that used to live here.
+    ///
+    /// Returns the constructed encoder, the encoder type that ACTUALLY built
+    /// (so callers can key the 720p software cap, the reuse cache, and the
+    /// recorded metadata on reality), and the `ObsData` settings blob that was
+    /// applied to it (rebuilt per-encoder because, e.g., NVENC's preset keys are
+    /// not x264's). Only ever returns `Err` if EVERY candidate — including the
+    /// always-constructible software x264 terminal — failed, which in practice
+    /// means OBS itself is unusable.
+    fn build_video_encoder_with_fallback(
+        &mut self,
+        request: &RecordingRequest,
+    ) -> eyre::Result<(
+        Arc<ObsVideoEncoder>,
+        VideoEncoderType,
+        libobs_wrapper::data::ObsData,
+    )> {
+        let primary = request.video_settings.encoder;
+        let chain = crate::config::runtime_fallback_chain(primary, &self.available_encoders);
+
+        let mut last_err: Option<eyre::Report> = None;
+        for candidate in chain {
+            // Reuse a previously-constructed encoder of this exact type if we
+            // already have one cached — preserves the original happy-path
+            // semantics (an encoder reused across recordings). We still need a
+            // settings blob for this candidate for the metadata return; build a
+            // fresh one (cheap) so the caller's bookkeeping is consistent.
+            if let Some(existing) = self.video_encoders.get(&candidate) {
+                tracing::info!(
+                    "Reusing existing video encoder for type: {}",
+                    candidate.id()
+                );
+                let settings = self.encoder_settings_for(request, candidate)?;
+                return Ok((existing.clone(), candidate, settings));
+            }
+
+            tracing::info!("Creating new video encoder for type: {}", candidate.id());
+
+            // Per-attempt, encoder-specific settings. `apply_to_obs_data` keys
+            // off the encoder type, and it CONSUMES the `ObsData`, so we build a
+            // fresh `ObsData` for each candidate — never reuse a stale blob that
+            // was shaped for a different encoder (NVENC presets vs x264, etc.).
+            let settings = match self.encoder_settings_for(request, candidate) {
+                Ok(settings) => settings,
+                Err(e) => {
+                    tracing::warn!(
+                        encoder = candidate.id(),
+                        error = ?e,
+                        "Failed to build encoder settings; trying next fallback encoder"
+                    );
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+
+            match ObsVideoEncoder::new_from_info(
+                VideoEncoderInfo::new(
+                    vet_to_obs_vet(candidate),
+                    "video_encoder",
+                    Some(settings.clone()),
+                    None,
+                ),
+                self.obs_context.runtime().clone(),
+            ) {
+                Ok(encoder) => {
+                    self.video_encoders.insert(candidate, encoder.clone());
+                    tracing::info!(
+                        encoder = candidate.id(),
+                        requested = %primary,
+                        "Selected video encoder (constructed successfully)"
+                    );
+                    return Ok((encoder, candidate, settings));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        encoder = candidate.id(),
+                        error = ?e,
+                        "Video encoder failed to construct; degrading to next \
+                         available encoder (saturated NVENC session cap / stale \
+                         driver / parked dGPU / blocked AMF probe are the usual \
+                         causes)"
+                    );
+                    last_err = Some(eyre::Report::new(e));
+                }
+            }
+        }
+
+        // The chain always terminates in x264 (always-constructible software
+        // encoder), so reaching here means even x264 failed — OBS is unusable.
+        Err(last_err.unwrap_or_else(|| {
+            eyre::eyre!("no video encoder could be constructed (empty fallback chain)")
+        }))
+    }
+
+    /// Build a fresh, encoder-specific OBS settings blob for `encoder_type`.
+    ///
+    /// `EncoderSettings::apply_to_obs_data` selects which encoder's settings to
+    /// write based on `self.encoder`, so we clone the request's settings and
+    /// retarget the encoder type before applying. A fresh `ObsData` is allocated
+    /// each call because `apply_to_obs_data` consumes it.
+    fn encoder_settings_for(
+        &self,
+        request: &RecordingRequest,
+        encoder_type: VideoEncoderType,
+    ) -> eyre::Result<libobs_wrapper::data::ObsData> {
+        let mut settings = request.video_settings.clone();
+        settings.encoder = encoder_type;
+        let data = self.obs_context.data()?;
+        Ok(settings.apply_to_obs_data(data)?)
+    }
+
     fn start_recording(
         &mut self,
         // `mut` so we can rebind `video_settings.encoder` after reconciling it
@@ -1046,12 +1168,37 @@ impl RecorderState {
             );
         }
 
+        // Construct (or reuse) the video encoder NOW, BEFORE `reset_video`.
+        //
+        // Why here and not at its natural spot further down: `reset_video`
+        // needs to know whether the FINAL encoder is software x264 so it can
+        // apply the 720p output cap (`software_encoder` below). The selection
+        // guard above guarantees the encoder is *listed* by OBS, but a listed
+        // hardware encoder can still fail `ObsVideoEncoder::new_from_info` at
+        // construction time — saturated consumer-NVENC session cap, stale
+        // driver, parked Optimus dGPU, or a blocked AMD `obs-amf-test.exe`.
+        // When that happens we degrade through the next-best *constructible*
+        // encoder (`crate::config::runtime_fallback_chain`, same NVENC>AMF>QSV
+        // ordering as everywhere else) and finally to software x264.
+        //
+        // Constructing before `reset_video` is the side-effect-correct choice
+        // (item 3 of the hardening spec): the encoder object only depends on
+        // `obs_context.data()` + `runtime()`, neither of which needs the video
+        // pipeline reset first, and it is constructed exactly ONCE (so a
+        // hardware-then-x264 fallback never double-loads an NVENC session).
+        // Crucially, `software_encoder` is then derived from the encoder that
+        // ACTUALLY constructed, so a runtime fallback to x264 still trips the
+        // 720p cap and a weak machine never runs software x264 at native res.
+        let (video_encoder, actual_encoder_type, actual_encoder_settings) =
+            self.build_video_encoder_with_fallback(&request)?;
+
         // v2.6.4: x264 is the only software (CPU) encoder; everything else is
         // hardware (NVENC/AMF/QSV). On software we cap the output to 720p inside
         // `video_info` so weak/iGPU CPUs aren't pegged at native resolution.
-        // NB: read AFTER the reconciliation above so a hardware->x264 degrade
-        // correctly triggers the 720p software cap.
-        let software_encoder = request.video_settings.encoder == VideoEncoderType::X264;
+        // NB: keyed on the ACTUALLY-CONSTRUCTED encoder (not just the selected
+        // one), so both a selection-time hardware->x264 degrade AND a runtime
+        // construction-time hardware->x264 fallback correctly trigger the cap.
+        let software_encoder = actual_encoder_type == VideoEncoderType::X264;
         self.obs_context.reset_video(video_info(
             self.adapter_index,
             request.game_resolution,
@@ -1122,11 +1269,9 @@ impl RecorderState {
             self.detach_monitor_capture_audio();
         }
 
-        // Register the video encoder with encoder-specific settings
-        let video_encoder_data = self.obs_context.data()?;
-        let video_encoder_settings = request
-            .video_settings
-            .apply_to_obs_data(video_encoder_data)?;
+        // (The video encoder was already constructed above, before `reset_video`,
+        // so the 720p software cap could observe the actually-constructed encoder.
+        // `video_encoder` / `actual_encoder_type` hold that result.)
 
         // Update the output path settings (when output is not active)
         let mut output_settings = self.obs_context.data()?;
@@ -1143,30 +1288,6 @@ impl RecorderState {
         output_settings.set_string("muxer_settings", "movflags=faststart")?;
         self.output.update_settings(output_settings)?;
 
-        // Create or reuse video encoder
-        let encoder_type = request.video_settings.encoder;
-
-        let video_encoder = if let Some(existing_encoder) = self.video_encoders.get(&encoder_type) {
-            tracing::info!(
-                "Reusing existing video encoder for type: {}",
-                encoder_type.id()
-            );
-            existing_encoder.clone()
-        } else {
-            tracing::info!("Creating new video encoder for type: {}", encoder_type.id());
-            let encoder = ObsVideoEncoder::new_from_info(
-                VideoEncoderInfo::new(
-                    vet_to_obs_vet(encoder_type),
-                    "video_encoder",
-                    Some(video_encoder_settings.clone()),
-                    None,
-                ),
-                self.obs_context.runtime().clone(),
-            )?;
-            self.video_encoders.insert(encoder_type, encoder.clone());
-            encoder
-        };
-
         // Set the video encoder on the output
         self.output.set_video_encoder(video_encoder)?;
 
@@ -1174,7 +1295,11 @@ impl RecorderState {
         self.output
             .set_audio_encoder(self.audio_encoder.clone(), 0)?;
 
-        self.last_video_encoder_type = Some(encoder_type);
+        // Reflect the encoder that ACTUALLY constructed (which may differ from
+        // the selected one if a runtime construction fallback fired), so the
+        // recorded metadata and the next-recording encoder-reuse cache key are
+        // both consistent with reality.
+        self.last_video_encoder_type = Some(actual_encoder_type);
 
         // Store event stream for sending VIDEO_PAUSED/VIDEO_RESUMED events during DXGI access lost
         self.event_stream = Some(request.event_stream.clone());
@@ -1256,17 +1381,18 @@ impl RecorderState {
         // Store the thread handle for proper cleanup
         self.hook_monitor_thread = Some(hook_monitor_thread);
 
-        // Update our last encoder settings
-        self.last_encoder_settings = video_encoder_settings
+        // Update our last encoder settings. Use the settings blob that was
+        // ACTUALLY applied to the constructed encoder (rebuilt for the fallback
+        // encoder type if a runtime fallback fired), and tag it with the
+        // actually-constructed encoder id — not the originally selected one —
+        // so `recording_metadata.json` faithfully reflects what encoded.
+        self.last_encoder_settings = actual_encoder_settings
             .get_json()
             .ok()
             .and_then(|j| serde_json::from_str(&j).ok());
         if let Some(encoder_settings_json) = &mut self.last_encoder_settings {
             if let Some(object) = encoder_settings_json.as_object_mut() {
-                object.insert(
-                    "encoder".to_string(),
-                    request.video_settings.encoder.id().into(),
-                );
+                object.insert("encoder".to_string(), actual_encoder_type.id().into());
                 object.insert(
                     "window_capture".to_string(),
                     request.game_config.use_window_capture.into(),
