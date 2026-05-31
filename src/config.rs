@@ -497,6 +497,19 @@ impl GameConfig {
     /// `game_exe_stem` is the lowercase filename without extension (e.g.
     /// `"cs2"`), matching the style used by `constants::GAME_WHITELIST`.
     pub fn effective_capture_mode(&self, game_exe_stem: &str) -> EffectiveCaptureMode {
+        // Minecraft (javaw) MUST use GameHook regardless of the persisted/bundled
+        // config. Confirmed on a real RTX 4060 + HAGS rig (2026-05-31): Monitor
+        // capture (DXGI Desktop Duplication) records a FULL-BLACK 5-minute video
+        // with only the hardware cursor visible — Hardware-Accelerated GPU
+        // Scheduling makes the duplication surface come back empty/black — and
+        // WGC can't grab MC's OpenGL surface either. GameHook injects into the
+        // game's GL swapchain directly (GPU→GPU), bypassing the desktop
+        // compositor and HAGS entirely. This is a hard override so a stale
+        // `capture_mode = Monitor` saved in %APPDATA% (e.g. from the v2.6.12
+        // bundle) can never reintroduce the black-screen regression.
+        if matches!(game_exe_stem, "javaw" | "minecraft") {
+            return EffectiveCaptureMode::GameHook;
+        }
         match self.capture_mode {
             CaptureMode::Monitor => EffectiveCaptureMode::Monitor,
             CaptureMode::GameHook => EffectiveCaptureMode::GameHook,
