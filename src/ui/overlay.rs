@@ -254,7 +254,7 @@ impl EguiOverlay for OverlayApp {
                     let color = Color32::WHITE;
                     let recording_text: WidgetText =
                         if self.app_state.is_out_of_date.load(Ordering::Relaxed) {
-                            RichText::new("Out of date; will not record. Please update!")
+                            RichText::new("Update available — still recording.")
                                 .font(font_id)
                                 .color(color)
                                 .into()

@@ -1521,8 +1521,16 @@ impl State {
                 } else if let Some(ref game) = fg
                     && game.is_recordable()
                     && game.exe_name.is_some()
-                    && !self.app_state.is_out_of_date.load(Ordering::SeqCst)
                 {
+                    // NOTE: auto-record intentionally NOT gated on `is_out_of_date`.
+                    // We ship rapidly (multiple patch releases/day), so a hard
+                    // "newer release exists → refuse to record" gate makes every
+                    // installed client lock itself the moment we cut a new tag —
+                    // it ends up self-locking the very testers we need data from.
+                    // The manual-start (F9) path already records when out-of-date
+                    // (see above), so gating auto-record was also inconsistent.
+                    // The "New Release Available" banner still notifies the user;
+                    // we just no longer block capture on it.
                     // Stability gate: require the game window to have settled
                     // at >=1280x720 for ≥10s AND the process to have been
                     // foregrounded for ≥20s before auto-firing. This prevents
