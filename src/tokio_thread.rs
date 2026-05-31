@@ -2184,11 +2184,23 @@ fn get_foregrounded_game(
     let unsupported_reason =
         if !ci && let Some(unsupported) = unsupported_games.get(&exe_without_ext) {
             Some(unsupported.reason.to_string())
-        } else if !ci && !recorder.is_window_capturable(hwnd) {
+        } else if !ci
+            && !matches!(exe_without_ext.as_str(), "javaw" | "minecraft")
+            && !recorder.is_window_capturable(hwnd)
+        {
             // CI mode skips this check: monitor-capture mode (the v2.5.8 default)
             // doesn't actually need a libobs-recognised "game window" — it grabs
             // the whole display — so the heuristic is overly strict for the
             // synthetic test_game window.
+            //
+            // Minecraft (javaw/minecraft) is exempted for the same reason: we
+            // ship it bundled with `capture_mode = Monitor` (DXGI desktop
+            // duplication), which grabs the whole display and never needs a
+            // libobs-recognised game window. Without this exemption v2.6.11
+            // wrongly flagged MC's GLFW/OpenGL window
+            // "unsupported: Recorder can't capture" and refused to auto-record
+            // it on real hardware — a regression vs the v2.5.8 Monitor path
+            // that the previously-shipped build used successfully.
             Some(
                 "Recorder cannot capture this window. Try running GameData Recorder in admin mode."
                     .to_string(),
