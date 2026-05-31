@@ -312,6 +312,32 @@ impl MetadataWriter {
             .await
             .map_err(|e| eyre!("Failed to write hardware metadata: {}", e))?;
 
+        // Buyer-contract artifact: emit systeminfo.json from the *same*
+        // populated `metadata` value so its gpu/cpu/ram_gb/os are byte-for-byte
+        // the values just written to hardware.json (no re-derivation, no
+        // drift). `build` is the recorder version. Written with the same
+        // atomic+fsync helper so a torn file can't leave the session half
+        // contracted. See SystemInfo / PRD `prd_test_systeminfo_required`.
+        self.write_system_info(&metadata).await?;
+
+        Ok(())
+    }
+
+    /// Write `metadata/systeminfo.json`.
+    ///
+    /// Flattened snapshot of the hardware values (gpu/cpu/ram_gb/os) plus the
+    /// recorder `build` version, required by the buyer PRD
+    /// (`prd_test_systeminfo_required`). Derived directly from the
+    /// caller's already-built `HardwareMetadata` so the two files never
+    /// disagree; this is purely additive and leaves hardware.json untouched.
+    async fn write_system_info(&self, hardware: &HardwareMetadata) -> Result<()> {
+        let info = SystemInfo::from_hardware(hardware);
+        let path = self.session_manager.systeminfo_path();
+        let json = serde_json::to_string_pretty(&info)?;
+        durable_write::write_atomic_async(&path, json.into_bytes())
+            .await
+            .map_err(|e| eyre!("Failed to write systeminfo metadata: {}", e))?;
+
         Ok(())
     }
 
