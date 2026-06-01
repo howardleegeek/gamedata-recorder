@@ -1306,16 +1306,55 @@ impl RecorderState {
         // Update the output path settings (when output is not active)
         let mut output_settings = self.obs_context.data()?;
         output_settings.set_string("path", ObsPath::new(&request.recording_path).build())?;
-        // faststart (ISC-DATA-FASTSTART): OBS's ffmpeg_muxer writes the mp4 `moov`
-        // atom at the END of the file by default. Progressive players (Windows
-        // "Movies & TV", browsers, partial-download web players) need `moov` up
-        // front to read the seek index/duration, so without this they play only
-        // a few seconds even though the file is a complete 30 fps recording
-        // (this is exactly the "video is only a few seconds" symptom). Pass
-        // `movflags=faststart` to the muxer so it relocates `moov` to the front
-        // after finalizing — the mp4 then plays correctly everywhere. Costs one
-        // moov-relocation pass at stop.
-        output_settings.set_string("muxer_settings", "movflags=faststart")?;
+        // ── muxer_settings: faststart + CFR timescale ──────────────────────
+        // OBS's `ffmpeg_muxer` splits this string on spaces into `key=value`
+        // AVOptions and applies them to the output mp4 `AVFormatContext`
+        // (`obs-ffmpeg-mux.c`). We pass TWO settings:
+        //
+        // 1. `movflags=faststart` (ISC-DATA-FASTSTART): OBS writes the mp4
+        //    `moov` atom at the END of the file by default. Progressive
+        //    players (Windows "Movies & TV", browsers, partial-download web
+        //    players) need `moov` up front to read the seek index/duration,
+        //    so without this they play only a few seconds even though the file
+        //    is a complete 30 fps recording. `faststart` relocates `moov` to
+        //    the front after finalizing (one extra pass at stop).
+        //
+        // 2. `video_track_timescale=<FPS×1000>` — the TRUE-CFR guarantee.
+        //    Root cause of the "24 fps VFR" defect (decode-verified on two
+        //    v2.6.14 tester sessions: 9789 rendered frames coalesced to 7825,
+        //    muxer reported ~24 fps): OBS composites and dup-fills to a CFR 30
+        //    fps tick, but the mp4 muxer's DEFAULT video timescale is 1/1000
+        //    (millisecond). At 30 fps the frame interval is 33.333…ms, which
+        //    the muxer rounds to a 1ms grid as 33,33,34,33,33,34… The mp4
+        //    writer then COALESCES frames whose rounded PTS collides with the
+        //    previous frame's, silently dropping ~1 in 5 frames and leaving a
+        //    non-uniform PTS sequence the container reports as ~24 fps. This is
+        //    why metadata (which trusts the OBS config) says 30 fps while the
+        //    decoded stream is 24 fps VFR.
+        //
+        //    Setting the video track timescale to `FPS × 1000` (= 30000 for
+        //    30 fps) makes exactly ONE frame span exactly 1000 ticks: PTS are
+        //    0, 1000, 2000, … with ZERO rounding error, so no two frames ever
+        //    share a timestamp, nothing is coalesced, and ffprobe/ffmpeg read
+        //    a clean "30 fps, 30 tbr, 30000 tbn". This is the soundest fix for
+        //    the embedded libobs + `ffmpeg_muxer` path: it makes the container
+        //    HONESTLY carry the 30 fps OBS already renders. We do NOT pad or
+        //    fabricate frames — OBS's own CFR ticker still produces the 30
+        //    frames/sec; we only stop the muxer from rounding them away.
+        //
+        //    Why not `force-cfr=1`: that key is a known NO-OP in modern OBS
+        //    (it predates the ffmpeg-mux split and is ignored by the helper),
+        //    so it cannot be relied on. Why not an intermediate-mkv→remux: the
+        //    build ships only `obs-ffmpeg-mux.exe` + `ffprobe`, not a full
+        //    `ffmpeg.exe`, so a `-fps_mode cfr` remux would require a new
+        //    bundled binary and a stop-time subprocess — strictly more moving
+        //    parts for the same honest-CFR result this one setting achieves
+        //    in-process. The timescale is derived from `FPS` so it stays
+        //    correct if the constant ever changes.
+        // `ObsString: From<String>` (but not `From<&String>`), so move the
+        // owned `String` in by value rather than borrowing it.
+        let muxer_settings = format!("movflags=faststart video_track_timescale={}", FPS * 1000);
+        output_settings.set_string("muxer_settings", muxer_settings)?;
         self.output.update_settings(output_settings)?;
 
         // Set the video encoder on the output

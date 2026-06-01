@@ -2084,7 +2084,7 @@ dependencies = [
 
 [[package]]
 name = "gamedata-recorder"
-version = "2.6.14"
+version = "2.6.15"
 dependencies = [
  "async-trait",
  "backoff",

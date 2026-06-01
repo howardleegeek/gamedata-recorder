@@ -894,25 +894,61 @@ pub fn get_recording_base_resolution(hwnd: HWND) -> Result<(u32, u32)> {
     }
 }
 
-/// Physical-pixel resolution of the monitor under `hwnd`, falling back to
-/// the primary monitor when `MonitorFromWindow` fails. Used by the
-/// game-capture path (CaptureMode::GameHook) where the tiny boot-window
-/// client rect would be the wrong thing to pin OBS base resolution to —
-/// we want the native monitor resolution so the hook draws into a
-/// correctly-sized surface.
+/// True PHYSICAL-pixel resolution of the monitor under `hwnd`, falling back
+/// to the primary monitor when the window's monitor can't be resolved. Used
+/// by the game-capture path (CaptureMode::GameHook, e.g. Minecraft) where the
+/// tiny boot-window client rect would be the wrong thing to pin OBS base
+/// resolution to — we want the native monitor resolution so the hook draws
+/// into a correctly-sized surface.
+///
+/// ── Why this queries the DEVICE MODE, not `GetMonitorInfoW.rcMonitor` ──────
+/// `rcMonitor` is expressed in the CALLER's coordinate space, so it is
+/// DPI-virtualized: on a HiDPI display (e.g. 200% scaling) a process that is
+/// not effectively per-monitor-DPI-aware *at the moment of the call* reads
+/// `rcMonitor` in LOGICAL pixels — half the physical resolution at 200%. That
+/// is the confirmed root cause of the v2.6.14 "960×544" defect: a 1920×1088
+/// physical panel at 200% scaling reported a 960×544 monitor rect, which we
+/// then pinned as the OBS base, so the game-capture hook composited (and the
+/// encoder honestly recorded) a half-resolution surface — NOT Minecraft
+/// rendering small. We declare PerMonitorV2 in `build.rs`, but relying on the
+/// manifest being effective at this exact call is fragile (load order, mixed
+/// awareness contexts across the egui/winit/glutin stack, a stale awareness on
+/// the calling thread). `rcMonitor` is simply the wrong API to derive an
+/// encoder resolution from.
+///
+/// `EnumDisplaySettingsW(ENUM_CURRENT_SETTINGS).dmPelsWidth/Height` returns
+/// the display adapter's CURRENT MODE straight from the driver. It is in REAL
+/// physical pixels and is **immune to the process's DPI-awareness state** —
+/// the same DPI-immune technique `hardware_specs::get_primary_monitor_resolution`
+/// already relies on. We use it here too so the game-capture base is always
+/// the true native resolution (1920×1080 stays 1920×1080 at any scaling),
+/// which is a correctness fix, not an upscale: the hook genuinely renders at
+/// the monitor's physical resolution.
+///
+/// Resolution order, each step degrading only on failure:
+///   1. Monitor under `hwnd` → its device name → `EnumDisplaySettingsW`
+///      (physical px, DPI-immune). The common, correct path.
+///   2. `rcMonitor` of that same monitor (DPI-fragile, but better than the
+///      primary monitor when the device-mode query fails on a multi-head rig).
+///   3. Primary-monitor physical resolution (also `EnumDisplaySettingsW`).
 #[cfg(target_os = "windows")]
 pub fn get_monitor_resolution_for_hwnd(hwnd: HWND) -> Result<(u32, u32)> {
-    use windows::Win32::{
-        Foundation::RECT,
-        Graphics::Gdi::{
-            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    use windows::{
+        Win32::{
+            Foundation::RECT,
+            Graphics::Gdi::{
+                DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW,
+                MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
+            },
         },
+        core::PCWSTR,
     };
 
-    // SAFETY: MonitorFromWindow + GetMonitorInfoW are pure read-only Win32
-    // queries. MONITOR_DEFAULTTONEAREST guarantees a non-null HMONITOR even
-    // when `hwnd` sits outside any display. We pass an owned MONITORINFO
-    // struct with `cbSize` set, as required by the documented contract.
+    // SAFETY: MonitorFromWindow + GetMonitorInfoW + EnumDisplaySettingsW are
+    // pure read-only Win32 queries. MONITOR_DEFAULTTONEAREST guarantees a
+    // non-null HMONITOR even when `hwnd` sits outside any display. We pass
+    // owned structs with their size fields set, as the documented contracts
+    // require, and read only scalar fields back out.
     unsafe {
         let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         if hmon.is_invalid() {
@@ -922,26 +958,82 @@ pub fn get_monitor_resolution_for_hwnd(hwnd: HWND) -> Result<(u32, u32)> {
             return hardware_specs::get_primary_monitor_resolution()
                 .context("Failed to get primary monitor resolution");
         }
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            rcMonitor: RECT::default(),
-            rcWork: RECT::default(),
-            dwFlags: 0,
+
+        // Resolve the monitor's device name (e.g. "\\.\DISPLAY1") via the
+        // EX variant of MONITORINFO; the name keys the device-mode query.
+        let mut info_ex = MONITORINFOEXW {
+            monitorInfo: MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFOEXW>() as u32,
+                ..Default::default()
+            },
+            ..Default::default()
         };
-        GetMonitorInfoW(hmon, &mut info)
-            .ok()
-            .context("GetMonitorInfoW failed for window's monitor")?;
-        let w = (info.rcMonitor.right - info.rcMonitor.left) as u32;
-        let h = (info.rcMonitor.bottom - info.rcMonitor.top) as u32;
-        if w == 0 || h == 0 {
+        let got_info = GetMonitorInfoW(hmon, &mut info_ex as *mut _ as *mut MONITORINFO).as_bool();
+
+        if got_info {
+            // Step 1: physical pixels from the adapter's current display mode.
+            // DPI-immune — this is what fixes the HiDPI half-resolution bug.
+            let mut devmode = DEVMODEW {
+                dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+                ..Default::default()
+            };
+            if EnumDisplaySettingsW(
+                PCWSTR(info_ex.szDevice.as_ptr()),
+                ENUM_CURRENT_SETTINGS,
+                &mut devmode,
+            )
+            .as_bool()
+            {
+                let (w, h) = (devmode.dmPelsWidth, devmode.dmPelsHeight);
+                if w != 0 && h != 0 {
+                    tracing::info!(
+                        w,
+                        h,
+                        "Monitor resolution from device mode (physical pixels, DPI-immune)"
+                    );
+                    return Ok((w, h));
+                }
+                tracing::warn!(
+                    w,
+                    h,
+                    "EnumDisplaySettingsW returned a zero dimension; falling back to rcMonitor"
+                );
+            } else {
+                tracing::warn!(
+                    "EnumDisplaySettingsW failed for the window's monitor; falling back to rcMonitor"
+                );
+            }
+
+            // Step 2: rcMonitor of the same monitor. DPI-fragile (may be
+            // logical px under non-effective DPI awareness), but still more
+            // targeted than jumping to the primary monitor on a multi-head rig.
+            let RECT {
+                left,
+                top,
+                right,
+                bottom,
+            } = info_ex.monitorInfo.rcMonitor;
+            let w = (right - left) as u32;
+            let h = (bottom - top) as u32;
+            if w != 0 && h != 0 {
+                tracing::warn!(
+                    w,
+                    h,
+                    "Using rcMonitor for OBS base resolution (DPI-fragile fallback; \
+                     device-mode query was unavailable — a HiDPI display may yield a \
+                     downscaled value here)"
+                );
+                return Ok((w, h));
+            }
+            tracing::warn!(w, h, "rcMonitor was zero-sized, falling back to primary");
+        } else {
             tracing::warn!(
-                w,
-                h,
-                "GetMonitorInfoW returned zero-sized rect, falling back to primary"
+                "GetMonitorInfoW failed for the window's monitor, falling back to primary"
             );
-            return hardware_specs::get_primary_monitor_resolution()
-                .context("Failed to get primary monitor resolution");
         }
-        Ok((w, h))
+
+        // Step 3: primary monitor, physical pixels (also via EnumDisplaySettingsW).
+        hardware_specs::get_primary_monitor_resolution()
+            .context("Failed to get primary monitor resolution")
     }
 }
