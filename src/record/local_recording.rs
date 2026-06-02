@@ -1207,6 +1207,29 @@ impl LocalRecording {
         let mut metadata_value = serde_json::to_value(&metadata)?;
         Self::inject_extra_metadata_fields(&mut metadata_value);
 
+        // SELF-DIAGNOSTIC (ISC-KS-VIS): measure the ACTUALLY-encoded mp4 and
+        // inject a `_video_actual` block + warn loudly on mismatch.
+        //
+        // WHY: every field above (`capture_resolution`, `frame_count`,
+        // `average_fps`) is sourced from OBS's CONFIGURED values — what we asked
+        // OBS to produce, not what the muxer actually wrote. Real sessions have
+        // shipped a metadata.json claiming 1920x1080 @ ~30fps while the decoded
+        // mp4 was 960x544 @ 24fps. This block measures the finished file (which
+        // was already fsync'd in `recording.rs` before we got here) so the
+        // session carries the measured TRUTH next to the claim. It is PURELY
+        // ADDITIVE and DIAGNOSTIC: it never touches capture/encode/muxer/fps/
+        // resolution, and a measurement failure simply omits the block (the
+        // recording is still finalized normally).
+        let claimed_fps = constants::FPS as f64;
+        Self::inject_video_actual(
+            &mut metadata_value,
+            &recording_location,
+            capture_resolution.0,
+            capture_resolution.1,
+            claimed_fps,
+        )
+        .await;
+
         // Surface the encoder that ACTUALLY encoded this recording as a
         // top-level convenience field so the session is self-describing for the
         // buyer (PRD: "encoder actually used") without parsing the nested
@@ -1337,6 +1360,116 @@ impl LocalRecording {
             .map(str::to_owned)
         {
             obj.insert("encoder_used".to_string(), serde_json::Value::from(encoder));
+        }
+    }
+
+    /// Measure the encoded `recording.mp4` and inject a `_video_actual` block
+    /// describing the REAL file, warning loudly when it disagrees with the
+    /// claimed values.
+    ///
+    /// This is the cure for the recurring "metadata.json lies about the video"
+    /// class of bug (see `mp4_probe.rs` for the full rationale). It is purely
+    /// additive and read-only with respect to the recording: it measures the
+    /// already-finalized mp4 (resolution / frame_count / duration / fps) and
+    /// writes the measured truth into a NEW top-level key, leaving every claimed
+    /// field untouched.
+    ///
+    /// The `_video_actual` object matches `mp4_probe::VideoActual`:
+    /// `{ width, height, fps, frame_count, duration_s, source, matches_claim }`
+    /// where `source` is `"ffprobe"` or `"mp4_moov_parse"` and `matches_claim`
+    /// is true iff width/height match EXACTLY and fps is within ±1.0.
+    ///
+    /// Failure handling: if the mp4 is missing or unmeasurable we log at warn
+    /// and SKIP the block — diagnostics must never block finalizing a recording.
+    /// The measurement is blocking file I/O, so it runs on `spawn_blocking` to
+    /// keep the tokio reactor free (mirrors the fsync/validate calls in
+    /// `recording.rs`).
+    async fn inject_video_actual(
+        metadata_value: &mut serde_json::Value,
+        recording_location: &Path,
+        claimed_width: u32,
+        claimed_height: u32,
+        claimed_fps: f64,
+    ) {
+        let Some(obj) = metadata_value.as_object_mut() else {
+            return;
+        };
+
+        let mp4_path = recording_location.join(constants::filename::recording::VIDEO);
+        if !mp4_path.exists() {
+            // No mp4 to measure (rare encoder-failure path). The validator will
+            // flag the missing video; we simply emit no `_video_actual`.
+            tracing::warn!(
+                "Cannot self-measure encoded video: {} does not exist; \
+                 omitting _video_actual block",
+                mp4_path.display()
+            );
+            return;
+        }
+
+        let measured = tokio::task::spawn_blocking(move || {
+            crate::record::mp4_probe::measure_encoded_video(
+                &mp4_path,
+                claimed_width,
+                claimed_height,
+                claimed_fps,
+            )
+        })
+        .await;
+
+        let actual = match measured {
+            Ok(Ok(actual)) => actual,
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "Failed to self-measure encoded video, omitting _video_actual block: {e}"
+                );
+                return;
+            }
+            Err(join_err) => {
+                tracing::warn!(
+                    "Self-measure task panicked, omitting _video_actual block: {join_err}"
+                );
+                return;
+            }
+        };
+
+        if !actual.matches_claim {
+            // LOUD mismatch warning — the whole point of this instrumentation.
+            // A future debug log reads this line to know, definitively, that the
+            // metadata's claimed resolution/fps are NOT what was encoded.
+            tracing::warn!(
+                "ENCODED VIDEO MISMATCH: claimed {cw}x{ch}@{cfps:.1}, actual {aw}x{ah}@{afps:.1} \
+                 ({frames} frames) — metadata claimed values are NOT what was encoded \
+                 (measured via {source})",
+                cw = claimed_width,
+                ch = claimed_height,
+                cfps = claimed_fps,
+                aw = actual.width,
+                ah = actual.height,
+                afps = actual.fps,
+                frames = actual.frame_count,
+                source = actual.source.as_str(),
+            );
+        } else {
+            tracing::info!(
+                "Encoded video self-check OK: {w}x{h}@{fps:.2} ({frames} frames, {dur:.2}s) \
+                 matches claim (measured via {source})",
+                w = actual.width,
+                h = actual.height,
+                fps = actual.fps,
+                frames = actual.frame_count,
+                dur = actual.duration_s,
+                source = actual.source.as_str(),
+            );
+        }
+
+        match serde_json::to_value(&actual) {
+            Ok(v) => {
+                obj.insert("_video_actual".to_string(), v);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to serialize _video_actual: {e}");
+            }
         }
     }
 }

@@ -1354,6 +1354,49 @@ impl RecorderState {
         // `ObsString: From<String>` (but not `From<&String>`), so move the
         // owned `String` in by value rather than borrowing it.
         let muxer_settings = format!("movflags=faststart video_track_timescale={}", FPS * 1000);
+
+        // ── VIDEO PIPELINE DIAGNOSTIC (ISC-KS-VIS) ──────────────────────────
+        // PURELY ADDITIVE logging. Captures the EXACT governing video config at
+        // record start so the next field debug log pinpoints where a 30→24 fps
+        // or 1080p→544p mismatch originates (encoder fps setting? base vs output
+        // resolution? muxer timescale?). We measure the real encoded file at
+        // STOP (see `mp4_probe` / `_video_actual`); this START line is the
+        // matching "what we asked for" half so the two can be diffed.
+        //
+        // The base/output resolution is RECONSTRUCTED with the SAME
+        // `fit_output_within_height` helper `video_info` uses (so it reports the
+        // identical values OBS was just reset with) — we do NOT recompute or
+        // change anything; `reset_video(video_info(...))` already ran above.
+        // fps_num/fps_den/timescale are the constants `video_info` and the muxer
+        // use verbatim. Nothing here is plumbed into the recording or can fail.
+        let diag_base = request.game_resolution;
+        let diag_output = if software_encoder {
+            fit_output_within_height(
+                diag_base.0,
+                diag_base.1,
+                constants::SOFTWARE_ENCODER_MAX_OUTPUT_HEIGHT,
+            )
+        } else {
+            diag_base
+        };
+        tracing::info!(
+            obs_fps_num = FPS,
+            obs_fps_den = 1u32,
+            base_width = diag_base.0,
+            base_height = diag_base.1,
+            output_width = diag_output.0,
+            output_height = diag_output.1,
+            encoder = %actual_encoder_type,
+            // The encoder inherits OBS's configured output frame rate (FPS);
+            // libobs does not expose a separate per-encoder fps knob on this
+            // path, so the governing encoder frame rate IS `obs_fps_num/den`.
+            encoder_fps = FPS,
+            software_encoder,
+            video_track_timescale = FPS * 1000,
+            muxer_settings = %muxer_settings,
+            "VIDEO PIPELINE CONFIG: governing video settings at record start"
+        );
+
         output_settings.set_string("muxer_settings", muxer_settings)?;
         self.output.update_settings(output_settings)?;
 
