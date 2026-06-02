@@ -1400,6 +1400,53 @@ impl RecorderState {
         output_settings.set_string("muxer_settings", muxer_settings)?;
         self.output.update_settings(output_settings)?;
 
+        // ── FPS-30 ASSERTION: pin the encoder frame-rate divisor to 1 ───────
+        // PURELY ADDITIVE. The OBS canvas is reset to `FPS` (30) above, but the
+        // encoder can otherwise let the ffmpeg muxer negotiate an *implicit*
+        // frame-rate divisor — a clean CFR 30→24 decimation we have observed in
+        // the encoded mp4 (7585 composited frames of ~9485 → exactly 24.0 fps).
+        // Nothing in this app or `libobs-wrapper` sets a divisor, so the encoder
+        // is born with whatever libobs/ffmpeg defaults to; `divisor = 1` makes
+        // the encoder explicitly assert the FULL canvas rate to the muxer,
+        // forbidding any down-negotiation. divisor=1 is a no-op if 24 fps was
+        // never caused by an implicit divisor (it only re-states the canvas
+        // rate), so it is safe even if it turns out not to be the root cause.
+        //
+        // This MUST happen before `set_video_encoder` (which CONSUMES the
+        // `Arc<ObsVideoEncoder>` by value) and before `output.start()` (after
+        // which the encoder is active and rejects reconfiguration). We marshal
+        // the raw `*mut obs_encoder_t` onto the OBS thread via the runtime — all
+        // libobs calls must run there — capturing the pointer as a `usize` and
+        // re-casting inside the closure so it stays `Send`. This mirrors the
+        // established `read_output_total_frames` / `set_output_source_on_channel`
+        // FFI pattern in this file and needs no change to the git-dep wrapper
+        // (`ObsVideoEncoder::as_ptr()` exposes the pointer; `libobs_wrapper::sys`
+        // re-exports the libobs binding). Failure to dispatch is logged, never
+        // fatal: a missing assertion at worst leaves the prior (possibly
+        // decimating) behaviour, so it must not kill an otherwise-good recording.
+        let encoder_ptr = video_encoder.as_ptr().0 as usize;
+        let divisor_runtime = self.obs_context.runtime().clone();
+        match divisor_runtime.run_with_obs_result(move || {
+            let ptr = encoder_ptr as *mut libobs_wrapper::sys::obs_encoder_t;
+            unsafe { libobs_wrapper::sys::obs_encoder_set_frame_rate_divisor(ptr, 1) }
+        }) {
+            Ok(applied) => {
+                tracing::info!(
+                    applied,
+                    "Pinned encoder frame_rate_divisor=1 (assert {}fps to muxer)",
+                    FPS
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    e = ?e,
+                    "Failed to dispatch obs_encoder_set_frame_rate_divisor to OBS \
+                     thread; leaving encoder at default frame-rate negotiation \
+                     (recording continues)"
+                );
+            }
+        }
+
         // Set the video encoder on the output
         self.output.set_video_encoder(video_encoder)?;
 
