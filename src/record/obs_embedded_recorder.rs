@@ -1133,7 +1133,7 @@ impl RecorderState {
         let mut settings = request.video_settings.clone();
         settings.encoder = encoder_type;
         let data = self.obs_context.data()?;
-        Ok(settings.apply_to_obs_data(data)?)
+        Ok(settings.apply_to_obs_data(data, request.recording_bitrate_kbps)?)
     }
 
     fn start_recording(
