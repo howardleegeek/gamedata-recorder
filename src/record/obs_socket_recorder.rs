@@ -330,6 +330,12 @@ impl VideoRecorder for ObsSocketRecorder {
         // Socket recorder doesn't support hook detection
         false
     }
+
+    async fn check_frozen_capture_timeout(&mut self) -> bool {
+        // Socket recorder doesn't measure real FPS or use the WGC path,
+        // so it has no frozen-capture fallback.
+        false
+    }
 }
 impl Drop for ObsSocketRecorder {
     fn drop(&mut self) {

@@ -291,6 +291,23 @@ pub const FPS: u32 = 30;
 pub const RECORDING_WIDTH: u32 = 1920;
 pub const RECORDING_HEIGHT: u32 = 1080;
 
+/// Minecraft's default vertical FOV, in degrees. MC's video setting is
+/// labeled "FOV" and is the VERTICAL field of view (default 70°; the slider
+/// ranges 30–110). We use this to derive pinhole camera intrinsics for the
+/// recorded frame when no per-session FOV measurement is available — the
+/// emitted intrinsics are therefore marked `source: "assumed_mc_default"`,
+/// NOT a measured value. Override only if a real FOV is ever read from the
+/// game; until then every session honestly states this is the assumed default.
+pub const MC_DEFAULT_VFOV_DEG: f64 = 70.0;
+
+/// Output-height ceiling applied ONLY when the final video encoder is software
+/// x264 (no NVENC/AMF/QSV available). v2.6.4 graceful-degrade: software H.264
+/// at native 1080p pegs weak/iGPU CPUs (confirmed ~1 FPS + system-wide lag on
+/// an AMD Radeon 780M iGPU). Capping the OUTPUT to 720p (the capture base stays
+/// native, OBS bicubic-downscales) plus the `veryfast` x264 preset keeps those
+/// machines usable. Hardware-encoder machines are unaffected and stay native.
+pub const SOFTWARE_ENCODER_MAX_OUTPUT_HEIGHT: u32 = 720;
+
 /// Minimum free space required to record (in megabytes)
 pub const MIN_FREE_SPACE_MB: u64 = 512;
 
@@ -311,6 +328,27 @@ pub const HOOK_TIMEOUT: Duration = Duration::from_secs(15);
 /// Minimum average FPS. Set low to support integrated GPUs and low-end machines.
 /// Even low-FPS recordings contain useful training data for AI world models.
 pub const MIN_AVERAGE_FPS: f64 = 5.0;
+
+/// How long a recording must run before the frozen-capture watchdog is
+/// allowed to fire. WGC (`window_capture`) is D3D-oriented and a game
+/// rendering through an OpenGL surface (notably Minecraft Java / GLFW)
+/// can capture as a black or frozen frame with no error. The existing
+/// hook-timeout fallback only covers the `game_capture` hook path, so a
+/// frozen WGC capture would otherwise record black for the whole
+/// session. We give the capture this grace period to deliver real frames
+/// before declaring it frozen — long enough that a slow first-frame /
+/// swapchain handshake isn't mistaken for a freeze, short enough that we
+/// rescue the session early.
+pub const FROZEN_CAPTURE_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Real delivered FPS at or below which a recording is considered frozen
+/// (black/stuck capture) once `FROZEN_CAPTURE_TIMEOUT` has elapsed. A
+/// healthy capture delivers ~`FPS` frames per second; a frozen WGC
+/// surface delivers effectively zero. Set just above zero so a capture
+/// that is merely very slow (e.g. 2-3 FPS on a weak iGPU) is still
+/// treated as alive and left on the working WGC path — only a genuinely
+/// stuck capture trips the monitor-capture fallback.
+pub const FROZEN_CAPTURE_FPS_THRESHOLD: f64 = 1.0;
 
 // Play-time tracker
 /// Whether or not to use testing constants (should always be false in production)
@@ -351,6 +389,32 @@ pub const GH_ORG: &str = "howardleegeek";
 /// GitHub repository
 pub const GH_REPO: &str = "gamedata-recorder";
 
+/// R46 (GDPR/CCPA) consent disclosure version.
+///
+/// This is the version of the **consent disclosure text** the user is shown
+/// in the ConsentView — NOT the application's `CARGO_PKG_VERSION`. The consent
+/// gate (`config::Credentials::consent_status`) compares the user's stored
+/// `consent_given_at_version` against THIS constant, so:
+///
+///   - Patch / minor app updates (e.g. 2.6.3 -> 2.6.4) keep prior consent
+///     valid and do NOT re-prompt — the disclosure text is unchanged.
+///   - The user is still required to consent once at the current disclosure
+///     version, preserving the legal gate.
+///
+/// Bump this ONLY when the disclosure text itself materially changes (new data
+/// collected, new processing purpose, new third party, etc.). Bumping it forces
+/// every user to re-acknowledge the updated disclosure on next launch.
+///
+/// History:
+///   - "2.6.0": baseline disclosure carried by the local-recording builds. Set
+///     here (not the live `CARGO_PKG_VERSION`) so the 2.6.0 -> 2.6.4 patch
+///     bumps no longer silently invalidate consent and block auto-recording
+///     (regression a tester hit: recorder booted but never recorded).
+///
+/// Must parse as semver — `config::consent_disclosure_version()` calls
+/// `semver::Version::parse` on it and treats the result as infallible.
+pub const CONSENT_DISCLOSURE_VERSION: &str = "2.6.0";
+
 pub mod filename {
     pub mod recording {
         /// Reasons that a recording is invalid
@@ -380,6 +444,11 @@ pub mod filename {
         /// Per-frame timestamp log — one `{idx, t_ns}` JSON object per line.
         /// Enables precise frame-to-input alignment downstream.
         pub const FRAMES_JSONL: &str = "frames.jsonl";
+        /// Per-tick player pose/orientation/velocity/state from the Oyster MC
+        /// mod (world.oyster.recorder). The recorder collects it into the
+        /// session at stop; the server pipeline trims it to the recording's
+        /// wall-clock window by each row's `timestamp_ms`. See ISC-DATA-GS.
+        pub const GAME_STATE: &str = "game_state.jsonl";
         /// Per-frame mouse / keyboard / camera state — buyer plugin wire
         /// contract. A single JSON array of per-frame records, each with
         /// normalized `mouseX`/`mouseY`, per-frame `mouse_dx`/`mouse_dy`

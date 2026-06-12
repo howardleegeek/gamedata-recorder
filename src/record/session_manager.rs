@@ -191,6 +191,14 @@ impl SessionManager {
         self.metadata_dir().join("hardware.json")
     }
 
+    /// Path to `metadata/systeminfo.json` — the buyer-contract artifact
+    /// (PRD `prd_test_systeminfo_required`). Sits alongside `hardware.json`
+    /// in the same session `metadata/` dir and carries the flattened
+    /// gpu/cpu/ram_gb/os/build snapshot.
+    pub fn systeminfo_path(&self) -> PathBuf {
+        self.metadata_dir().join("systeminfo.json")
+    }
+
     pub fn game_metadata_path(&self) -> PathBuf {
         self.metadata_dir().join("game.json")
     }

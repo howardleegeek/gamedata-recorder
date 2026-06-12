@@ -15,6 +15,92 @@ use crate::{
     util::durable_write,
 };
 
+/// Pinhole camera intrinsics for the recorded frame.
+///
+/// Derived analytically from the encoded resolution
+/// (`constants::RECORDING_WIDTH`/`HEIGHT`) and the game's vertical FOV — NOT
+/// measured from the running game. The `source` field states this honestly so
+/// downstream AI-training consumers never mistake an assumed default for a
+/// per-session measurement (the same data-integrity rule the FOV-in-LEM and
+/// fps_effective fixes followed: emit "unknown"/"assumed" rather than a
+/// plausible-looking lie).
+///
+/// Conventions:
+///   - `fx`/`fy` are focal lengths in pixels. For square pixels (the case for
+///     a standard 16:9 game render) `fx == fy`. `fy` is set from the vertical
+///     FOV and `fx` is set equal to it.
+///   - `cx`/`cy` are the principal point, assumed to be the image center.
+///   - This struct is serialized as the nested `camera_intrinsics` object that
+///     is injected into `metadata.json` (see `inject_extra_metadata_fields`).
+///     It is intentionally defined here rather than on the shared `Metadata`
+///     struct so the wire field can be added without disturbing that type.
+// `Serialize` only — the `&'static str` fields (`model`, `source`) make this
+// write-only. `#[derive(Deserialize)]` would not compile for borrowed-static
+// string fields, and nothing reads `camera_intrinsics` back into this struct
+// (downstream consumers parse the JSON object directly).
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct CameraIntrinsics {
+    /// Camera model. Always `"pinhole"` for this analytic derivation.
+    pub model: &'static str,
+    /// Image width in pixels (matches the encoded video width).
+    pub width: u32,
+    /// Image height in pixels (matches the encoded video height).
+    pub height: u32,
+    /// Horizontal focal length in pixels.
+    pub fx: f64,
+    /// Vertical focal length in pixels.
+    pub fy: f64,
+    /// Principal point x (image center) in pixels.
+    pub cx: f64,
+    /// Principal point y (image center) in pixels.
+    pub cy: f64,
+    /// Vertical field of view in degrees used to derive `fy`.
+    pub vfov_deg: f64,
+    /// Provenance of these intrinsics. `"assumed_mc_default"` marks the values
+    /// as derived from the assumed default FOV, NOT measured from the game.
+    pub source: &'static str,
+}
+
+impl CameraIntrinsics {
+    /// Compute pinhole intrinsics from a pixel resolution and a vertical FOV.
+    ///
+    /// Formula (standard pinhole, principal point at center, square pixels):
+    /// ```text
+    ///   vfov_rad = vfov_deg * PI / 180
+    ///   fy       = (height / 2) / tan(vfov_rad / 2)
+    ///   fx       = fy                       (square pixels)
+    ///   cx       = width  / 2
+    ///   cy       = height / 2
+    /// ```
+    ///
+    /// `source` is caller-supplied so the provenance label stays honest — the
+    /// recorder passes `"assumed_mc_default"` because the FOV is assumed, not
+    /// measured.
+    fn from_resolution_and_vfov(
+        width: u32,
+        height: u32,
+        vfov_deg: f64,
+        source: &'static str,
+    ) -> Self {
+        let vfov_rad = vfov_deg * std::f64::consts::PI / 180.0;
+        let fy = (height as f64 / 2.0) / (vfov_rad / 2.0).tan();
+        let fx = fy; // square pixels
+        let cx = width as f64 / 2.0;
+        let cy = height as f64 / 2.0;
+        Self {
+            model: "pinhole",
+            width,
+            height,
+            fx,
+            fy,
+            cx,
+            cy,
+            vfov_deg,
+            source,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UploadProgressState {
     pub upload_id: String,
@@ -192,6 +278,202 @@ fn parse_session_timestamp(folder_name: &str) -> Option<std::time::SystemTime> {
         .map(|secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
 }
 
+/// Convert a `SystemTime` to Unix-epoch-UTC seconds as `f64`.
+///
+/// This is the single, audited source of truth for every "utc"/"wall_clock"
+/// value this module emits. `SystemTime` is a clock-absolute instant, and
+/// `duration_since(UNIX_EPOCH)` measures its offset from the epoch in UTC — so
+/// the result is genuine epoch-UTC, NOT a local-time value formatted as UTC
+/// (the mislabeling behind the SS5 future/timezone-shifted-timestamp bug).
+///
+/// Returns `None` for the impossible-but-defensive case of a time strictly
+/// before the Unix epoch (e.g. a corrupted/zeroed clock), letting the caller
+/// decide on a fallback rather than silently emitting a negative timestamp.
+fn utc_secs_f64(t: SystemTime) -> Option<f64> {
+    t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
+}
+
+/// A detected wall-clock anomaly, recorded additively in `metadata.json` so a
+/// downstream consumer can quarantine the session. Serialized as the nested
+/// `clock_anomaly` object; only present when an anomaly was actually detected.
+///
+/// `Serialize` only — this is a write-only diagnostic; nothing reads it back
+/// into this struct.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct ClockAnomaly {
+    /// Machine-readable anomaly kind: `"start_after_stop"` (wall clock moved
+    /// backward between start and stop) or `"wall_gap_disagrees_with_monotonic"`
+    /// (the wall-clock start→stop gap diverges from the monotonic recording
+    /// duration, indicating the wall clock was stepped mid-recording).
+    kind: &'static str,
+    /// The recorded UTC start timestamp (epoch seconds) that triggered the flag.
+    start_utc_secs: f64,
+    /// The recorded UTC stop timestamp (epoch seconds).
+    end_utc_secs: f64,
+    /// Monotonic recording duration (seconds) from `Instant` — unaffected by the
+    /// wall-clock skew, so it stays authoritative for the true recording length.
+    monotonic_duration_secs: f64,
+}
+
+/// Detect a wall-clock anomaly between the recorded start/stop epoch-UTC
+/// timestamps, cross-checked against the monotonic recording duration.
+///
+/// Pure function (no clock reads) so the policy is unit-testable. Flags:
+///   1. `start_after_stop` — `start > end`. The wall clock went backward
+///      between capturing `start_time` and `SystemTime::now()` at stop, so the
+///      recording appears to end before it began. This is the direct form of
+///      the SS5 "future-dated start" hazard.
+///   2. `wall_gap_disagrees_with_monotonic` — the wall-clock gap
+///      (`end - start`) differs from the monotonic recording duration by more
+///      than a generous tolerance. The two should agree to within a second; a
+///      large disagreement means the wall clock was stepped (NTP correction, VM
+///      catch-up, manual change) DURING the recording, so the UTC start/stop —
+///      and any future-dated value derived from them — are untrustworthy even
+///      though `start <= end` still holds.
+///
+/// Returns `None` when the timestamps are self-consistent (the common case).
+fn detect_clock_anomaly(
+    start_utc_secs: f64,
+    end_utc_secs: f64,
+    monotonic_duration_secs: f64,
+) -> Option<ClockAnomaly> {
+    // Non-finite inputs can't be reasoned about; don't fabricate an anomaly.
+    if !start_utc_secs.is_finite() || !end_utc_secs.is_finite() {
+        return None;
+    }
+
+    // Slack absorbs benign sub-second ordering between the start capture and the
+    // stop `SystemTime::now()` (they are read at slightly different points).
+    const ORDERING_SLACK_SECS: f64 = 1.0;
+
+    // (1) Start is after stop: the wall clock moved backward between start and
+    // stop, so the recording "ends before it began" — the SS5 hazard directly.
+    if start_utc_secs > end_utc_secs + ORDERING_SLACK_SECS {
+        return Some(ClockAnomaly {
+            kind: "start_after_stop",
+            start_utc_secs,
+            end_utc_secs,
+            monotonic_duration_secs,
+        });
+    }
+
+    // (2) Wall-clock gap should ≈ monotonic duration. A large disagreement means
+    // the wall clock was stepped mid-recording, so the UTC stamps are suspect.
+    // Only meaningful when we actually have a monotonic duration to compare to.
+    if monotonic_duration_secs.is_finite() && monotonic_duration_secs > 0.0 {
+        let wall_gap = end_utc_secs - start_utc_secs;
+        // Tolerance: the larger of a fixed floor and a small fraction of the
+        // duration, so long recordings aren't flagged for normal scheduling
+        // jitter while short ones still catch big absolute steps.
+        let tolerance = ORDERING_SLACK_SECS.max(monotonic_duration_secs * 0.10);
+        if (wall_gap - monotonic_duration_secs).abs() > tolerance {
+            return Some(ClockAnomaly {
+                kind: "wall_gap_disagrees_with_monotonic",
+                start_utc_secs,
+                end_utc_secs,
+                monotonic_duration_secs,
+            });
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod camera_intrinsics_tests {
+    use super::CameraIntrinsics;
+
+    #[test]
+    fn pinhole_1080p_70deg_vfov_matches_expected() {
+        // Standard delivery shape: 1920x1080 @ 70° vertical FOV.
+        let k = CameraIntrinsics::from_resolution_and_vfov(1920, 1080, 70.0, "assumed_mc_default");
+
+        // fy = (1080/2) / tan(70°/2) = 540 / tan(35°) ≈ 771.199924
+        assert!((k.fy - 771.199_923_641).abs() < 1e-6, "fy was {}", k.fy);
+        // Square pixels: fx == fy.
+        assert_eq!(k.fx, k.fy, "fx must equal fy for square pixels");
+        // Principal point at image center.
+        assert_eq!(k.cx, 960.0);
+        assert_eq!(k.cy, 540.0);
+        assert_eq!(k.width, 1920);
+        assert_eq!(k.height, 1080);
+        assert_eq!(k.model, "pinhole");
+        assert_eq!(k.vfov_deg, 70.0);
+        // Provenance must stay honest.
+        assert_eq!(k.source, "assumed_mc_default");
+    }
+
+    #[test]
+    fn serializes_as_expected_nested_object() {
+        let k = CameraIntrinsics::from_resolution_and_vfov(1920, 1080, 70.0, "assumed_mc_default");
+        let v = serde_json::to_value(k).expect("intrinsics must serialize");
+        assert_eq!(v["model"], "pinhole");
+        assert_eq!(v["width"], 1920);
+        assert_eq!(v["height"], 1080);
+        assert_eq!(v["source"], "assumed_mc_default");
+        // fx/fy/cx/cy present and finite (valid JSON numbers, not NaN).
+        for key in ["fx", "fy", "cx", "cy", "vfov_deg"] {
+            assert!(v[key].is_number(), "{key} must be a JSON number");
+        }
+    }
+
+    #[test]
+    fn uses_repo_recording_constants_and_mc_fov() {
+        // Guards against the constants drifting out from under the metadata.
+        let k = CameraIntrinsics::from_resolution_and_vfov(
+            constants::RECORDING_WIDTH,
+            constants::RECORDING_HEIGHT,
+            constants::MC_DEFAULT_VFOV_DEG,
+            "assumed_mc_default",
+        );
+        assert_eq!(k.width, constants::RECORDING_WIDTH);
+        assert_eq!(k.height, constants::RECORDING_HEIGHT);
+        assert_eq!(k.cx, constants::RECORDING_WIDTH as f64 / 2.0);
+        assert_eq!(k.cy, constants::RECORDING_HEIGHT as f64 / 2.0);
+    }
+}
+
+#[cfg(test)]
+mod metadata_injection_tests {
+    use super::LocalRecording;
+
+    #[test]
+    fn injects_camera_intrinsics_and_timezone_fields() {
+        // Start from a JSON object shaped like a minimal serialized Metadata.
+        let mut value = serde_json::json!({
+            "game_exe": "javaw.exe",
+            "session_id": "tz-inject-0001",
+            "wall_clock_start": "2026-05-29T21:30:00+00:00",
+        });
+
+        LocalRecording::inject_extra_metadata_fields(&mut value);
+
+        // camera_intrinsics is a nested object with the honest source tag.
+        let ci = &value["camera_intrinsics"];
+        assert!(ci.is_object(), "camera_intrinsics must be a nested object");
+        assert_eq!(ci["model"], "pinhole");
+        assert_eq!(ci["source"], "assumed_mc_default");
+        assert_eq!(ci["width"], constants::RECORDING_WIDTH);
+        assert_eq!(ci["height"], constants::RECORDING_HEIGHT);
+
+        // Timezone disambiguation fields exist and are correctly typed.
+        assert!(
+            value["timezone_utc_offset_seconds"].is_i64(),
+            "offset must be an integer number of seconds"
+        );
+        assert_eq!(value["session_dir_timezone"], "local");
+    }
+
+    #[test]
+    fn non_object_value_is_a_noop_and_does_not_panic() {
+        // Defensive: if metadata ever serialized to a non-object, injection
+        // must not panic on the finalize path.
+        let mut value = serde_json::json!("not an object");
+        LocalRecording::inject_extra_metadata_fields(&mut value);
+        assert_eq!(value, serde_json::json!("not an object"));
+    }
+}
+
 #[cfg(test)]
 mod parse_timestamp_tests {
     use super::parse_session_timestamp;
@@ -220,6 +502,154 @@ mod parse_timestamp_tests {
         assert!(parse_session_timestamp("not-a-session").is_none());
         assert!(parse_session_timestamp("session_bad_time").is_none());
         assert!(parse_session_timestamp("").is_none());
+    }
+}
+
+#[cfg(test)]
+mod clock_math_tests {
+    use super::{ClockAnomaly, detect_clock_anomaly, utc_secs_f64};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn utc_secs_is_genuine_epoch_utc() {
+        // A SystemTime built from a known epoch offset must round-trip to that
+        // same offset — proving we measure UTC-from-epoch, not local time.
+        let t = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let secs = utc_secs_f64(t).expect("post-epoch time must convert");
+        assert!((secs - 1_700_000_000.0).abs() < 1e-6, "got {secs}");
+    }
+
+    #[test]
+    fn utc_secs_epoch_is_zero() {
+        assert_eq!(utc_secs_f64(UNIX_EPOCH), Some(0.0));
+    }
+
+    #[test]
+    fn utc_secs_before_epoch_is_none() {
+        // Defensive: a clock set before 1970 must not yield a negative timestamp.
+        let before = UNIX_EPOCH - Duration::from_secs(10);
+        assert_eq!(utc_secs_f64(before), None);
+    }
+
+    #[test]
+    fn healthy_recording_has_no_anomaly() {
+        // start at T, stop ~120s later, monotonic duration ~120s: consistent.
+        let start = 1_700_000_000.0;
+        let end = start + 120.3;
+        assert_eq!(detect_clock_anomaly(start, end, 120.0), None);
+    }
+
+    #[test]
+    fn sub_second_ordering_noise_is_tolerated() {
+        // Stop stamped a hair before start due to read ordering; within slack.
+        let start = 1_700_000_000.5;
+        let end = 1_700_000_000.0;
+        assert_eq!(detect_clock_anomaly(start, end, 0.0), None);
+    }
+
+    #[test]
+    fn start_after_stop_is_flagged() {
+        // Wall clock jumped backward: start is well after stop (SS5 hazard).
+        let start = 1_700_000_500.0;
+        let end = 1_700_000_000.0;
+        let anomaly = detect_clock_anomaly(start, end, 60.0).expect("must flag");
+        assert_eq!(anomaly.kind, "start_after_stop");
+        // Monotonic duration is preserved verbatim for downstream triage.
+        assert_eq!(anomaly.monotonic_duration_secs, 60.0);
+        assert_eq!(anomaly.start_utc_secs, start);
+        assert_eq!(anomaly.end_utc_secs, end);
+    }
+
+    #[test]
+    fn forward_clock_step_during_recording_is_flagged() {
+        // Monotonic duration says 60s, but the wall clock advanced 3600s between
+        // start and stop — the clock was stepped forward mid-recording.
+        let start = 1_700_000_000.0;
+        let end = start + 3600.0;
+        let anomaly = detect_clock_anomaly(start, end, 60.0).expect("must flag");
+        assert_eq!(anomaly.kind, "wall_gap_disagrees_with_monotonic");
+    }
+
+    #[test]
+    fn long_recording_tolerates_proportional_jitter() {
+        // 10-minute recording; wall gap off by ~30s (<10% of 600s) is fine.
+        let start = 1_700_000_000.0;
+        let end = start + 600.0 + 30.0;
+        assert_eq!(detect_clock_anomaly(start, end, 600.0), None);
+    }
+
+    #[test]
+    fn non_finite_inputs_do_not_panic_or_fabricate() {
+        assert_eq!(detect_clock_anomaly(f64::NAN, 1.0, 1.0), None);
+        assert_eq!(detect_clock_anomaly(1.0, f64::INFINITY, 1.0), None);
+    }
+
+    #[test]
+    fn anomaly_serializes_as_nested_object() {
+        let a = ClockAnomaly {
+            kind: "start_after_stop",
+            start_utc_secs: 2.0,
+            end_utc_secs: 1.0,
+            monotonic_duration_secs: 0.5,
+        };
+        let v = serde_json::to_value(a).expect("must serialize");
+        assert_eq!(v["kind"], "start_after_stop");
+        assert!(v["start_utc_secs"].is_number());
+        assert!(v["end_utc_secs"].is_number());
+        assert!(v["monotonic_duration_secs"].is_number());
+    }
+}
+
+#[cfg(test)]
+mod encoder_used_tests {
+    use super::LocalRecording;
+
+    #[test]
+    fn promotes_encoder_from_recorder_extra() {
+        let mut value = serde_json::json!({
+            "game_exe": "javaw.exe",
+            "recorder_extra": { "encoder": "obs_nvenc_hevc_tex", "window_capture": false },
+        });
+        LocalRecording::inject_encoder_used(&mut value);
+        assert_eq!(value["encoder_used"], "obs_nvenc_hevc_tex");
+    }
+
+    #[test]
+    fn absent_when_no_recorder_extra() {
+        // Socket recorder path: recorder_extra is null → no fabricated encoder.
+        let mut value = serde_json::json!({
+            "game_exe": "javaw.exe",
+            "recorder_extra": serde_json::Value::Null,
+        });
+        LocalRecording::inject_encoder_used(&mut value);
+        assert!(
+            value.get("encoder_used").is_none(),
+            "must not fabricate an encoder when none is known"
+        );
+    }
+
+    #[test]
+    fn absent_when_recorder_extra_missing_entirely() {
+        let mut value = serde_json::json!({ "game_exe": "javaw.exe" });
+        LocalRecording::inject_encoder_used(&mut value);
+        assert!(value.get("encoder_used").is_none());
+    }
+
+    #[test]
+    fn does_not_overwrite_existing_encoder_used() {
+        let mut value = serde_json::json!({
+            "encoder_used": "preset_value",
+            "recorder_extra": { "encoder": "obs_x264" },
+        });
+        LocalRecording::inject_encoder_used(&mut value);
+        assert_eq!(value["encoder_used"], "preset_value");
+    }
+
+    #[test]
+    fn non_object_value_is_a_noop() {
+        let mut value = serde_json::json!("not an object");
+        LocalRecording::inject_encoder_used(&mut value);
+        assert_eq!(value, serde_json::json!("not an object"));
     }
 }
 
@@ -633,30 +1063,63 @@ impl LocalRecording {
         let duration = start_instant.elapsed().as_secs_f64();
         let end_system_time = SystemTime::now();
 
-        let start_timestamp = start_time
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or_else(|_| {
-                tracing::warn!("Start time before UNIX epoch, using 0");
-                0.0
-            });
-        let end_timestamp = end_system_time
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or_else(|_| {
-                tracing::warn!("Current time before UNIX epoch, using 0");
-                0.0
-            });
-
-        // Effective FPS from frame count and duration — mirrors competitor semantics
-        // and will differ from `average_fps` when frames were dropped at the edges.
-        let fps_effective = frame_count.and_then(|n| {
-            if duration > 0.0 {
-                Some(n as f64 / duration)
-            } else {
-                None
-            }
+        // Both timestamps are genuine Unix-epoch-UTC seconds: `SystemTime` is a
+        // clock-absolute value, and `duration_since(UNIX_EPOCH)` measures the
+        // offset from the epoch in UTC. This is NOT a local-time value formatted
+        // as if it were UTC — that mislabeling was the class of bug behind the
+        // SS5 recovery session (100703), where a `recording_started_utc` was a
+        // future / timezone-shifted value. We derive epoch-UTC directly so the
+        // emitted "utc"/"wall_clock" fields can never be a local-time lie.
+        let start_timestamp = utc_secs_f64(start_time).unwrap_or_else(|| {
+            tracing::warn!("Start time before UNIX epoch, using 0");
+            0.0
         });
+        let end_timestamp = utc_secs_f64(end_system_time).unwrap_or_else(|| {
+            tracing::warn!("Current time before UNIX epoch, using 0");
+            0.0
+        });
+
+        // Clock-skew / future-dated-start sanity guard (mirrors the fail-soft
+        // guard in `recording.rs`'s game_state windowing). The wall-clock
+        // SystemTime can jump backward between `start_time` capture and
+        // `end_system_time = SystemTime::now()` (NTP step, manual clock change,
+        // VM clock catch-up), which yields a start that is AFTER the stop or an
+        // implausibly-far-future start — exactly the SS5 hazard. We do NOT
+        // rewrite the recorded timestamps (silently editing history could itself
+        // emit a wrong value, and the data team forbids changing existing field
+        // meanings); instead we record an additive `clock_anomaly` diagnostic so
+        // a buyer can detect and quarantine the session, and we log loudly.
+        // Note: the `duration` / `duration_ns` fields are derived from the
+        // MONOTONIC `Instant` (`start_instant.elapsed()`), so they remain correct
+        // even when the wall clock is skewed.
+        let clock_anomaly = detect_clock_anomaly(start_timestamp, end_timestamp, duration);
+        if let Some(ref anomaly) = clock_anomaly {
+            tracing::warn!(
+                "Clock anomaly in recording metadata: kind={}, start_utc={}s, end_utc={}s, \
+                 monotonic_duration={}s. Wall-clock timestamps are suspect; \
+                 monotonic `duration`/`duration_ns` remain authoritative.",
+                anomaly.kind,
+                start_timestamp,
+                end_timestamp,
+                duration
+            );
+        }
+
+        // fps_effective / frame_count fix (ISC-DATA-FPS): the `frame_count` arg comes
+        // from `fps_logger`, whose `on_frame_fps()` is driven by the ~1 Hz `update_fps`
+        // poll (embedded libobs exposes no per-frame callback), so it counts SECONDS,
+        // not frames. Dividing it by duration yielded a bogus ~1 fps even though the
+        // encoded mp4 is a real 30 fps — and `average_fps` (derived from
+        // obs_output_get_total_frames) proves it. A buyer / PRD-audit reading the old
+        // `fps_effective` would misclassify real 30 fps footage as a frozen 1 fps
+        // capture. Report the TRUE OBS frame rate, and derive a real frame count from
+        // it so the two fields agree with the mp4. Fall back to the heartbeat count
+        // only when OBS reported no fps at all.
+        let fps_effective = average_fps.filter(|_| duration > 0.0);
+        let frame_count = match average_fps {
+            Some(f) if duration > 0.0 => Some((f * duration).round() as u64),
+            _ => frame_count,
+        };
 
         // Wall-clock strings in RFC 3339 for human-friendly audit trails.
         let wall_clock_start = chrono::DateTime::<chrono::Utc>::from(start_time).to_rfc3339();
@@ -753,7 +1216,70 @@ impl LocalRecording {
         // Note: this runs via spawn_blocking inside write_atomic_async, so the
         // tokio reactor isn't pinned while the fsync stalls (fsync on a busy
         // NVMe can take tens of ms; on a networked drive, seconds).
-        let metadata_json = serde_json::to_string_pretty(&metadata)?;
+        //
+        // Two metadata fields can't live on the shared `output_types::Metadata`
+        // struct from here (it's owned by another module), so we serialize to a
+        // JSON object first and inject them as top-level keys:
+        //   1. `camera_intrinsics` — pinhole intrinsics derived from the encoded
+        //      resolution + MC's assumed default vertical FOV. Honestly tagged
+        //      `source: "assumed_mc_default"` so downstream never mistakes it
+        //      for a measured value.
+        //   2. timezone disambiguation — `wall_clock_start`/`wall_clock_end`
+        //      are UTC (+00:00) while the SESSION DIRECTORY name is LOCAL time
+        //      (`generate_session_dir_name` uses `Local::now()`). Emitting the
+        //      local UTC offset + an explicit `session_dir_timezone` label lets
+        //      a reader reconcile the two without guessing.
+        let mut metadata_value = serde_json::to_value(&metadata)?;
+        Self::inject_extra_metadata_fields(&mut metadata_value);
+
+        // SELF-DIAGNOSTIC (ISC-KS-VIS): measure the ACTUALLY-encoded mp4 and
+        // inject a `_video_actual` block + warn loudly on mismatch.
+        //
+        // WHY: every field above (`capture_resolution`, `frame_count`,
+        // `average_fps`) is sourced from OBS's CONFIGURED values — what we asked
+        // OBS to produce, not what the muxer actually wrote. Real sessions have
+        // shipped a metadata.json claiming 1920x1080 @ ~30fps while the decoded
+        // mp4 was 960x544 @ 24fps. This block measures the finished file (which
+        // was already fsync'd in `recording.rs` before we got here) so the
+        // session carries the measured TRUTH next to the claim. It is PURELY
+        // ADDITIVE and DIAGNOSTIC: it never touches capture/encode/muxer/fps/
+        // resolution, and a measurement failure simply omits the block (the
+        // recording is still finalized normally).
+        let claimed_fps = constants::FPS as f64;
+        Self::inject_video_actual(
+            &mut metadata_value,
+            &recording_location,
+            capture_resolution.0,
+            capture_resolution.1,
+            claimed_fps,
+        )
+        .await;
+
+        // Surface the encoder that ACTUALLY encoded this recording as a
+        // top-level convenience field so the session is self-describing for the
+        // buyer (PRD: "encoder actually used") without parsing the nested
+        // `recorder_extra` blob. The embedded OBS recorder already records the
+        // actually-constructed encoder id (including any runtime fallback) under
+        // `recorder_extra.encoder`; we promote it verbatim. This is purely
+        // additive and only set when genuinely known — we never fabricate it
+        // (the socket recorder returns no settings, so the field is simply
+        // absent there rather than guessed).
+        Self::inject_encoder_used(&mut metadata_value);
+
+        // Additive clock-anomaly diagnostic (see guard above). Only emitted when
+        // an anomaly was detected, so healthy recordings are unchanged.
+        if let Some(anomaly) = clock_anomaly {
+            if let Some(obj) = metadata_value.as_object_mut() {
+                match serde_json::to_value(&anomaly) {
+                    Ok(v) => {
+                        obj.insert("clock_anomaly".to_string(), v);
+                    }
+                    Err(e) => tracing::warn!("Failed to serialize clock_anomaly: {e}"),
+                }
+            }
+        }
+
+        let metadata_json = serde_json::to_string_pretty(&metadata_value)?;
         durable_write::write_atomic_async(&metadata_path, metadata_json.into_bytes()).await?;
 
         // Validate the recording immediately after stopping to create [`constants::filename::recording::INVALID`] file if needed
@@ -767,6 +1293,209 @@ impl LocalRecording {
         .ok();
 
         Ok(())
+    }
+
+    /// Inject metadata fields that can't be expressed on the shared
+    /// `output_types::Metadata` struct (owned by another module) directly into
+    /// the serialized JSON object as top-level keys.
+    ///
+    /// Adds:
+    ///   - `camera_intrinsics`: nested pinhole-intrinsics object derived from
+    ///     `constants::RECORDING_WIDTH`/`HEIGHT` and `MC_DEFAULT_VFOV_DEG`. Its
+    ///     `source` is `"assumed_mc_default"` — the FOV is assumed, not
+    ///     measured, and the field says so to keep the data honest.
+    ///   - `timezone_utc_offset_seconds`: the machine's current local UTC
+    ///     offset in seconds (e.g. `-25200` for UTC-7). This is the offset that
+    ///     applies to the LOCAL-time session directory name; the `wall_clock_*`
+    ///     fields remain UTC. A reader adds this offset to the UTC wall-clock to
+    ///     recover the local time embedded in the directory name.
+    ///   - `session_dir_timezone`: `"local"`, stating explicitly that the
+    ///     `session_YYYYMMDD_HHMMSS_*` directory name is in local time, NOT UTC.
+    ///
+    /// If the serialized metadata is somehow not a JSON object (it always is —
+    /// `Metadata` is a struct), this is a no-op so we never panic on the
+    /// finalize path.
+    fn inject_extra_metadata_fields(metadata_value: &mut serde_json::Value) {
+        let Some(obj) = metadata_value.as_object_mut() else {
+            tracing::warn!("Metadata did not serialize to a JSON object; skipping extra fields");
+            return;
+        };
+
+        // Camera intrinsics from the encoded resolution + assumed MC FOV.
+        let intrinsics = CameraIntrinsics::from_resolution_and_vfov(
+            constants::RECORDING_WIDTH,
+            constants::RECORDING_HEIGHT,
+            constants::MC_DEFAULT_VFOV_DEG,
+            "assumed_mc_default",
+        );
+        match serde_json::to_value(intrinsics) {
+            Ok(v) => {
+                obj.insert("camera_intrinsics".to_string(), v);
+            }
+            Err(e) => {
+                // Shouldn't happen for a plain struct of f64/u32/&str, but stay
+                // non-fatal: a missing intrinsics block is better than failing
+                // to write metadata at all.
+                tracing::warn!("Failed to serialize camera_intrinsics: {e}");
+            }
+        }
+
+        // Timezone disambiguation. `Local::now().offset()` yields the machine's
+        // current `FixedOffset`; `local_minus_utc()` is the offset in seconds
+        // (local = utc + offset). Captured at finalize time — close enough to
+        // the recording window that DST transitions mid-session are a
+        // negligible edge case for this disambiguation aid.
+        let utc_offset_seconds = chrono::Local::now().offset().local_minus_utc();
+        obj.insert(
+            "timezone_utc_offset_seconds".to_string(),
+            serde_json::Value::from(utc_offset_seconds),
+        );
+        obj.insert(
+            "session_dir_timezone".to_string(),
+            serde_json::Value::from("local"),
+        );
+    }
+
+    /// Promote the encoder that ACTUALLY encoded this recording to a top-level
+    /// `encoder_used` string, copied verbatim from `recorder_extra.encoder` when
+    /// present.
+    ///
+    /// WHY a top-level mirror: the buyer PRD wants each session self-describing
+    /// ("encoder actually used") without reaching into the recorder-specific
+    /// `recorder_extra` blob, whose shape varies per backend. The embedded OBS
+    /// recorder writes the actually-constructed encoder id there (including any
+    /// runtime fallback to a different encoder), so this is the truthful value.
+    ///
+    /// HONESTY: we ONLY set the field when `recorder_extra.encoder` is a real
+    /// string. The socket recorder returns no settings (`recorder_extra` is
+    /// `null`), so the field is simply ABSENT for those sessions rather than a
+    /// fabricated guess — same data-integrity rule as `camera_intrinsics`'
+    /// `source` tag. Purely additive: never overwrites an existing key.
+    fn inject_encoder_used(metadata_value: &mut serde_json::Value) {
+        let Some(obj) = metadata_value.as_object_mut() else {
+            return;
+        };
+        if obj.contains_key("encoder_used") {
+            return;
+        }
+        if let Some(encoder) = obj
+            .get("recorder_extra")
+            .and_then(|extra| extra.get("encoder"))
+            .and_then(|enc| enc.as_str())
+            .map(str::to_owned)
+        {
+            obj.insert("encoder_used".to_string(), serde_json::Value::from(encoder));
+        }
+    }
+
+    /// Measure the encoded `recording.mp4` and inject a `_video_actual` block
+    /// describing the REAL file, warning loudly when it disagrees with the
+    /// claimed values.
+    ///
+    /// This is the cure for the recurring "metadata.json lies about the video"
+    /// class of bug (see `mp4_probe.rs` for the full rationale). It is purely
+    /// additive and read-only with respect to the recording: it measures the
+    /// already-finalized mp4 (resolution / frame_count / duration / fps) and
+    /// writes the measured truth into a NEW top-level key, leaving every claimed
+    /// field untouched.
+    ///
+    /// The `_video_actual` object matches `mp4_probe::VideoActual`:
+    /// `{ width, height, fps, frame_count, duration_s, source, matches_claim }`
+    /// where `source` is `"ffprobe"` or `"mp4_moov_parse"` and `matches_claim`
+    /// is true iff width/height match EXACTLY and fps is within ±1.0.
+    ///
+    /// Failure handling: if the mp4 is missing or unmeasurable we log at warn
+    /// and SKIP the block — diagnostics must never block finalizing a recording.
+    /// The measurement is blocking file I/O, so it runs on `spawn_blocking` to
+    /// keep the tokio reactor free (mirrors the fsync/validate calls in
+    /// `recording.rs`).
+    async fn inject_video_actual(
+        metadata_value: &mut serde_json::Value,
+        recording_location: &Path,
+        claimed_width: u32,
+        claimed_height: u32,
+        claimed_fps: f64,
+    ) {
+        let Some(obj) = metadata_value.as_object_mut() else {
+            return;
+        };
+
+        let mp4_path = recording_location.join(constants::filename::recording::VIDEO);
+        if !mp4_path.exists() {
+            // No mp4 to measure (rare encoder-failure path). The validator will
+            // flag the missing video; we simply emit no `_video_actual`.
+            tracing::warn!(
+                "Cannot self-measure encoded video: {} does not exist; \
+                 omitting _video_actual block",
+                mp4_path.display()
+            );
+            return;
+        }
+
+        let measured = tokio::task::spawn_blocking(move || {
+            crate::record::mp4_probe::measure_encoded_video(
+                &mp4_path,
+                claimed_width,
+                claimed_height,
+                claimed_fps,
+            )
+        })
+        .await;
+
+        let actual = match measured {
+            Ok(Ok(actual)) => actual,
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "Failed to self-measure encoded video, omitting _video_actual block: {e}"
+                );
+                return;
+            }
+            Err(join_err) => {
+                tracing::warn!(
+                    "Self-measure task panicked, omitting _video_actual block: {join_err}"
+                );
+                return;
+            }
+        };
+
+        if !actual.matches_claim {
+            // LOUD mismatch warning — the whole point of this instrumentation.
+            // A future debug log reads this line to know, definitively, that the
+            // metadata's claimed resolution/fps are NOT what was encoded.
+            tracing::warn!(
+                "ENCODED VIDEO MISMATCH: claimed {cw}x{ch}@{cfps:.1}, actual {aw}x{ah}@{afps:.1} \
+                 ({frames} frames) — metadata claimed values are NOT what was encoded \
+                 (measured via {source})",
+                cw = claimed_width,
+                ch = claimed_height,
+                cfps = claimed_fps,
+                aw = actual.width,
+                ah = actual.height,
+                afps = actual.fps,
+                frames = actual.frame_count,
+                source = actual.source.as_str(),
+            );
+        } else {
+            tracing::info!(
+                "Encoded video self-check OK: {w}x{h}@{fps:.2} ({frames} frames, {dur:.2}s) \
+                 matches claim (measured via {source})",
+                w = actual.width,
+                h = actual.height,
+                fps = actual.fps,
+                frames = actual.frame_count,
+                dur = actual.duration_s,
+                source = actual.source.as_str(),
+            );
+        }
+
+        match serde_json::to_value(&actual) {
+            Ok(v) => {
+                obj.insert("_video_actual".to_string(), v);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to serialize _video_actual: {e}");
+            }
+        }
     }
 }
 

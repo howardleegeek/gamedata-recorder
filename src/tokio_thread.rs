@@ -113,9 +113,40 @@ async fn main(
                 .config
                 .write_safe()
                 .unwrap_or_else(|e| e.into_inner());
-            if !encoders.contains(&config.preferences.encoder.encoder) {
-                tracing::warn!("Currently-set encoder is no longer available, resetting to x264");
-                config.preferences.encoder.encoder = constants::encoding::VideoEncoderType::X264;
+            // Reconcile the saved encoder against what OBS actually probed.
+            // Previously this collapsed straight to software x264 whenever the
+            // saved encoder was unavailable, which degraded e.g. a QSV-but-not-
+            // NVENC machine all the way to software and denied it the
+            // NVENC>AMF>QSV>x264 step-down. Use the same selector the embedded
+            // recorder uses at start_recording so startup and start agree.
+            let requested = config.preferences.encoder.encoder;
+            let best = crate::config::select_best_available_encoder(requested, &encoders);
+            if best != requested {
+                tracing::warn!(
+                    ?requested,
+                    selected = ?best,
+                    "Currently-set encoder is unavailable; stepping down to best available encoder"
+                );
+                config.preferences.encoder.encoder = best;
+            }
+
+            // v2.6.4 graceful degrade: if the FINAL chosen encoder is software
+            // x264 (no NVENC/AMF/QSV available on this machine), pin the x264
+            // preset to the fastest option so weak/iGPU CPUs aren't pegged.
+            // Native-resolution software H.264 at a slower preset was confirmed
+            // ~1 FPS + system-wide lag on an AMD Radeon 780M iGPU. The matching
+            // 720p output cap is applied in `obs_embedded_recorder::video_info`.
+            // Hardware-encoder machines never enter this branch and keep their
+            // user-selected preset and native resolution.
+            if config.preferences.encoder.encoder == constants::encoding::VideoEncoderType::X264 {
+                let fastest = constants::encoding::X264_PRESETS[0];
+                if config.preferences.encoder.x264.preset != fastest {
+                    tracing::warn!(
+                        previous = %config.preferences.encoder.x264.preset,
+                        "Software x264 encoder in use; forcing '{fastest}' preset to protect weak/iGPU CPU"
+                    );
+                    config.preferences.encoder.x264.preset = fastest.to_string();
+                }
             }
         }
 
@@ -200,6 +231,7 @@ async fn main(
         app_state: app_state.clone(),
         cue_cache: HashMap::new(),
         last_active: Instant::now(),
+        has_seen_any_input: false,
         actively_recording_window: None,
         last_auto_record_attempt: None,
         last_hotkey_transition_instant: None,
@@ -912,6 +944,10 @@ async fn main(
                     }
                 }
 
+                // Poison-tolerant writes: this is the recording-pipeline tick. A
+                // panic here (poisoned RwLock) would kill the whole thread and
+                // bypass the shutdown `recorder.stop()` below, leaving the mp4
+                // unflushed. Recover the guard instead of cascading-panicking.
                 if let Some(ref fg) = foregrounded
                     && fg.is_recordable()
                     && fg.exe_name.is_some()
@@ -1187,6 +1223,45 @@ fn enable_window_capture_for_game(app_state: &AppState, game_exe: &str) -> Resul
     Ok(())
 }
 
+/// Force monitor capture for a game and persist the choice. Used by the
+/// frozen-capture watchdog when a WGC capture comes back black/stuck
+/// (see `State::tick`'s frozen-capture branch).
+///
+/// Unlike the (now no-op) `enable_window_capture_for_game`, this sets
+/// `capture_mode = CaptureMode::Monitor` explicitly. That's the only
+/// resolution that yields `EffectiveCaptureMode::Monitor`
+/// (`use_window_capture` alone still resolves to WGC under `Auto`), and
+/// monitor capture "guarantees visible content" — it composites whatever
+/// is on the display regardless of the game's render API, so it rescues an
+/// OpenGL surface that WGC couldn't grab. The preference is saved so
+/// subsequent recordings of the same game skip the broken WGC attempt.
+fn enable_monitor_capture_for_game(app_state: &AppState, game_exe: &str) -> Result<()> {
+    let exe_without_ext = std::path::Path::new(game_exe)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| game_exe.to_string())
+        .to_lowercase();
+
+    let mut config = app_state.config.write().unwrap();
+    let game_config = config
+        .preferences
+        .games
+        .entry(exe_without_ext.clone())
+        .or_default();
+    game_config.capture_mode = crate::config::CaptureMode::Monitor;
+
+    if let Err(e) = config.save() {
+        tracing::error!(
+            e = ?e,
+            game = exe_without_ext,
+            "Failed to persist monitor-capture fallback preference; the \
+             in-memory switch still takes effect for this session"
+        );
+    }
+
+    Ok(())
+}
+
 /// This then indicates that we should move all the variables into RecordingState, but thats not possible with enums we would
 /// have to split it into a struct and the enum portion. This seems the cleanest possible, and we would have
 /// on_input/tick() as non-arg accepting fns (or like maybe 1 arg for the tracing str reason, something consistent),
@@ -1223,6 +1298,12 @@ struct State {
     app_state: Arc<AppState>,
     cue_cache: HashMap<String, Vec<u8>>,
     last_active: Instant,
+    /// Whether any input event has ever been observed since startup. On Win11
+    /// 26200 the RawInput keyboard/mouse capture can fail to deliver any events,
+    /// so `last_active` never advances and the AFK idle-stop would fire on an
+    /// actively-playing user, killing real recordings. We only honor the
+    /// idle-stop once we have proof input capture works (at least one event).
+    has_seen_any_input: bool,
     actively_recording_window: Option<HWND>,
     /// Cooldown for auto-record: prevents rapid start/stop churn on unhookable games
     last_auto_record_attempt: Option<Instant>,
@@ -1278,12 +1359,18 @@ struct StabilityTracker {
 }
 
 /// Minimum window client-rect dimensions (in physical pixels) we require
-/// before auto-record will fire. Corresponds to standard 720p — anything
-/// smaller is almost certainly a transient boot/loading window.
+/// before auto-record will fire. Lowered 1280x720 -> 800x450 in v2.6.2:
+/// Minecraft Java opens *windowed* at its 854x480 default (options.txt
+/// `overrideWidth/Height=0`, `fullscreen:false`), which the old 720p floor
+/// silently rejected — so on a windowed-MC tester rig the stability gate
+/// never fired and nothing recorded, even with a correctly-hooked window.
+/// 800x450 (16:9, 450p) accepts default windowed MC while still rejecting
+/// transient sub-VGA boot/loading windows. OBS scales the captured surface
+/// to the 1080p output canvas regardless, so output resolution is unchanged.
 #[cfg(windows)]
-const AUTO_RECORD_MIN_WIDTH: u32 = 1280;
+const AUTO_RECORD_MIN_WIDTH: u32 = 800;
 #[cfg(windows)]
-const AUTO_RECORD_MIN_HEIGHT: u32 = 720;
+const AUTO_RECORD_MIN_HEIGHT: u32 = 450;
 /// Minimum time the window must stay at or above the min dimensions before
 /// we commit to recording. Tuned against CS2's observed ~5-8s launch window
 /// inflation period; 10s gives headroom without feeling sluggish.
@@ -1408,6 +1495,7 @@ impl State {
             tracing::error!(e=?e, "Failed to seen input");
         }
         self.last_active = Instant::now();
+        self.has_seen_any_input = true;
         if let Err(e) = match (&self.recording_state, e.key_press_keycode()) {
             (RecordingState::Idle, key) if key == start_key => {
                 // P0-1: Throttle hotkey transitions to prevent race conditions
@@ -1485,8 +1573,21 @@ impl State {
     async fn tick(&mut self) -> Option<(RecordingState, &'static str)> {
         if let RecordingState::Recording = self.recording_state {
             let Some(recording) = self.recorder.recording() else {
-                tracing::error!("Expected recording to exist in Recording state, but found None");
-                return None;
+                // Inconsistent state: the state machine believes we're Recording,
+                // but the recorder has no active recording. This can happen if a
+                // recording restart stopped the old recording but failed to start
+                // a new one. Rather than returning None (which would re-detect the
+                // same inconsistency every tick forever — perpetual error spam with
+                // no recovery), drive the machine back to Idle so the next tick can
+                // cleanly re-trigger auto-record.
+                tracing::error!(
+                    "Inconsistent state: Recording state with no active recording; \
+                     recovering to Idle"
+                );
+                return Some((
+                    RecordingState::Idle,
+                    "recover from inconsistent recording state",
+                ));
             };
 
             // Extract game name early to avoid borrow issues later
@@ -1507,7 +1608,7 @@ impl State {
                 );
                 self.crashed_game_info = Some((game_name.clone(), Instant::now()));
                 Some((RecordingState::Idle, "stop recording on game process exit"))
-            } else if self.last_active.elapsed() > MAX_IDLE_DURATION {
+            } else if self.last_active.elapsed() > MAX_IDLE_DURATION && self.has_seen_any_input {
                 // idle timeout
                 tracing::info!(
                     "No input detected for {} seconds, stopping recording",
@@ -1519,6 +1620,19 @@ impl State {
                     },
                     "stop recording on idle timeout",
                 ))
+            } else if self.last_active.elapsed() > MAX_IDLE_DURATION && !self.has_seen_any_input {
+                // Idle threshold crossed, but we have NEVER observed a single
+                // input event this run. That is the signature of blind input
+                // capture (RawInput failing on Win11 26200), not a genuinely
+                // idle user — `last_active` simply never advanced. Auto-stopping
+                // here killed real recordings of actively-playing users, so we
+                // keep recording and warn instead.
+                tracing::warn!(
+                    "Idle threshold ({} s) crossed but no input has ever been observed; \
+                     input capture is likely blind (RawInput failure) — NOT stopping recording",
+                    MAX_IDLE_DURATION.as_secs()
+                );
+                None
             } else if recording.elapsed() > MAX_FOOTAGE {
                 // restart recording once max duration met
                 tracing::info!(
@@ -1557,7 +1671,7 @@ impl State {
                     None // Keep recording — game is still alive
                 }
             } else if let Ok(current_resolution) = get_recording_base_resolution(recording.hwnd())
-                && current_resolution != recording.game_resolution()
+                && resolution_changed_significantly(recording.game_resolution(), current_resolution)
             {
                 // Check if the window resolution has changed and restart the recording
                 tracing::info!(
@@ -1653,16 +1767,15 @@ impl State {
                      Preference saved for future recordings."
                 );
 
-                // Stop current recording and restart with window capture
-                tracing::info!(
-                    game = game_exe,
-                    "Stopping current recording to restart with window capture mode"
-                );
-                if let Err(e) = self.recorder.stop(&self.input_capture).await {
-                    tracing::error!(e=?e, "Failed to stop recording before fallback");
-                }
-
-                // Restart recording with window capture enabled
+                // Restart the recording with window capture enabled. We DON'T
+                // stop here: returning Recording→Recording drives
+                // `handle_transition`, whose (Recording, Recording) arm already
+                // does a single clean stop (`stop_recording_with_notification`)
+                // followed by `start_recording_safely`. Stopping here too caused
+                // a DOUBLE STOP — the first left recording_state==Recording while
+                // recorder.recording()==None (inconsistent), and the second
+                // stop's None session_path made auto-upload fire a Manual rescan
+                // instead of a targeted one, risking a duplicate upload.
                 tracing::info!(
                     game = game_exe,
                     "Restarting recording with window capture mode"
@@ -1670,6 +1783,71 @@ impl State {
                 Some((
                     RecordingState::Recording,
                     "restart recording with window capture",
+                ))
+            } else if self.recorder.check_frozen_capture_timeout().await {
+                // FROZEN-CAPTURE FALLBACK (additive safety net for the WGC
+                // path). The recorder reports this at most once per
+                // recording when a WGC capture has delivered effectively
+                // zero real frames past FROZEN_CAPTURE_TIMEOUT — i.e. the
+                // capture is black/frozen (Minecraft's OpenGL surface is the
+                // canonical case). WGC stays the primary path for everyone;
+                // this only rescues the genuinely-frozen case by switching
+                // to monitor capture, which composites whatever is on the
+                // display regardless of render API.
+                //
+                // Structurally mirrors the hook-timeout fallback above:
+                // log → mutate config → stop → restart. The difference is we
+                // force Monitor (not the hook path), since the freeze is
+                // specific to WGC and monitor capture guarantees visible
+                // content.
+                let game_exe = match self.recorder.current_game_exe() {
+                    Some(exe) => exe,
+                    None => {
+                        tracing::error!(
+                            "No active recording when frozen-capture timeout detected for {}. \
+                             Will retry on next detection cycle.",
+                            game_name
+                        );
+                        return Some((
+                            RecordingState::Idle,
+                            "stop recording on frozen-capture timeout",
+                        ));
+                    }
+                };
+
+                tracing::warn!(
+                    game = game_exe,
+                    "WGC capture appears frozen/black (real FPS at or below {:.1} for over {}s) — \
+                     falling back to monitor capture, which guarantees visible content. \
+                     This commonly affects OpenGL games (e.g. Minecraft) where WGC can't grab \
+                     the swapchain surface.",
+                    constants::FROZEN_CAPTURE_FPS_THRESHOLD,
+                    constants::FROZEN_CAPTURE_TIMEOUT.as_secs(),
+                );
+
+                // Persist the switch to monitor capture for this game so the
+                // restart (and future recordings) skip the broken WGC path.
+                if let Err(e) = enable_monitor_capture_for_game(&self.app_state, &game_exe) {
+                    tracing::error!(e=?e, "Failed to update game config for monitor capture fallback");
+                }
+
+                // Restart with monitor capture. As with the hook-timeout
+                // fallback above, we DON'T stop here: returning
+                // Recording→Recording drives `handle_transition`, whose
+                // (Recording, Recording) arm does a single clean stop
+                // (`stop_recording_with_notification`, which cleanly flushes the
+                // mostly-black MP4 so far) followed by `start_recording_safely`.
+                // A direct stop here too was a DOUBLE STOP that left
+                // recording_state and recorder.recording() inconsistent and made
+                // the second stop's None session_path trigger a Manual rescan in
+                // auto-upload (duplicate-upload risk).
+                tracing::info!(
+                    game = game_exe,
+                    "Restarting recording with monitor capture mode"
+                );
+                Some((
+                    RecordingState::Recording,
+                    "restart recording with monitor capture",
                 ))
             } else {
                 None
@@ -1736,8 +1914,23 @@ impl State {
                 } else if let Some(ref game) = fg
                     && game.is_recordable()
                     && game.exe_name.is_some()
-                    && !self.app_state.is_out_of_date.load(Ordering::SeqCst)
                 {
+                    // NOTE: auto-record intentionally NOT gated on `is_out_of_date`.
+                    // We ship rapidly (multiple patch releases/day), so a hard
+                    // "newer release exists → refuse to record" gate makes every
+                    // installed client lock itself the moment we cut a new tag —
+                    // it ends up self-locking the very testers we need data from.
+                    // The manual-start (F9) path already records when out-of-date
+                    // (see above), so gating auto-record was also inconsistent.
+                    // The "New Release Available" banner still notifies the user;
+                    // we just no longer block capture on it.
+                    // Stability gate: require the game window to have settled
+                    // at >=1280x720 for ≥10s AND the process to have been
+                    // foregrounded for ≥20s before auto-firing. This prevents
+                    // pinning OBS base/output resolution to a transient boot
+                    // window (e.g. CS2's 600x286 loader). test_game is an
+                    // explicit carve-out so CI still triggers on its 720p
+                    // client rect.
                     // P0-3: Check if this is the same game that recently crashed.
                     // If so, bypass cooldown and reduce stability gates to enable instant resume.
                     let is_crashed_game_restart =
@@ -1962,6 +2155,16 @@ impl State {
                 RecordingState::Paused { pid }
             }
             (RecordingState::Paused { .. }, RecordingState::Idle) => {
+                // Defense-in-depth: entering Paused always stops the active
+                // recording, so by the time we transition Paused -> Idle the
+                // recorder must have no active recording. The invariant holds
+                // today but isn't otherwise enforced; assert it in debug builds
+                // so a future regression surfaces loudly rather than silently
+                // leaving a dangling recording.
+                debug_assert!(
+                    self.recorder.recording().is_none(),
+                    "Paused->Idle: recorder still has active recording"
+                );
                 let honk = self
                     .app_state
                     .config
@@ -2022,6 +2225,12 @@ impl State {
                 // Restart the currently active recording
                 // Here we intentionally set honk to false, we don't want audio cue to occur
                 // on an intended recording restart and confuse the user
+                //
+                // Poison-tolerant read: this runs on the recording-pipeline thread.
+                // If the unsupported_games RwLock is poisoned (a writer panicked
+                // while holding it), `.unwrap()` would panic and kill this thread,
+                // bypassing the shutdown `recorder.stop()` and leaving the mp4
+                // unflushed. Degrade gracefully: recover the last-known value.
                 let unsupported_games = self
                     .app_state
                     .unsupported_games
@@ -2035,14 +2244,32 @@ impl State {
                     &mut self.cue_cache,
                 )
                 .await?;
-                start_recording_safely(
+                // At this point the old recording has been stopped, so
+                // `recorder.recording()` is now None and the RecordingStatus has
+                // already been set to Stopped by `recorder.stop()`. If the restart
+                // fails, we MUST drive the state machine back to Idle before
+                // returning the error — otherwise `recording_state` stays
+                // `Recording` while there is no active recording, which wedges the
+                // machine: every subsequent `tick()` would re-detect the
+                // inconsistency and auto-record would never fire again until app
+                // restart. Setting `recording_state = Idle` here lets the next tick
+                // cleanly re-trigger auto-record.
+                if let Err(e) = start_recording_safely(
                     &mut self.recorder,
                     &self.input_capture,
                     &unsupported_games,
                     self.sink.as_ref().map(|s| (s, false, &*self.app_state)),
                     &mut self.cue_cache,
                 )
-                .await?;
+                .await
+                {
+                    tracing::error!(
+                        e = ?e,
+                        "Failed to restart recording; recovering to Idle so auto-record can re-fire"
+                    );
+                    self.recording_state = RecordingState::Idle;
+                    return Err(e);
+                }
                 self.last_active = Instant::now();
                 // Auto-cap timer: a Recording -> Recording restart
                 // produces a new clip, so the cap window resets. The
@@ -2631,6 +2858,16 @@ fn wait_for_ctrl_c() -> oneshot::Receiver<()> {
     ctrl_c_rx
 }
 
+/// A window's client area is typically ~71px shorter than the monitor-native
+/// base the recorder captures at (title bar / taskbar). That is NOT a real
+/// resolution change; restarting on it caused an infinite restart storm that
+/// produced only empty 0.2s clips. Only a genuine resize restarts.
+const RESOLUTION_CHANGE_TOLERANCE_PX: u32 = 96;
+fn resolution_changed_significantly(old: (u32, u32), new: (u32, u32)) -> bool {
+    old.0.abs_diff(new.0) > RESOLUTION_CHANGE_TOLERANCE_PX
+        || old.1.abs_diff(new.1) > RESOLUTION_CHANGE_TOLERANCE_PX
+}
+
 fn is_window_focused(hwnd: HWND) -> bool {
     unsafe { GetForegroundWindow() == hwnd }
 }
@@ -2651,11 +2888,23 @@ fn get_foregrounded_game(
     let unsupported_reason =
         if !ci && let Some(unsupported) = unsupported_games.get(&exe_without_ext) {
             Some(unsupported.reason.to_string())
-        } else if !ci && !recorder.is_window_capturable(hwnd) {
+        } else if !ci
+            && !matches!(exe_without_ext.as_str(), "javaw" | "minecraft")
+            && !recorder.is_window_capturable(hwnd)
+        {
             // CI mode skips this check: monitor-capture mode (the v2.5.8 default)
             // doesn't actually need a libobs-recognised "game window" — it grabs
             // the whole display — so the heuristic is overly strict for the
             // synthetic test_game window.
+            //
+            // Minecraft (javaw/minecraft) is exempted for the same reason: we
+            // ship it bundled with `capture_mode = Monitor` (DXGI desktop
+            // duplication), which grabs the whole display and never needs a
+            // libobs-recognised game window. Without this exemption v2.6.11
+            // wrongly flagged MC's GLFW/OpenGL window
+            // "unsupported: Recorder can't capture" and refused to auto-record
+            // it on real hardware — a regression vs the v2.5.8 Monitor path
+            // that the previously-shipped build used successfully.
             Some(
                 "Recorder cannot capture this window. Try running GameData Recorder in admin mode."
                     .to_string(),

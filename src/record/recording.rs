@@ -24,6 +24,38 @@ use crate::{
 use super::fps_logger::FpsLogger;
 use super::local_recording::LocalRecording;
 
+/// Upper bound on how many bytes of the MC mod's `game_state.jsonl` we will
+/// pull into memory during `stop()`.
+///
+/// The Oyster Fabric mod APPENDS to that file for the WHOLE Minecraft session
+/// (from world-join, not record-start), so a multi-hour session can grow it to
+/// hundreds of MB. Reading the whole thing with `tokio::fs::read` during the
+/// critical stop window — while OBS is still flushing/encoding — risks OOM or a
+/// multi-second stall on a low-RAM machine. Above this cap we do a bounded TAIL
+/// read instead: the server pipeline only needs the rows whose `timestamp_ms`
+/// fall inside this recording's window, and those are at the END of the file,
+/// so dropping the head of a giant file is acceptable (we LOG a warn so it's
+/// honest). 50 MiB of JSONL pose rows is far more than any single recording's
+/// window needs while staying trivially safe to hold in RAM.
+const MAX_GAME_STATE_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Slack added to each end of the recording's wall-clock window when trimming
+/// the MC mod's `game_state.jsonl` to align with the mp4 (ISC-DATA-GS-ALIGN).
+///
+/// The mod's per-tick `timestamp_ms` and the recorder's `start_time` are both
+/// Unix-epoch milliseconds (UTC), but they are sampled by two different
+/// processes/clocks with slightly different latencies: the mod stamps a row when
+/// the tick is simulated, while `start_time`/stop are taken around the OBS
+/// start/stop calls. A pose row that logically belongs to the first or last
+/// frame can therefore land a few hundred ms outside the raw `[start, stop]`
+/// bracket. We widen the window by this margin on BOTH ends so those boundary
+/// rows survive — over-inclusion of <=1s of pose context is harmless to the
+/// buyer (the server can still tighten), whereas dropping the row aligned to the
+/// first/last video frame is not. Kept small so rows from a *previous* MC launch
+/// (potentially seconds-to-hours earlier in the same cumulative file) are still
+/// excluded.
+const GAME_STATE_WINDOW_MARGIN_MS: u64 = 1_000;
+
 /// Parameters for starting a recording
 pub(crate) struct RecordingParams {
     pub recording_location: PathBuf,
@@ -307,8 +339,203 @@ impl Recording {
             Some(avg) => avg + (fps - avg) / self.fps_sample_count as f64,
             None => fps,
         });
-        // Feed frame timing data to the per-second FPS logger
-        self.fps_logger.on_frame();
+        // Feed the REAL measured delivered fps (from obs_output_get_total_frames
+        // deltas) to the per-second FPS logger. Previously called the zero-arg
+        // on_frame(), which made the logger derive "fps" from poll cadence and
+        // emit the misleading constant "fps": 2; pass the genuine rate instead.
+        self.fps_logger.on_frame_fps(fps);
+    }
+
+    /// Trim a buffer of COMPLETE `game_state.jsonl` lines down to only the rows
+    /// whose `timestamp_ms` falls inside this recording's wall-clock window
+    /// `[start_ms - margin, stop_ms + margin]` (ISC-DATA-GS-ALIGN / ISC-ACC-ALIGN).
+    ///
+    /// WHY: the Oyster Fabric mod APPENDS to a single cumulative
+    /// `~/Documents/OysterClips/active_session/game_state.jsonl` for the whole
+    /// time Minecraft is running — across MULTIPLE record start/stop cycles and
+    /// even multiple world joins. Shipping that whole file means the session's
+    /// `game_state.jsonl` contains pose rows from OUTSIDE this mp4's time window,
+    /// so the pose track no longer lines up with the video the buyer trains on.
+    /// We keep only the rows that overlap the video.
+    ///
+    /// TIME BASIS: the mod stamps each row with `timestamp_ms` = Unix epoch
+    /// milliseconds (UTC). `start_ms`/`stop_ms` are derived from the recorder's
+    /// `SystemTime` start/stop via `duration_since(UNIX_EPOCH)`, which is the
+    /// SAME Unix-epoch-UTC basis (`SystemTime` is clock-absolute, not local), and
+    /// the SAME `start_time` that `local_recording.rs` turns into the UTC
+    /// `wall_clock_start` field. So the comparison is apples-to-apples — no
+    /// timezone conversion is applied or needed on either side.
+    ///
+    /// PARSING: cheap — we deserialize each line into a one-field struct
+    /// (`{ timestamp_ms }`) via `serde_json::from_slice`, reusing the
+    /// already-present `serde_json` dep (no new dependency, no full-document
+    /// parse of the pose payload).
+    ///
+    /// FAIL-SOFT ROW HANDLING: a line we can't parse, or that is missing
+    /// `timestamp_ms`, is KEPT (not dropped). Over-inclusion of an unparseable
+    /// row is strictly safer for the buyer than silently discarding pose data
+    /// because of a schema tweak; the server can still re-trim. Returns the
+    /// filtered bytes (newline-terminated, ready to write as-is).
+    fn window_game_state_by_timestamp(complete: &[u8], start_ms: u64, stop_ms: u64) -> Vec<u8> {
+        /// Minimal projection of a mod row: we only need the timestamp to decide
+        /// inclusion. `serde_json` ignores all other fields by default, so this
+        /// stays cheap regardless of how wide the pose payload is.
+        #[derive(serde::Deserialize)]
+        struct TsOnly {
+            timestamp_ms: Option<u64>,
+        }
+
+        // Widen the window by the boundary margin on both ends. saturating_*
+        // keeps it panic-free at the u64 extremes (start near 0 / stop near MAX).
+        let lo = start_ms.saturating_sub(GAME_STATE_WINDOW_MARGIN_MS);
+        let hi = stop_ms.saturating_add(GAME_STATE_WINDOW_MARGIN_MS);
+
+        let mut out = Vec::with_capacity(complete.len());
+        let mut total = 0usize;
+        let mut kept = 0usize;
+        let mut unparsed_kept = 0usize;
+
+        // Split on '\n'. `complete` ends in '\n' (caller trimmed to whole lines),
+        // so the final split chunk is empty and skipped by the is_empty guard.
+        for line in complete.split(|&b| b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            total += 1;
+            let keep = match serde_json::from_slice::<TsOnly>(line) {
+                Ok(TsOnly {
+                    timestamp_ms: Some(ts),
+                }) => ts >= lo && ts <= hi,
+                // Parsed but no timestamp_ms, OR failed to parse: keep it
+                // (fail-soft — never silently drop pose rows on a schema change).
+                _ => {
+                    unparsed_kept += 1;
+                    true
+                }
+            };
+            if keep {
+                out.extend_from_slice(line);
+                out.push(b'\n');
+                kept += 1;
+            }
+        }
+
+        tracing::info!(
+            "Windowed game_state.jsonl to recording span [{}, {}] ms (+/-{}ms margin): \
+             kept {}/{} rows ({} kept without a parseable timestamp_ms)",
+            lo,
+            hi,
+            GAME_STATE_WINDOW_MARGIN_MS,
+            kept,
+            total,
+            unparsed_kept
+        );
+        out
+    }
+
+    /// Bounded TAIL read of a too-large `game_state.jsonl`, returning only
+    /// COMPLETE JSONL lines that fall within the last `MAX_GAME_STATE_BYTES`.
+    ///
+    /// Invoked only when the file is already known to be larger than the cap
+    /// (caller stat's it first and passes `file_len`). The tail window starts at
+    /// `file_len - MAX_GAME_STATE_BYTES`, which almost certainly lands in the
+    /// MIDDLE of a line, so after reading we:
+    ///   1. Drop everything up to AND INCLUDING the first `\n` (the partial head
+    ///      line we sliced into), and
+    ///   2. Drop everything after the last `\n` (the partial trailing line the
+    ///      mod may be mid-append on).
+    /// What's left is a run of whole lines. If the window contains zero or one
+    /// `\n` (degenerate — e.g. an absurdly long single line), there are no two
+    /// newlines to bracket a complete line, so we return an empty buffer rather
+    /// than a partial record.
+    ///
+    /// We LOG a warn that the head was dropped so the lossy collection is
+    /// honest in the field. Every failure path returns `None` (warn + continue);
+    /// this can never fail the recording, and contains no unwrap/panic.
+    async fn read_game_state_tail(path: &std::path::Path, file_len: u64) -> Option<Vec<u8>> {
+        use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+
+        // Safe because the caller only calls us when file_len > the cap, so the
+        // subtraction can't underflow; saturating_sub keeps it panic-free even
+        // if that contract ever changes (a 0 offset just reads the whole file,
+        // which the trimming below still handles correctly).
+        let tail_len = MAX_GAME_STATE_BYTES;
+        let start = file_len.saturating_sub(tail_len);
+
+        let mut file = match tokio::fs::File::open(path).await {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to open large MC mod game_state.jsonl for tail read \
+                     (non-fatal): {e}"
+                );
+                return None;
+            }
+        };
+        if let Err(e) = file.seek(std::io::SeekFrom::Start(start)).await {
+            tracing::warn!(
+                "Failed to seek into large MC mod game_state.jsonl for tail read \
+                 (non-fatal): {e}"
+            );
+            return None;
+        }
+
+        // Read the tail window. The file may have grown between stat and read
+        // (the mod is still appending), so cap the buffer at the window size we
+        // intended and read until EOF or full — extra appended bytes past the
+        // window are simply not read this pass, which is fine.
+        let mut buf = Vec::with_capacity(tail_len as usize);
+        let mut limited = (&mut file).take(tail_len);
+        if let Err(e) = limited.read_to_end(&mut buf).await {
+            tracing::warn!(
+                "Failed to read tail of large MC mod game_state.jsonl \
+                 (non-fatal): {e}"
+            );
+            return None;
+        }
+
+        // Drop the partial HEAD line: everything up to and including the first
+        // newline (our seek almost certainly split a line). If there is no
+        // newline at all, the whole window is one partial line -> nothing
+        // complete to keep.
+        let after_head = match buf.iter().position(|&b| b == b'\n') {
+            Some(idx) => idx + 1,
+            None => {
+                tracing::warn!(
+                    "Tail window of MC mod game_state.jsonl had no newline; \
+                     collecting empty game_state (file dominated by one oversized line)"
+                );
+                return Some(Vec::new());
+            }
+        };
+
+        // Drop the partial TRAILING line: everything after the last newline.
+        // Search only within the post-head region so we never keep the head.
+        let tail_region = &buf[after_head..];
+        let complete_end = match tail_region.iter().rposition(|&b| b == b'\n') {
+            Some(idx) => idx + 1, // relative to tail_region start
+            None => {
+                // Only the head line's newline existed; no further complete
+                // line in the window.
+                tracing::warn!(
+                    "Tail window of MC mod game_state.jsonl held no complete line after \
+                     dropping the partial head; collecting empty game_state"
+                );
+                return Some(Vec::new());
+            }
+        };
+
+        let complete = tail_region[..complete_end].to_vec();
+        tracing::warn!(
+            "MC mod game_state.jsonl is {} bytes (> {} cap); collected only the trailing \
+             {} bytes of complete lines and DROPPED the head. Server trims by timestamp_ms \
+             so this is expected for very long sessions, but the early part of game_state \
+             is not in this session.",
+            file_len,
+            MAX_GAME_STATE_BYTES,
+            complete.len()
+        );
+        Some(complete)
     }
 
     pub(crate) async fn stop(
@@ -320,6 +547,19 @@ impl Recording {
         let window_name = self.get_window_name();
         let mut result = recorder.stop_recording().await;
 
+        // Snapshot the dropped-event count BEFORE consuming the writer. The
+        // writer's `stop()` takes `self` by value, so once it errors we can no
+        // longer read its counter — but `input_stream` (not consumed by stop)
+        // shares the SAME `Arc<AtomicU64>` (see InputEventStream::clone_shared),
+        // so this snapshot reflects the writer's real accumulated drop count.
+        // Used as the fallback below so a stop error doesn't zero out the count
+        // that feeds the INVALID-reason diagnostics in metadata.
+        let dropped_snapshot = self
+            .input_stream
+            .dropped_counter()
+            .map(|c| c.get())
+            .unwrap_or(0);
+
         // Don't propagate input_writer errors — treat like recorder errors
         // (write INVALID marker instead of returning Err which skips metadata)
         let dropped_input_events = match self.input_writer.stop(input_capture).await {
@@ -329,7 +569,10 @@ impl Recording {
                 if result.is_ok() {
                     result = Err(e);
                 }
-                0 // Default to 0 if error occurred
+                // The consuming `stop()` failed, so its return count is gone;
+                // fall back to the pre-stop snapshot (same shared counter) so we
+                // preserve the real drop count for diagnostics instead of 0.
+                dropped_snapshot
             }
         };
 
@@ -356,6 +599,185 @@ impl Recording {
                 None
             }
         };
+
+        // Collect the MC mod's game_state.jsonl into this session (ISC-DATA-GS).
+        //
+        // MUST run BEFORE the validity checks + INVALID early-return below.
+        // Previously this lived after that `return Ok(())`, so any recording that
+        // got invalidated (low FPS, dropped-input threshold, encoder error) never
+        // collected game_state — which is why only 1 of 77 real recordings had a
+        // co-located game_state.jsonl. The buyer needs the pose ground-truth track
+        // for EVERY stopped recording, valid or not, so we collect unconditionally
+        // here while still being fully fail-soft (warn + continue, never panic,
+        // never fail the stop path).
+        //
+        // The Oyster Fabric mod (world.oyster.recorder.OysterRecorderMod) streams
+        // per-tick player pose/orientation/velocity/state to a FIXED legacy path it
+        // hard-codes in SessionDir.java:
+        //     ~/Documents/OysterClips/active_session/game_state.jsonl
+        // That convention predates the Rust recorder (it was the old Python
+        // OysterRecorder.exe's session dir), so the data is produced correctly but
+        // never lands in THIS recorder's session dir. Copy it in now so game_state
+        // ships with the rest of the session. Best-effort: the mod writes the whole
+        // MC session (from world-join, not record-start), so AFTER reading the
+        // file we TIME-ALIGN it to this recording's
+        // [start_time - margin, now + margin] window by each row's `timestamp_ms`
+        // (see window_game_state_by_timestamp) — the shipped game_state lines up
+        // with the mp4 instead of deferring that trim to the server. Absence is
+        // non-fatal (mod off / not installed).
+        if let Some(home) = dirs::home_dir() {
+            let mod_game_state = home
+                .join("Documents")
+                .join("OysterClips")
+                .join("active_session")
+                .join("game_state.jsonl");
+            if mod_game_state.exists() {
+                let dest = self
+                    .recording_location
+                    .join(constants::filename::recording::GAME_STATE);
+                // The Fabric mod APPENDS to this file concurrently, so a plain
+                // `tokio::fs::copy` can capture a partial final JSONL line (a
+                // torn read between the mod's `write` and its newline) or hit
+                // ERROR_SHARING_VIOLATION mid-flight. Instead we read the bytes
+                // and trim to whole lines before the atomic write.
+                //
+                // But the file can be hundreds of MB for a multi-hour MC session
+                // (the mod appends from world-join, not record-start), and a full
+                // `tokio::fs::read` would pull all of that into RAM during the
+                // critical stop window — alongside OBS encoding — risking OOM /
+                // a multi-second stall on a low-RAM machine. So: stat the file
+                // first, and only above MAX_GAME_STATE_BYTES fall back to a
+                // BOUNDED TAIL read (the server trims by `timestamp_ms` and only
+                // needs the tail, so dropping the head of a giant file is
+                // acceptable — we warn so it's honest). Under the cap we keep the
+                // existing full-read + trailing-trim path. Every error path here
+                // stays non-fatal (warn + continue); this step must NEVER fail
+                // the recording, and there is no unwrap/panic.
+                let collected = match tokio::fs::metadata(&mod_game_state).await {
+                    Ok(meta) if meta.len() > MAX_GAME_STATE_BYTES => {
+                        Self::read_game_state_tail(&mod_game_state, meta.len()).await
+                    }
+                    Ok(_) => {
+                        // Under the cap: read the whole file and drop only the
+                        // (possibly torn) trailing partial line.
+                        match tokio::fs::read(&mod_game_state).await {
+                            Ok(bytes) => {
+                                // Keep only up to and including the last newline
+                                // so a half-written final line is discarded. With
+                                // no newline at all the file holds no complete
+                                // line yet, so we collect an empty file rather
+                                // than a partial record.
+                                let complete_len = match bytes.iter().rposition(|&b| b == b'\n') {
+                                    Some(idx) => idx + 1,
+                                    None => 0,
+                                };
+                                let dropped = bytes.len() - complete_len;
+                                if dropped > 0 {
+                                    tracing::debug!(
+                                        "Dropping {dropped} trailing byte(s) of partial final \
+                                         line from game_state.jsonl before collecting \
+                                         (concurrent mod append)"
+                                    );
+                                }
+                                Some(bytes[..complete_len].to_vec())
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to read MC mod game_state.jsonl for collection \
+                                     (non-fatal): {e}"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to stat MC mod game_state.jsonl for collection \
+                             (non-fatal): {e}"
+                        );
+                        None
+                    }
+                };
+
+                if let Some(complete) = collected {
+                    // Time-align the collected rows to THIS recording's mp4 window
+                    // before writing (ISC-ACC-ALIGN). The mod's file is cumulative
+                    // across MC launches, so without this the shipped game_state
+                    // includes pose rows from outside the video.
+                    //
+                    // Window bounds are in Unix-epoch MILLISECONDS (UTC) — the
+                    // same basis as the mod's `timestamp_ms`. `self.start_time`
+                    // is the recorder's SystemTime at record start (the same value
+                    // local_recording.rs renders as the UTC `wall_clock_start`);
+                    // `now` is SystemTime at collection (≈ mp4 stop). Using epoch
+                    // ms on both sides means no timezone conversion is involved.
+                    //
+                    // FAIL-SOFT (guards a known past bug where a start timestamp
+                    // was a FUTURE / timezone-shifted value, e.g. recovery
+                    // session 100703 SS5): if either bound can't be expressed in
+                    // epoch ms, if start > stop, or if start is implausibly in the
+                    // future relative to stop, we SKIP windowing and ship the full
+                    // collected file. Over-inclusion is acceptable (server still
+                    // trims); dropping the whole pose track is not.
+                    let now = SystemTime::now();
+                    let start_ms = self
+                        .start_time
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_millis() as u64);
+                    let stop_ms = now
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_millis() as u64);
+
+                    let windowed = match (start_ms, stop_ms) {
+                        (Some(s), Some(e)) if s <= e => {
+                            Self::window_game_state_by_timestamp(&complete, s, e)
+                        }
+                        (Some(s), Some(e)) => {
+                            tracing::warn!(
+                                "game_state windowing skipped: recording start {}ms is AFTER \
+                                 stop {}ms (clock skew / future-dated start_time bug). \
+                                 Shipping full unwindowed game_state — server will trim.",
+                                s,
+                                e
+                            );
+                            complete
+                        }
+                        _ => {
+                            tracing::warn!(
+                                "game_state windowing skipped: start/stop time not \
+                                 representable as Unix epoch ms. Shipping full unwindowed \
+                                 game_state — server will trim."
+                            );
+                            complete
+                        }
+                    };
+
+                    let n = windowed.len();
+                    // Atomic write (write-tmp → fsync → rename), same crash-safe
+                    // pattern as the INVALID marker above. Errors are logged and
+                    // swallowed — collecting game_state must never fail the recording.
+                    match durable_write::write_atomic_async(&dest, windowed).await {
+                        Ok(()) => tracing::info!(
+                            "Collected MC mod game_state.jsonl ({n} complete bytes) into \
+                             session {}",
+                            self.recording_location.display()
+                        ),
+                        Err(e) => tracing::warn!(
+                            "Failed to write collected game_state.jsonl into session \
+                             (non-fatal): {e}"
+                        ),
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "MC mod game_state.jsonl not found at {} — session will lack game_state \
+                     (mod not running, or wrote elsewhere)",
+                    mod_game_state.display()
+                );
+            }
+        }
 
         // action_camera.json — additive sink for the buyer plugin's wire
         // contract. Reads inputs.jsonl + frames.jsonl back from disk (both
@@ -556,25 +978,61 @@ pub fn get_recording_base_resolution(hwnd: HWND) -> Result<(u32, u32)> {
     }
 }
 
-/// Physical-pixel resolution of the monitor under `hwnd`, falling back to
-/// the primary monitor when `MonitorFromWindow` fails. Used by the
-/// game-capture path (CaptureMode::GameHook) where the tiny boot-window
-/// client rect would be the wrong thing to pin OBS base resolution to —
-/// we want the native monitor resolution so the hook draws into a
-/// correctly-sized surface.
+/// True PHYSICAL-pixel resolution of the monitor under `hwnd`, falling back
+/// to the primary monitor when the window's monitor can't be resolved. Used
+/// by the game-capture path (CaptureMode::GameHook, e.g. Minecraft) where the
+/// tiny boot-window client rect would be the wrong thing to pin OBS base
+/// resolution to — we want the native monitor resolution so the hook draws
+/// into a correctly-sized surface.
+///
+/// ── Why this queries the DEVICE MODE, not `GetMonitorInfoW.rcMonitor` ──────
+/// `rcMonitor` is expressed in the CALLER's coordinate space, so it is
+/// DPI-virtualized: on a HiDPI display (e.g. 200% scaling) a process that is
+/// not effectively per-monitor-DPI-aware *at the moment of the call* reads
+/// `rcMonitor` in LOGICAL pixels — half the physical resolution at 200%. That
+/// is the confirmed root cause of the v2.6.14 "960×544" defect: a 1920×1088
+/// physical panel at 200% scaling reported a 960×544 monitor rect, which we
+/// then pinned as the OBS base, so the game-capture hook composited (and the
+/// encoder honestly recorded) a half-resolution surface — NOT Minecraft
+/// rendering small. We declare PerMonitorV2 in `build.rs`, but relying on the
+/// manifest being effective at this exact call is fragile (load order, mixed
+/// awareness contexts across the egui/winit/glutin stack, a stale awareness on
+/// the calling thread). `rcMonitor` is simply the wrong API to derive an
+/// encoder resolution from.
+///
+/// `EnumDisplaySettingsW(ENUM_CURRENT_SETTINGS).dmPelsWidth/Height` returns
+/// the display adapter's CURRENT MODE straight from the driver. It is in REAL
+/// physical pixels and is **immune to the process's DPI-awareness state** —
+/// the same DPI-immune technique `hardware_specs::get_primary_monitor_resolution`
+/// already relies on. We use it here too so the game-capture base is always
+/// the true native resolution (1920×1080 stays 1920×1080 at any scaling),
+/// which is a correctness fix, not an upscale: the hook genuinely renders at
+/// the monitor's physical resolution.
+///
+/// Resolution order, each step degrading only on failure:
+///   1. Monitor under `hwnd` → its device name → `EnumDisplaySettingsW`
+///      (physical px, DPI-immune). The common, correct path.
+///   2. `rcMonitor` of that same monitor (DPI-fragile, but better than the
+///      primary monitor when the device-mode query fails on a multi-head rig).
+///   3. Primary-monitor physical resolution (also `EnumDisplaySettingsW`).
 #[cfg(target_os = "windows")]
 pub fn get_monitor_resolution_for_hwnd(hwnd: HWND) -> Result<(u32, u32)> {
-    use windows::Win32::{
-        Foundation::RECT,
-        Graphics::Gdi::{
-            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    use windows::{
+        Win32::{
+            Foundation::RECT,
+            Graphics::Gdi::{
+                DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW,
+                MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
+            },
         },
+        core::PCWSTR,
     };
 
-    // SAFETY: MonitorFromWindow + GetMonitorInfoW are pure read-only Win32
-    // queries. MONITOR_DEFAULTTONEAREST guarantees a non-null HMONITOR even
-    // when `hwnd` sits outside any display. We pass an owned MONITORINFO
-    // struct with `cbSize` set, as required by the documented contract.
+    // SAFETY: MonitorFromWindow + GetMonitorInfoW + EnumDisplaySettingsW are
+    // pure read-only Win32 queries. MONITOR_DEFAULTTONEAREST guarantees a
+    // non-null HMONITOR even when `hwnd` sits outside any display. We pass
+    // owned structs with their size fields set, as the documented contracts
+    // require, and read only scalar fields back out.
     unsafe {
         let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         if hmon.is_invalid() {
@@ -584,26 +1042,82 @@ pub fn get_monitor_resolution_for_hwnd(hwnd: HWND) -> Result<(u32, u32)> {
             return hardware_specs::get_primary_monitor_resolution()
                 .context("Failed to get primary monitor resolution");
         }
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            rcMonitor: RECT::default(),
-            rcWork: RECT::default(),
-            dwFlags: 0,
+
+        // Resolve the monitor's device name (e.g. "\\.\DISPLAY1") via the
+        // EX variant of MONITORINFO; the name keys the device-mode query.
+        let mut info_ex = MONITORINFOEXW {
+            monitorInfo: MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFOEXW>() as u32,
+                ..Default::default()
+            },
+            ..Default::default()
         };
-        GetMonitorInfoW(hmon, &mut info)
-            .ok()
-            .context("GetMonitorInfoW failed for window's monitor")?;
-        let w = (info.rcMonitor.right - info.rcMonitor.left) as u32;
-        let h = (info.rcMonitor.bottom - info.rcMonitor.top) as u32;
-        if w == 0 || h == 0 {
+        let got_info = GetMonitorInfoW(hmon, &mut info_ex as *mut _ as *mut MONITORINFO).as_bool();
+
+        if got_info {
+            // Step 1: physical pixels from the adapter's current display mode.
+            // DPI-immune — this is what fixes the HiDPI half-resolution bug.
+            let mut devmode = DEVMODEW {
+                dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+                ..Default::default()
+            };
+            if EnumDisplaySettingsW(
+                PCWSTR(info_ex.szDevice.as_ptr()),
+                ENUM_CURRENT_SETTINGS,
+                &mut devmode,
+            )
+            .as_bool()
+            {
+                let (w, h) = (devmode.dmPelsWidth, devmode.dmPelsHeight);
+                if w != 0 && h != 0 {
+                    tracing::info!(
+                        w,
+                        h,
+                        "Monitor resolution from device mode (physical pixels, DPI-immune)"
+                    );
+                    return Ok((w, h));
+                }
+                tracing::warn!(
+                    w,
+                    h,
+                    "EnumDisplaySettingsW returned a zero dimension; falling back to rcMonitor"
+                );
+            } else {
+                tracing::warn!(
+                    "EnumDisplaySettingsW failed for the window's monitor; falling back to rcMonitor"
+                );
+            }
+
+            // Step 2: rcMonitor of the same monitor. DPI-fragile (may be
+            // logical px under non-effective DPI awareness), but still more
+            // targeted than jumping to the primary monitor on a multi-head rig.
+            let RECT {
+                left,
+                top,
+                right,
+                bottom,
+            } = info_ex.monitorInfo.rcMonitor;
+            let w = (right - left) as u32;
+            let h = (bottom - top) as u32;
+            if w != 0 && h != 0 {
+                tracing::warn!(
+                    w,
+                    h,
+                    "Using rcMonitor for OBS base resolution (DPI-fragile fallback; \
+                     device-mode query was unavailable — a HiDPI display may yield a \
+                     downscaled value here)"
+                );
+                return Ok((w, h));
+            }
+            tracing::warn!(w, h, "rcMonitor was zero-sized, falling back to primary");
+        } else {
             tracing::warn!(
-                w,
-                h,
-                "GetMonitorInfoW returned zero-sized rect, falling back to primary"
+                "GetMonitorInfoW failed for the window's monitor, falling back to primary"
             );
-            return hardware_specs::get_primary_monitor_resolution()
-                .context("Failed to get primary monitor resolution");
         }
-        Ok((w, h))
+
+        // Step 3: primary monitor, physical pixels (also via EnumDisplaySettingsW).
+        hardware_specs::get_primary_monitor_resolution()
+            .context("Failed to get primary monitor resolution")
     }
 }

@@ -9,8 +9,8 @@
 //!     `IOCTL_STORAGE_QUERY_PROPERTY` and returns NVMe / SATA SSD / SATA HDD
 //!     / USB / Unknown.
 //!   - `gpu`: was `"Unknown"`/`"Unknown GPU"`; now comes from the DXGI
-//!     adapter list the caller already enumerates (same list the NVENC
-//!     detector in `config.rs::detect_nvidia_gpu` uses).
+//!     adapter list the caller already enumerates (same list the hardware
+//!     encoder detector in `config.rs::detect_gpu_vendor` uses).
 //!   - `cpu`, `ram_gb`, `os`: were pulled from `sysinfo` but dropped the
 //!     per-core and available-memory fields; now emits both with the new
 //!     optional `cpu_physical_cores` / `cpu_logical_cores` /
@@ -317,6 +317,32 @@ impl MetadataWriter {
             .await
             .map_err(|e| eyre!("Failed to write hardware metadata: {}", e))?;
 
+        // Buyer-contract artifact: emit systeminfo.json from the *same*
+        // populated `metadata` value so its gpu/cpu/ram_gb/os are byte-for-byte
+        // the values just written to hardware.json (no re-derivation, no
+        // drift). `build` is the recorder version. Written with the same
+        // atomic+fsync helper so a torn file can't leave the session half
+        // contracted. See SystemInfo / PRD `prd_test_systeminfo_required`.
+        self.write_system_info(&metadata).await?;
+
+        Ok(())
+    }
+
+    /// Write `metadata/systeminfo.json`.
+    ///
+    /// Flattened snapshot of the hardware values (gpu/cpu/ram_gb/os) plus the
+    /// recorder `build` version, required by the buyer PRD
+    /// (`prd_test_systeminfo_required`). Derived directly from the
+    /// caller's already-built `HardwareMetadata` so the two files never
+    /// disagree; this is purely additive and leaves hardware.json untouched.
+    async fn write_system_info(&self, hardware: &HardwareMetadata) -> Result<()> {
+        let info = SystemInfo::from_hardware(hardware);
+        let path = self.session_manager.systeminfo_path();
+        let json = serde_json::to_string_pretty(&info)?;
+        durable_write::write_atomic_async(&path, json.into_bytes())
+            .await
+            .map_err(|e| eyre!("Failed to write systeminfo metadata: {}", e))?;
+
         Ok(())
     }
 
@@ -371,7 +397,13 @@ impl MetadataWriter {
     async fn write_recorder_metadata(&self, settings: &EncoderSettings) -> Result<()> {
         let metadata = RecorderMetadata {
             recorder_version: env!("CARGO_PKG_VERSION").to_string(),
-            target_fps: 60,
+            // Data-honesty fix: was hardcoded `60`, but the recorder targets
+            // `constants::FPS` (30) — the same value OBS is configured with and
+            // that `MIN_AVERAGE_FPS` validates against. A hardcoded 60 claimed a
+            // frame rate the encoder never produces, poisoning downstream
+            // training metadata. Source the real target so this field can never
+            // drift from the actual encode config again.
+            target_fps: constants::FPS,
             video_codec: match settings.encoder {
                 VideoEncoderType::X264 => "h264".to_string(),
                 VideoEncoderType::NvEnc => "h264_nvenc".to_string(),
@@ -381,7 +413,12 @@ impl MetadataWriter {
                 VideoEncoderType::Qsv => "h264_qsv".to_string(),
                 VideoEncoderType::QsvHevc => "hevc_qsv".to_string(),
             },
-            video_bitrate_mbps: 10,
+            // Verified correct (NOT a lie): `constants::encoding::BITRATE` is
+            // 10_000 kbps == 10 Mbps, so the previously hardcoded `10` already
+            // matched reality. Derive it from the source constant (kbps -> Mbps)
+            // so it stays correct if the encode bitrate ever changes, instead of
+            // re-introducing a magic number a future reviewer would re-flag.
+            video_bitrate_mbps: (constants::encoding::BITRATE / 1000) as u32,
             capture_method: "game_capture".to_string(),
             record_audio: false,
             audio_bitrate: 128,

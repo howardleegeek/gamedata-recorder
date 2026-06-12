@@ -13,7 +13,8 @@ use windows::Win32::{
     Foundation::HWND,
     UI::WindowsAndMessaging::{
         FLASHW_STOP, FLASHWINFO, FlashWindowEx, GWL_EXSTYLE, GetWindowLongPtrW, SW_HIDE, SW_SHOWNA,
-        SetWindowLongPtrW, ShowWindow, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        SetWindowDisplayAffinity, SetWindowLongPtrW, ShowWindow, WDA_EXCLUDEFROMCAPTURE,
+        WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     },
 };
 
@@ -122,6 +123,17 @@ impl OverlayApp {
                 ex_style |= WS_EX_NOACTIVATE.0 as isize; // Don't steal focus
                 ex_style &= !(WS_EX_APPWINDOW.0 as isize); // Remove from Alt+Tab
                 SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style);
+
+                // video_no_ui (PRD): exclude this always-on-top status overlay from ALL
+                // screen capture. Game-capture (GameHook) and window-capture never see it
+                // (it's a separate window / the game's own surface), but the
+                // monitor-capture FALLBACK grabs the whole screen and WOULD composite the
+                // overlay into the recording — failing prd_test_video_no_ui. With
+                // WDA_EXCLUDEFROMCAPTURE, Windows keeps the overlay visible to the user but
+                // renders it absent from every capture API (OBS monitor capture / WGC).
+                // Requires Win10 2004+; best-effort (older OS simply isn't excluded, same
+                // as the prior behaviour), so the Result is intentionally ignored.
+                let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
 
                 let _ = ShowWindow(hwnd, SW_SHOWNA); // show the window for the new style to come into effect
             }
@@ -258,7 +270,7 @@ impl EguiOverlay for OverlayApp {
                     let color = Color32::WHITE;
                     let recording_text: WidgetText =
                         if self.app_state.is_out_of_date.load(Ordering::Relaxed) {
-                            RichText::new("Out of date; will not record. Please update!")
+                            RichText::new("Update available — still recording.")
                                 .font(font_id)
                                 .color(color)
                                 .into()

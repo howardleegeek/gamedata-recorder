@@ -106,6 +106,52 @@ pub struct HardwareMetadata {
     pub total_frames: Option<u64>,
 }
 
+/// System info for metadata/systeminfo.json.
+///
+/// Buyer-contract artifact (PRD `prd_test_systeminfo_required`): each session
+/// must contain a `systeminfo.json` whose top level has EXACTLY these five
+/// keys present — `gpu`, `cpu`, `ram_gb`, `os`, `build`. None are optional /
+/// skip-serialized: every key must always appear so the contract test passes
+/// on every session.
+///
+/// This is a flattened snapshot of the same hardware values written to
+/// `hardware.json` (see `HardwareMetadata`); `SystemInfo::from_hardware`
+/// copies the already-derived `gpu`/`cpu`/`ram_gb`/`os` fields verbatim so the
+/// two files can never disagree. `build` is the recorder version
+/// (`CARGO_PKG_VERSION`), mirroring `RecorderMetadata::recorder_version`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SystemInfo {
+    /// GPU model name. Verbatim copy of `HardwareMetadata::gpu` ("Unknown"
+    /// when DXGI enumeration failed — never empty/omitted).
+    pub gpu: String,
+    /// CPU brand string. Verbatim copy of `HardwareMetadata::cpu`.
+    pub cpu: String,
+    /// Total system RAM in GB. Same `u32` representation as
+    /// `HardwareMetadata::ram_gb` so both files report an identical number.
+    pub ram_gb: u32,
+    /// OS name + version. Verbatim copy of `HardwareMetadata::os`.
+    pub os: String,
+    /// Recorder build version (`CARGO_PKG_VERSION`), same source as
+    /// `RecorderMetadata::recorder_version`.
+    pub build: String,
+}
+
+impl SystemInfo {
+    /// Build a `SystemInfo` from an already-populated `HardwareMetadata`,
+    /// reusing its derived `gpu`/`cpu`/`ram_gb`/`os` values verbatim (no
+    /// re-derivation) so `systeminfo.json` always agrees with `hardware.json`.
+    /// `build` comes from the compiled-in crate version.
+    pub fn from_hardware(hw: &HardwareMetadata) -> Self {
+        Self {
+            gpu: hw.gpu.clone(),
+            cpu: hw.cpu.clone(),
+            ram_gb: hw.ram_gb,
+            os: hw.os.clone(),
+            build: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+}
+
 /// Graphics settings.
 ///
 /// Schema note (2026-04): `fov` changed from hardcoded `u32` (always `90`)

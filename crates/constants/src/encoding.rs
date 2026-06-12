@@ -77,7 +77,13 @@ pub const QSV_TARGET_USAGES: &[&str] = &[
 ];
 
 /// https://github.com/obsproject/obs-studio/blob/c025f210d36ada93c6b9ef2affd0f671b34c9775/plugins/obs-ffmpeg/texture-amf.cpp#L1276-L1284
-pub const AMF_PRESETS: &[&str] = &["quality", "balanced", "speed"];
+/// v2.6.4: default (index 0) changed "quality" -> "speed". On integrated GPUs
+/// (AMD Radeon 780M etc.) the encoder shares the iGPU + memory bandwidth with
+/// the game's own rendering AND the game-capture copy; the "quality" preset's
+/// extra encoder passes starve all three and cause whole-system stutter. "speed"
+/// is plenty for AI-world-model training video and frees the iGPU. Discrete GPUs
+/// (NVENC path) are unaffected — this list is AMF-only.
+pub const AMF_PRESETS: &[&str] = &["speed", "balanced", "quality"];
 
 /// ffmpeg-nvenc: https://github.com/obsproject/obs-studio/blob/0b1229632063a13dfd26cf1cd9dd43431d8c68f6/plugins/obs-ffmpeg/obs-ffmpeg-nvenc.c#L504
 /// obs-nvenc: https://github.com/obsproject/obs-studio/blob/0b1229632063a13dfd26cf1cd9dd43431d8c68f6/plugins/obs-nvenc/nvenc-properties.c#L159
@@ -96,13 +102,19 @@ pub const BITRATE: i64 = 10_000;
 /// Rate control
 pub const RATE_CONTROL: &str = "CBR";
 
-/// B-frames
-pub const B_FRAMES: i64 = 2;
+/// B-frames — v2.6.4: 0 (was 2). B-frames add encoder latency + reference
+/// buffering that loads the iGPU encoder; for real-time capture on integrated
+/// GPUs we disable them. CBR holds the bitrate target regardless.
+pub const B_FRAMES: i64 = 0;
 
-/// Psycho AQ
-pub const PSYCHO_AQ: bool = true;
+/// Psycho AQ — v2.6.4: false (was true). Psychovisual adaptive quantization is
+/// an extra encoder pass that steals iGPU headroom from the game's own
+/// rendering. Off for smoother capture; negligible loss for training video.
+pub const PSYCHO_AQ: bool = false;
 
-/// Lookahead
-pub const LOOKAHEAD: bool = true;
+/// Lookahead — v2.6.4: false (was true). Lookahead buffers future frames for
+/// rate-control decisions — extra latency + GPU work. Off for real-time iGPU
+/// capture so render + capture + encode don't contend.
+pub const LOOKAHEAD: bool = false;
 
 pub const VIDEO_PROFILE: &str = "high";

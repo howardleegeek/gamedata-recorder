@@ -435,7 +435,7 @@ impl VideoRecorder for ObsEmbeddedRecorder {
         // timeout" and let the next poll try again. A failed send here
         // means recording is already torn down, so suppressing the flag
         // is the safe choice — the upstream stop path will run either way.
-        let workstation_locked_timeout = {
+        let outcome = {
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
             if self
                 .obs_tx
@@ -443,14 +443,21 @@ impl VideoRecorder for ObsEmbeddedRecorder {
                 .await
                 .is_err()
             {
-                false
+                PollOutcome::default()
             } else {
-                reply_rx.await.unwrap_or(false)
+                reply_rx.await.unwrap_or_default()
             }
         };
         PollUpdate {
-            active_fps: Some(unsafe { libobs_wrapper::sys::obs_get_active_fps() }),
-            workstation_locked_timeout,
+            // `active_fps` is the REAL delivered frame rate measured on the
+            // OBS thread from `obs_output_get_total_frames` deltas — NOT
+            // `obs_get_active_fps()`, which only reports OBS's *configured*
+            // output FPS (a constant `FPS`) and can never reveal a frozen
+            // capture. `None` on start-up ticks / when the counter can't be
+            // read, in which case the downstream cumulative average and the
+            // `MIN_AVERAGE_FPS` gate simply skip this tick.
+            active_fps: outcome.real_fps,
+            workstation_locked_timeout: outcome.workstation_locked_timeout,
         }
     }
 
@@ -463,6 +470,19 @@ impl VideoRecorder for ObsEmbeddedRecorder {
         if self
             .obs_tx
             .send(RecorderMessage::CheckHookTimeout { result_tx })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        result_rx.await.unwrap_or(false)
+    }
+
+    async fn check_frozen_capture_timeout(&mut self) -> bool {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        if self
+            .obs_tx
+            .send(RecorderMessage::CheckFrozenCaptureTimeout { result_tx })
             .await
             .is_err()
         {
@@ -581,16 +601,40 @@ enum RecorderMessage {
     },
     /// Periodic (~1Hz) tick from the tokio thread. Drives the monitor-
     /// capture DXGI_ERROR_ACCESS_LOST recovery state machine and the
-    /// "game window closed" source-teardown check. Replies with
-    /// `workstation_locked_timeout = true` exactly once, when the 5-minute
-    /// resume window expires on a locked workstation; the tokio caller
-    /// then calls `Recorder::stop` to flush the MP4.
+    /// "game window closed" source-teardown check. Replies with a
+    /// `PollOutcome` carrying the real delivered frame rate (computed from
+    /// `obs_output_get_total_frames` deltas, see `RecorderState::poll`)
+    /// and `workstation_locked_timeout = true` exactly once, when the
+    /// 5-minute resume window expires on a locked workstation; the tokio
+    /// caller then calls `Recorder::stop` to flush the MP4.
     Poll {
-        reply_tx: tokio::sync::oneshot::Sender<bool>,
+        reply_tx: tokio::sync::oneshot::Sender<PollOutcome>,
     },
     CheckHookTimeout {
         result_tx: tokio::sync::oneshot::Sender<bool>,
     },
+    /// Periodic check from the tokio thread asking whether the current WGC
+    /// capture has frozen (black/stuck), so it can fall back to monitor
+    /// capture. Mirrors `CheckHookTimeout` but for the WGC path; see
+    /// `RecorderState::check_frozen_capture_timeout`.
+    CheckFrozenCaptureTimeout {
+        result_tx: tokio::sync::oneshot::Sender<bool>,
+    },
+}
+
+/// Reply payload for `RecorderMessage::Poll`. Carries both the
+/// workstation-lock graceful-stop verdict and the real delivered frame
+/// rate measured on the OBS thread this tick.
+#[derive(Debug, Default, Clone, Copy)]
+struct PollOutcome {
+    /// See `RecorderMessage::Poll` / `PollUpdate::workstation_locked_timeout`.
+    workstation_locked_timeout: bool,
+    /// Real frames-per-second delivered by the OBS output since the
+    /// previous poll, or `None` when it can't be computed yet (first poll
+    /// of a recording, no active recording, or the frame counter couldn't
+    /// be read). `None` is propagated as "no sample" rather than `0.0` so
+    /// the downstream cumulative average isn't polluted by start-up ticks.
+    real_fps: Option<f64>,
 }
 
 struct RecordingRequest {
@@ -721,24 +765,29 @@ fn recorder_thread_impl(
                     .ok();
             }
             RecorderMessage::Poll { reply_tx } => {
-                // `poll` reports `true` in exactly one case: monitor-capture
-                // was paused on DXGI_ERROR_ACCESS_LOST, the user's
-                // workstation is still locked, and we've crossed the
-                // resume deadline. Returning `Err(_)` from the inner poll
-                // (e.g. a libobs scene lookup blew up) is unrelated to
-                // workstation-lock handling and must not fire the graceful
-                // stop, so we coerce errors to `false` and log them.
-                let workstation_locked_timeout = match state.poll() {
-                    Ok(flag) => flag,
+                // `poll` reports `workstation_locked_timeout = true` in
+                // exactly one case: monitor-capture was paused on
+                // DXGI_ERROR_ACCESS_LOST, the user's workstation is still
+                // locked, and we've crossed the resume deadline. Returning
+                // `Err(_)` from the inner poll (e.g. a libobs scene lookup
+                // blew up) is unrelated to workstation-lock handling and
+                // must not fire the graceful stop, so we coerce errors to
+                // the default outcome (no timeout, no fps sample) and log
+                // them.
+                let outcome = match state.poll() {
+                    Ok(outcome) => outcome,
                     Err(e) => {
                         tracing::error!("Failed to poll OBS embedded recorder: {e}");
-                        false
+                        PollOutcome::default()
                     }
                 };
-                reply_tx.send(workstation_locked_timeout).ok();
+                reply_tx.send(outcome).ok();
             }
             RecorderMessage::CheckHookTimeout { result_tx } => {
                 result_tx.send(state.check_hook_timeout()).ok();
+            }
+            RecorderMessage::CheckFrozenCaptureTimeout { result_tx } => {
+                result_tx.send(state.check_frozen_capture_timeout()).ok();
             }
         }
     }
@@ -788,10 +837,39 @@ struct RecorderState {
     is_recording: bool,
     recording_start_time: Option<Instant>,
 
+    /// Real-FPS measurement state, sampled once per `poll()` (~1Hz).
+    /// `last_total_frames` is the value of `obs_output_get_total_frames`
+    /// at the previous poll; `last_fps_instant` is the wall-clock time of
+    /// that read. The delta between consecutive polls divided by the
+    /// elapsed wall-clock seconds is the REAL delivered frame rate. All
+    /// reset to `None` when a recording starts so the first poll of each
+    /// recording only establishes a baseline (no fps sample yet).
+    last_total_frames: Option<i32>,
+    last_fps_instant: Option<Instant>,
+    /// Most recent real delivered FPS computed in `poll()`. Read by
+    /// `check_frozen_capture_timeout` to decide whether the WGC capture
+    /// has frozen. `None` until the second poll of a recording.
+    last_real_fps: Option<f64>,
+    /// Latched `true` once the frozen-capture monitor-capture fallback has
+    /// fired for the current recording, so the watchdog reports the freeze
+    /// at most once and the tokio side doesn't thrash restart attempts.
+    /// Reset on every `start_recording`.
+    frozen_capture_fallback_fired: bool,
+
     // Store video encoders by type to reuse them
     video_encoders: HashMap<VideoEncoderType, Arc<ObsVideoEncoder>>,
     // Audio encoder (created once upfront, reused always)
     audio_encoder: Arc<ObsAudioEncoder>,
+
+    /// The encoders OBS actually probed as available on this machine (the same
+    /// list returned to the tokio thread for UI display). Stored here so that
+    /// `start_recording` can reconcile the requested encoder against reality at
+    /// the exact point of use — a defense-in-depth guard ensuring we never try
+    /// to construct a hardware encoder that didn't register (old NVIDIA driver,
+    /// NVENC session cap, parked Optimus dGPU, missing AMD `obs-amf-test.exe`,
+    /// etc.). Without this, such a machine would fail to record entirely instead
+    /// of degrading to the best available encoder (or software x264).
+    available_encoders: Vec<VideoEncoderType>,
 
     // Track the hook monitoring thread handle to ensure proper cleanup
     hook_monitor_thread: Option<std::thread::JoinHandle<()>>,
@@ -846,9 +924,16 @@ impl RecorderState {
                     skipped_frames_notify: skipped_frames_notify.clone(),
                     access_lost_flag: access_lost_flag.clone(),
                 }))
+                // Placeholder video info for context init only — the real
+                // per-recording resolution (and the software-encoder 720p cap)
+                // is applied later via `reset_video` in `start_recording`, once
+                // the game resolution and chosen encoder are known. Pass
+                // `software_encoder = false` here: no encoder is selected yet
+                // and this is the full-res default context.
                 .set_video_info(video_info(
                     adapter_index,
                     (RECORDING_WIDTH, RECORDING_HEIGHT),
+                    false,
                 )),
         )?;
         tracing::debug!("OBS context created successfully");
@@ -913,8 +998,15 @@ impl RecorderState {
                 last_monitor_capture_info: None,
                 is_recording: false,
                 recording_start_time: None,
+                last_total_frames: None,
+                last_fps_instant: None,
+                last_real_fps: None,
+                frozen_capture_fallback_fired: false,
                 video_encoders: HashMap::new(),
                 audio_encoder,
+                // Keep a copy on the state for start-time reconciliation; the
+                // original is returned below for the tokio-thread / UI layer.
+                available_encoders: available_encoders.clone(),
                 hook_monitor_thread: None,
                 obs_context,
             },
@@ -922,9 +1014,135 @@ impl RecorderState {
         ))
     }
 
+    /// Construct the video encoder for this recording, degrading through the
+    /// runtime fallback chain if a *listed* encoder fails to actually build.
+    ///
+    /// The selection guard (`select_best_available_encoder`) guarantees the
+    /// requested encoder is in OBS's probed list, but being listed does NOT
+    /// guarantee `ObsVideoEncoder::new_from_info` succeeds: a consumer NVENC
+    /// session cap can already be saturated, the driver can be stale, an
+    /// Optimus dGPU can be parked, or AMD's `obs-amf-test.exe` can have been
+    /// blocked since the probe. On any such construction failure we move to the
+    /// next-best *constructible* encoder
+    /// (`crate::config::runtime_fallback_chain`, NVENC>AMF>QSV>x264) instead of
+    /// killing the whole recording with the `?` that used to live here.
+    ///
+    /// Returns the constructed encoder, the encoder type that ACTUALLY built
+    /// (so callers can key the 720p software cap, the reuse cache, and the
+    /// recorded metadata on reality), and the `ObsData` settings blob that was
+    /// applied to it (rebuilt per-encoder because, e.g., NVENC's preset keys are
+    /// not x264's). Only ever returns `Err` if EVERY candidate — including the
+    /// always-constructible software x264 terminal — failed, which in practice
+    /// means OBS itself is unusable.
+    fn build_video_encoder_with_fallback(
+        &mut self,
+        request: &RecordingRequest,
+    ) -> eyre::Result<(
+        Arc<ObsVideoEncoder>,
+        VideoEncoderType,
+        libobs_wrapper::data::ObsData,
+    )> {
+        let primary = request.video_settings.encoder;
+        let chain = crate::config::runtime_fallback_chain(primary, &self.available_encoders);
+
+        let mut last_err: Option<eyre::Report> = None;
+        for candidate in chain {
+            // Reuse a previously-constructed encoder of this exact type if we
+            // already have one cached — preserves the original happy-path
+            // semantics (an encoder reused across recordings). We still need a
+            // settings blob for this candidate for the metadata return; build a
+            // fresh one (cheap) so the caller's bookkeeping is consistent.
+            if let Some(existing) = self.video_encoders.get(&candidate) {
+                tracing::info!(
+                    "Reusing existing video encoder for type: {}",
+                    candidate.id()
+                );
+                let settings = self.encoder_settings_for(request, candidate)?;
+                return Ok((existing.clone(), candidate, settings));
+            }
+
+            tracing::info!("Creating new video encoder for type: {}", candidate.id());
+
+            // Per-attempt, encoder-specific settings. `apply_to_obs_data` keys
+            // off the encoder type, and it CONSUMES the `ObsData`, so we build a
+            // fresh `ObsData` for each candidate — never reuse a stale blob that
+            // was shaped for a different encoder (NVENC presets vs x264, etc.).
+            let settings = match self.encoder_settings_for(request, candidate) {
+                Ok(settings) => settings,
+                Err(e) => {
+                    tracing::warn!(
+                        encoder = candidate.id(),
+                        error = ?e,
+                        "Failed to build encoder settings; trying next fallback encoder"
+                    );
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+
+            match ObsVideoEncoder::new_from_info(
+                VideoEncoderInfo::new(
+                    vet_to_obs_vet(candidate),
+                    "video_encoder",
+                    Some(settings.clone()),
+                    None,
+                ),
+                self.obs_context.runtime().clone(),
+            ) {
+                Ok(encoder) => {
+                    self.video_encoders.insert(candidate, encoder.clone());
+                    tracing::info!(
+                        encoder = candidate.id(),
+                        requested = %primary,
+                        "Selected video encoder (constructed successfully)"
+                    );
+                    return Ok((encoder, candidate, settings));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        encoder = candidate.id(),
+                        error = ?e,
+                        "Video encoder failed to construct; degrading to next \
+                         available encoder (saturated NVENC session cap / stale \
+                         driver / parked dGPU / blocked AMF probe are the usual \
+                         causes)"
+                    );
+                    last_err = Some(eyre::Report::new(e));
+                }
+            }
+        }
+
+        // The chain always terminates in x264 (always-constructible software
+        // encoder), so reaching here means even x264 failed — OBS is unusable.
+        Err(last_err.unwrap_or_else(|| {
+            eyre::eyre!("no video encoder could be constructed (empty fallback chain)")
+        }))
+    }
+
+    /// Build a fresh, encoder-specific OBS settings blob for `encoder_type`.
+    ///
+    /// `EncoderSettings::apply_to_obs_data` selects which encoder's settings to
+    /// write based on `self.encoder`, so we clone the request's settings and
+    /// retarget the encoder type before applying. A fresh `ObsData` is allocated
+    /// each call because `apply_to_obs_data` consumes it.
+    fn encoder_settings_for(
+        &self,
+        request: &RecordingRequest,
+        encoder_type: VideoEncoderType,
+    ) -> eyre::Result<libobs_wrapper::data::ObsData> {
+        let mut settings = request.video_settings.clone();
+        settings.encoder = encoder_type;
+        let data = self.obs_context.data()?;
+        Ok(settings.apply_to_obs_data(data, request.recording_bitrate_kbps)?)
+    }
+
     fn start_recording(
         &mut self,
-        request: Box<RecordingRequest>,
+        // `mut` so we can rebind `video_settings.encoder` after reconciling it
+        // against the actually-available encoders (see below). All downstream
+        // consumers — the 720p software cap, encoder construction, and the
+        // recorded metadata — then observe the reconciled value.
+        mut request: Box<RecordingRequest>,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> eyre::Result<()> {
         if self.is_recording {
@@ -940,8 +1158,104 @@ impl RecorderState {
             self.obs_context.scene(OWL_SCENE_NAME)?
         };
 
-        self.obs_context
-            .reset_video(video_info(self.adapter_index, request.game_resolution))?;
+        // Reconcile the requested encoder against what OBS actually probed as
+        // available on THIS machine, at the exact point of use. `config.rs`
+        // optimistically upgrades the encoder from the DXGI adapter vendor, and
+        // the tokio thread does a first-pass reconciliation for the UI — but a
+        // GPU being present doesn't guarantee its OBS encoder registered (old
+        // NVIDIA driver, saturated NVENC session cap, parked Optimus dGPU,
+        // missing/blocked AMD `obs-amf-test.exe`, unsupported Intel iGPU). If we
+        // constructed an unavailable encoder below, libobs would error and the
+        // whole recording would fail. Instead we degrade deterministically:
+        // best available hardware (NVENC > AMF > QSV), then software x264. This
+        // guard guarantees `encoder` is always constructible and is the single
+        // place the chosen encoder can never be left pointing at a phantom.
+        let selected_encoder = crate::config::select_best_available_encoder(
+            request.video_settings.encoder,
+            &self.available_encoders,
+        );
+        if selected_encoder != request.video_settings.encoder {
+            tracing::warn!(
+                requested = %request.video_settings.encoder,
+                selected = %selected_encoder,
+                available = ?self.available_encoders,
+                "Requested video encoder is not available on this machine; \
+                 degrading to the best available encoder"
+            );
+            request.video_settings.encoder = selected_encoder;
+        } else {
+            tracing::info!(
+                encoder = %selected_encoder,
+                "Using requested video encoder (confirmed available)"
+            );
+        }
+
+        // Construct (or reuse) the video encoder NOW, BEFORE `reset_video`.
+        //
+        // Why here and not at its natural spot further down: `reset_video`
+        // needs to know whether the FINAL encoder is software x264 so it can
+        // apply the 720p output cap (`software_encoder` below). The selection
+        // guard above guarantees the encoder is *listed* by OBS, but a listed
+        // hardware encoder can still fail `ObsVideoEncoder::new_from_info` at
+        // construction time — saturated consumer-NVENC session cap, stale
+        // driver, parked Optimus dGPU, or a blocked AMD `obs-amf-test.exe`.
+        // When that happens we degrade through the next-best *constructible*
+        // encoder (`crate::config::runtime_fallback_chain`, same NVENC>AMF>QSV
+        // ordering as everywhere else) and finally to software x264.
+        //
+        // Constructing before `reset_video` is the side-effect-correct choice
+        // (item 3 of the hardening spec): the encoder object only depends on
+        // `obs_context.data()` + `runtime()`, neither of which needs the video
+        // pipeline reset first, and it is constructed exactly ONCE (so a
+        // hardware-then-x264 fallback never double-loads an NVENC session).
+        // Crucially, `software_encoder` is then derived from the encoder that
+        // ACTUALLY constructed, so a runtime fallback to x264 still trips the
+        // 720p cap and a weak machine never runs software x264 at native res.
+        let (video_encoder, actual_encoder_type, actual_encoder_settings) =
+            self.build_video_encoder_with_fallback(&request)?;
+
+        // v2.6.4: x264 is the only software (CPU) encoder; everything else is
+        // hardware (NVENC/AMF/QSV). On software we cap the output to 720p inside
+        // `video_info` so weak/iGPU CPUs aren't pegged at native resolution.
+        // NB: keyed on the ACTUALLY-CONSTRUCTED encoder (not just the selected
+        // one), so both a selection-time hardware->x264 degrade AND a runtime
+        // construction-time hardware->x264 fallback correctly trigger the cap.
+        let software_encoder = actual_encoder_type == VideoEncoderType::X264;
+        self.obs_context.reset_video(video_info(
+            self.adapter_index,
+            request.game_resolution,
+            software_encoder,
+        ))?;
+
+        // ── REMOTE DIAGNOSTICS ──────────────────────────────────────────────
+        // PURELY ADDITIVE. One consolidated, greppable line capturing the
+        // runtime recording configuration we otherwise fly blind on when a
+        // tester reports a bad run (we cannot reproduce: this only runs on
+        // Windows + a real GPU). Grep target: `RECORDING CONFIG`.
+        //
+        // All values below are already decided/in-scope at this point — the
+        // encoder has been constructed (`actual_encoder_type`) and the 720p
+        // software cap resolved (`software_encoder` → `reset_video`). Nothing
+        // here is plumbed in or can fail the recording: `get_version()` returns
+        // a `Result` but is funnelled through `.ok()` so a (currently
+        // impossible) error logs `None` rather than propagating.
+        //
+        // `request.video_settings.encoder` is the encoder we asked OBS to build
+        // (already reconciled against `available_encoders` above), so
+        // `encoder_fell_back` flags a *construction-time* runtime fallback
+        // (e.g. NVENC session cap, parked Optimus dGPU) distinct from the
+        // selection-time degrade already logged earlier.
+        tracing::info!(
+            actual_encoder = %actual_encoder_type,
+            requested_encoder = %request.video_settings.encoder,
+            encoder_fell_back = actual_encoder_type != request.video_settings.encoder,
+            software_encoder,
+            adapter_index = self.adapter_index,
+            game_resolution = ?request.game_resolution,
+            available_encoders = ?self.available_encoders,
+            obs_version = ?self.obs_context.get_version().ok(),
+            "RECORDING CONFIG: runtime recorder configuration"
+        );
 
         // Resolve the effective capture mode again here — `Recording::start`
         // already computed one for the resolution pick, but recomputing is
@@ -1012,40 +1326,154 @@ impl RecorderState {
             self.detach_monitor_capture_audio();
         }
 
-        // Register the video encoder with encoder-specific settings
-        let video_encoder_data = self.obs_context.data()?;
-        let video_encoder_settings = request
-            .video_settings
-            .apply_to_obs_data(video_encoder_data, request.recording_bitrate_kbps)?;
+        // (The video encoder was already constructed above, before `reset_video`,
+        // so the 720p software cap could observe the actually-constructed encoder
+        // with the bitrate from `request.recording_bitrate_kbps` applied.
+        // `video_encoder` / `actual_encoder_type` hold that result.)
 
         // Update the output path settings (when output is not active)
         let mut output_settings = self.obs_context.data()?;
         output_settings.set_string("path", ObsPath::new(&request.recording_path).build())?;
+        // ── muxer_settings: faststart + CFR timescale ──────────────────────
+        // OBS's `ffmpeg_muxer` splits this string on spaces into `key=value`
+        // AVOptions and applies them to the output mp4 `AVFormatContext`
+        // (`obs-ffmpeg-mux.c`). We pass TWO settings:
+        //
+        // 1. `movflags=faststart` (ISC-DATA-FASTSTART): OBS writes the mp4
+        //    `moov` atom at the END of the file by default. Progressive
+        //    players (Windows "Movies & TV", browsers, partial-download web
+        //    players) need `moov` up front to read the seek index/duration,
+        //    so without this they play only a few seconds even though the file
+        //    is a complete 30 fps recording. `faststart` relocates `moov` to
+        //    the front after finalizing (one extra pass at stop).
+        //
+        // 2. `video_track_timescale=<FPS×1000>` — the TRUE-CFR guarantee.
+        //    Root cause of the "24 fps VFR" defect (decode-verified on two
+        //    v2.6.14 tester sessions: 9789 rendered frames coalesced to 7825,
+        //    muxer reported ~24 fps): OBS composites and dup-fills to a CFR 30
+        //    fps tick, but the mp4 muxer's DEFAULT video timescale is 1/1000
+        //    (millisecond). At 30 fps the frame interval is 33.333…ms, which
+        //    the muxer rounds to a 1ms grid as 33,33,34,33,33,34… The mp4
+        //    writer then COALESCES frames whose rounded PTS collides with the
+        //    previous frame's, silently dropping ~1 in 5 frames and leaving a
+        //    non-uniform PTS sequence the container reports as ~24 fps. This is
+        //    why metadata (which trusts the OBS config) says 30 fps while the
+        //    decoded stream is 24 fps VFR.
+        //
+        //    Setting the video track timescale to `FPS × 1000` (= 30000 for
+        //    30 fps) makes exactly ONE frame span exactly 1000 ticks: PTS are
+        //    0, 1000, 2000, … with ZERO rounding error, so no two frames ever
+        //    share a timestamp, nothing is coalesced, and ffprobe/ffmpeg read
+        //    a clean "30 fps, 30 tbr, 30000 tbn". This is the soundest fix for
+        //    the embedded libobs + `ffmpeg_muxer` path: it makes the container
+        //    HONESTLY carry the 30 fps OBS already renders. We do NOT pad or
+        //    fabricate frames — OBS's own CFR ticker still produces the 30
+        //    frames/sec; we only stop the muxer from rounding them away.
+        //
+        //    Why not `force-cfr=1`: that key is a known NO-OP in modern OBS
+        //    (it predates the ffmpeg-mux split and is ignored by the helper),
+        //    so it cannot be relied on. Why not an intermediate-mkv→remux: the
+        //    build ships only `obs-ffmpeg-mux.exe` + `ffprobe`, not a full
+        //    `ffmpeg.exe`, so a `-fps_mode cfr` remux would require a new
+        //    bundled binary and a stop-time subprocess — strictly more moving
+        //    parts for the same honest-CFR result this one setting achieves
+        //    in-process. The timescale is derived from `FPS` so it stays
+        //    correct if the constant ever changes.
+        // `ObsString: From<String>` (but not `From<&String>`), so move the
+        // owned `String` in by value rather than borrowing it.
+        let muxer_settings = format!("movflags=faststart video_track_timescale={}", FPS * 1000);
+
+        // ── VIDEO PIPELINE DIAGNOSTIC (ISC-KS-VIS) ──────────────────────────
+        // PURELY ADDITIVE logging. Captures the EXACT governing video config at
+        // record start so the next field debug log pinpoints where a 30→24 fps
+        // or 1080p→544p mismatch originates (encoder fps setting? base vs output
+        // resolution? muxer timescale?). We measure the real encoded file at
+        // STOP (see `mp4_probe` / `_video_actual`); this START line is the
+        // matching "what we asked for" half so the two can be diffed.
+        //
+        // The base/output resolution is RECONSTRUCTED with the SAME
+        // `fit_output_within_height` helper `video_info` uses (so it reports the
+        // identical values OBS was just reset with) — we do NOT recompute or
+        // change anything; `reset_video(video_info(...))` already ran above.
+        // fps_num/fps_den/timescale are the constants `video_info` and the muxer
+        // use verbatim. Nothing here is plumbed into the recording or can fail.
+        let diag_base = request.game_resolution;
+        let diag_output = if software_encoder {
+            fit_output_within_height(
+                diag_base.0,
+                diag_base.1,
+                constants::SOFTWARE_ENCODER_MAX_OUTPUT_HEIGHT,
+            )
+        } else {
+            diag_base
+        };
+        tracing::info!(
+            obs_fps_num = FPS,
+            obs_fps_den = 1u32,
+            base_width = diag_base.0,
+            base_height = diag_base.1,
+            output_width = diag_output.0,
+            output_height = diag_output.1,
+            encoder = %actual_encoder_type,
+            // The encoder inherits OBS's configured output frame rate (FPS);
+            // libobs does not expose a separate per-encoder fps knob on this
+            // path, so the governing encoder frame rate IS `obs_fps_num/den`.
+            encoder_fps = FPS,
+            software_encoder,
+            video_track_timescale = FPS * 1000,
+            muxer_settings = %muxer_settings,
+            "VIDEO PIPELINE CONFIG: governing video settings at record start"
+        );
+
+        output_settings.set_string("muxer_settings", muxer_settings)?;
         self.output.update_settings(output_settings)?;
 
-        // Create or reuse video encoder
-        let encoder_type = request.video_settings.encoder;
-
-        let video_encoder = if let Some(existing_encoder) = self.video_encoders.get(&encoder_type) {
-            tracing::info!(
-                "Reusing existing video encoder for type: {}",
-                encoder_type.id()
-            );
-            existing_encoder.clone()
-        } else {
-            tracing::info!("Creating new video encoder for type: {}", encoder_type.id());
-            let encoder = ObsVideoEncoder::new_from_info(
-                VideoEncoderInfo::new(
-                    vet_to_obs_vet(encoder_type),
-                    "video_encoder",
-                    Some(video_encoder_settings.clone()),
-                    None,
-                ),
-                self.obs_context.runtime().clone(),
-            )?;
-            self.video_encoders.insert(encoder_type, encoder.clone());
-            encoder
-        };
+        // ── FPS-30 ASSERTION: pin the encoder frame-rate divisor to 1 ───────
+        // PURELY ADDITIVE. The OBS canvas is reset to `FPS` (30) above, but the
+        // encoder can otherwise let the ffmpeg muxer negotiate an *implicit*
+        // frame-rate divisor — a clean CFR 30→24 decimation we have observed in
+        // the encoded mp4 (7585 composited frames of ~9485 → exactly 24.0 fps).
+        // Nothing in this app or `libobs-wrapper` sets a divisor, so the encoder
+        // is born with whatever libobs/ffmpeg defaults to; `divisor = 1` makes
+        // the encoder explicitly assert the FULL canvas rate to the muxer,
+        // forbidding any down-negotiation. divisor=1 is a no-op if 24 fps was
+        // never caused by an implicit divisor (it only re-states the canvas
+        // rate), so it is safe even if it turns out not to be the root cause.
+        //
+        // This MUST happen before `set_video_encoder` (which CONSUMES the
+        // `Arc<ObsVideoEncoder>` by value) and before `output.start()` (after
+        // which the encoder is active and rejects reconfiguration). We marshal
+        // the raw `*mut obs_encoder_t` onto the OBS thread via the runtime — all
+        // libobs calls must run there — capturing the pointer as a `usize` and
+        // re-casting inside the closure so it stays `Send`. This mirrors the
+        // established `read_output_total_frames` / `set_output_source_on_channel`
+        // FFI pattern in this file and needs no change to the git-dep wrapper
+        // (`ObsVideoEncoder::as_ptr()` exposes the pointer; `libobs_wrapper::sys`
+        // re-exports the libobs binding). Failure to dispatch is logged, never
+        // fatal: a missing assertion at worst leaves the prior (possibly
+        // decimating) behaviour, so it must not kill an otherwise-good recording.
+        let encoder_ptr = video_encoder.as_ptr().0 as usize;
+        let divisor_runtime = self.obs_context.runtime().clone();
+        match divisor_runtime.run_with_obs_result(move || {
+            let ptr = encoder_ptr as *mut libobs_wrapper::sys::obs_encoder_t;
+            unsafe { libobs_wrapper::sys::obs_encoder_set_frame_rate_divisor(ptr, 1) }
+        }) {
+            Ok(applied) => {
+                tracing::info!(
+                    applied,
+                    "Pinned encoder frame_rate_divisor=1 (assert {}fps to muxer)",
+                    FPS
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    e = ?e,
+                    "Failed to dispatch obs_encoder_set_frame_rate_divisor to OBS \
+                     thread; leaving encoder at default frame-rate negotiation \
+                     (recording continues)"
+                );
+            }
+        }
 
         // Set the video encoder on the output
         self.output.set_video_encoder(video_encoder)?;
@@ -1054,7 +1482,11 @@ impl RecorderState {
         self.output
             .set_audio_encoder(self.audio_encoder.clone(), 0)?;
 
-        self.last_video_encoder_type = Some(encoder_type);
+        // Reflect the encoder that ACTUALLY constructed (which may differ from
+        // the selected one if a runtime construction fallback fired), so the
+        // recorded metadata and the next-recording encoder-reuse cache key are
+        // both consistent with reality.
+        self.last_video_encoder_type = Some(actual_encoder_type);
 
         // Store event stream for sending VIDEO_PAUSED/VIDEO_RESUMED events during DXGI access lost
         self.event_stream = Some(request.event_stream.clone());
@@ -1136,17 +1568,18 @@ impl RecorderState {
         // Store the thread handle for proper cleanup
         self.hook_monitor_thread = Some(hook_monitor_thread);
 
-        // Update our last encoder settings
-        self.last_encoder_settings = video_encoder_settings
+        // Update our last encoder settings. Use the settings blob that was
+        // ACTUALLY applied to the constructed encoder (rebuilt for the fallback
+        // encoder type if a runtime fallback fired), and tag it with the
+        // actually-constructed encoder id — not the originally selected one —
+        // so `recording_metadata.json` faithfully reflects what encoded.
+        self.last_encoder_settings = actual_encoder_settings
             .get_json()
             .ok()
             .and_then(|j| serde_json::from_str(&j).ok());
         if let Some(encoder_settings_json) = &mut self.last_encoder_settings {
             if let Some(object) = encoder_settings_json.as_object_mut() {
-                object.insert(
-                    "encoder".to_string(),
-                    request.video_settings.encoder.id().into(),
-                );
+                object.insert("encoder".to_string(), actual_encoder_type.id().into());
                 object.insert(
                     "window_capture".to_string(),
                     request.game_config.use_window_capture.into(),
@@ -1205,6 +1638,14 @@ impl RecorderState {
         self.is_recording = true;
         self.recording_start_time = Some(Instant::now());
 
+        // Reset real-FPS measurement + frozen-capture watchdog state for the
+        // new recording. The first poll establishes a baseline frame count;
+        // FPS samples (and any freeze verdict) only start on the second poll.
+        self.last_total_frames = None;
+        self.last_fps_instant = None;
+        self.last_real_fps = None;
+        self.frozen_capture_fallback_fired = false;
+
         Ok(())
     }
 
@@ -1236,6 +1677,12 @@ impl RecorderState {
             tracing::debug!("OBS recording stopped");
             self.is_recording = false;
             self.recording_start_time = None;
+            // Clear real-FPS measurement state so a stale baseline from this
+            // recording can't bleed into the next one's first sample.
+            self.last_total_frames = None;
+            self.last_fps_instant = None;
+            self.last_real_fps = None;
+            self.frozen_capture_fallback_fired = false;
             // P0-2: Clear monitor capture info when stopping recording
             self.last_monitor_capture_info = None;
         } else {
@@ -1321,12 +1768,15 @@ impl RecorderState {
         Ok(settings)
     }
 
-    /// Periodic tick (~1Hz). Returns `true` exactly once, when the
+    /// Periodic tick (~1Hz). Returns a `PollOutcome` whose
+    /// `workstation_locked_timeout` is `true` exactly once, when the
     /// monitor-capture DXGI_ERROR_ACCESS_LOST recovery window has expired
-    /// and the caller should gracefully stop the recording. All other
-    /// internal bookkeeping (source teardown when the game closes, pause /
-    /// resume around workstation lock) is advanced in place.
-    fn poll(&mut self) -> eyre::Result<bool> {
+    /// and the caller should gracefully stop the recording, and whose
+    /// `real_fps` carries the actual delivered frame rate measured this
+    /// tick (see `measure_real_fps`). All other internal bookkeeping
+    /// (source teardown when the game closes, pause / resume around
+    /// workstation lock) is advanced in place.
+    fn poll(&mut self) -> eyre::Result<PollOutcome> {
         if self
             .last_application
             .as_ref()
@@ -1356,7 +1806,104 @@ impl RecorderState {
             false
         };
 
-        Ok(workstation_locked_timeout)
+        // Measure the REAL delivered frame rate from the OBS output's
+        // total-frame counter. Only meaningful while recording; when idle
+        // we leave the baseline cleared so the next recording's first poll
+        // starts fresh.
+        let real_fps = if self.is_recording {
+            self.measure_real_fps()
+        } else {
+            self.last_total_frames = None;
+            self.last_fps_instant = None;
+            self.last_real_fps = None;
+            None
+        };
+
+        Ok(PollOutcome {
+            workstation_locked_timeout,
+            real_fps,
+        })
+    }
+
+    /// Compute the real delivered FPS from `obs_output_get_total_frames`
+    /// deltas over wall-clock time, caching the result in `last_real_fps`.
+    ///
+    /// `obs_get_active_fps()` (the value this code used to report) returns
+    /// OBS's *configured* output FPS — a constant `FPS` — so it can never
+    /// reveal a stalled/black capture. The output's total-frame counter,
+    /// by contrast, only advances when the encoder actually receives
+    /// frames, so `(total_now - total_last) / elapsed_secs` is the genuine
+    /// delivered rate.
+    ///
+    /// Returns `None` (no sample) on the first poll of a recording (we only
+    /// have a baseline), when the frame counter can't be read, when the
+    /// counter went backwards (output restarted underneath us), or when the
+    /// elapsed time is too small to divide safely. `None` is deliberately
+    /// not folded into the downstream cumulative average.
+    fn measure_real_fps(&mut self) -> Option<f64> {
+        let now = Instant::now();
+        let total_now = match self.read_output_total_frames() {
+            Some(n) => n,
+            None => {
+                // Couldn't read the counter this tick; keep the previous
+                // baseline so the next successful read spans the gap rather
+                // than resetting. Report no sample for this tick.
+                return None;
+            }
+        };
+
+        let sample = match (self.last_total_frames, self.last_fps_instant) {
+            (Some(total_last), Some(instant_last)) => {
+                let elapsed = now.duration_since(instant_last).as_secs_f64();
+                let delta = total_now - total_last;
+                if delta < 0 {
+                    // Frame counter went backwards — the output was stopped
+                    // and restarted between polls. Re-baseline and skip.
+                    None
+                } else if elapsed <= f64::EPSILON {
+                    // Two polls landed in the same instant (shouldn't happen
+                    // at ~1Hz, but guard the divide).
+                    None
+                } else {
+                    Some(delta as f64 / elapsed)
+                }
+            }
+            // First poll of the recording: establish the baseline only.
+            _ => None,
+        };
+
+        self.last_total_frames = Some(total_now);
+        self.last_fps_instant = Some(now);
+        self.last_real_fps = sample;
+        sample
+    }
+
+    /// Read `obs_output_get_total_frames` for the current output, marshalled
+    /// onto the OBS thread via the runtime (all libobs calls must run there).
+    ///
+    /// Returns `None` if the dispatch fails (e.g. the OBS runtime is tearing
+    /// down). The raw pointer is captured as a `usize` and re-cast inside the
+    /// closure so the closure stays `Send`; this mirrors the established
+    /// `set_output_source_on_channel` pattern in this file. The output
+    /// pointer is owned by `self.output` (an `ObsOutputRef`) which outlives
+    /// this synchronous call, so dereferencing it on the OBS thread is sound.
+    fn read_output_total_frames(&self) -> Option<i32> {
+        let output_ptr = self.output.as_ptr().0 as usize;
+        let runtime = self.obs_context.runtime().clone();
+        match runtime.run_with_obs_result(move || {
+            let ptr = output_ptr as *const libobs_wrapper::sys::obs_output_t;
+            unsafe { libobs_wrapper::sys::obs_output_get_total_frames(ptr) }
+        }) {
+            Ok(total) => Some(total),
+            Err(e) => {
+                tracing::debug!(
+                    e = ?e,
+                    "Failed to read obs_output_get_total_frames for real-FPS \
+                     measurement; skipping this sample"
+                );
+                None
+            }
+        }
     }
 
     /// Advance the monitor-capture DXGI_ERROR_ACCESS_LOST recovery state
@@ -1570,6 +2117,70 @@ impl RecorderState {
         }
     }
 
+    /// Detect a frozen/black WGC capture and report (exactly once per
+    /// recording) that the tokio side should fall back to monitor capture.
+    ///
+    /// WGC (`window_capture`) is D3D-oriented; a game rendering through an
+    /// OpenGL surface (notably Minecraft Java / GLFW) can capture as a
+    /// black or frozen frame with no error from libobs. The existing
+    /// hook-timeout fallback only covers the `game_capture` *hook* path, so
+    /// without this watchdog a frozen WGC capture records black for the
+    /// entire session. This is purely a recovery net — the working WGC path
+    /// is left untouched for every healthy capture.
+    ///
+    /// Fires when ALL hold:
+    ///   - a recording is in progress,
+    ///   - the active capture mode is WGC (monitor/game-hook have their own
+    ///     recovery paths and aren't subject to this freeze mode),
+    ///   - the recording has been running longer than `FROZEN_CAPTURE_TIMEOUT`
+    ///     (grace period for the swapchain/first-frame handshake),
+    ///   - the most recent real delivered FPS (`last_real_fps`, from
+    ///     `measure_real_fps`) is at or below `FROZEN_CAPTURE_FPS_THRESHOLD`.
+    ///
+    /// Latches `frozen_capture_fallback_fired` so it reports the freeze only
+    /// once; the tokio side switches the game to monitor capture and
+    /// restarts, after which the mode is no longer WGC and this check is
+    /// inert for the rest of the session.
+    fn check_frozen_capture_timeout(&mut self) -> bool {
+        if !self.is_recording || self.frozen_capture_fallback_fired {
+            return false;
+        }
+
+        // Only the WGC path is covered here. GameHook has the hook-timeout
+        // fallback; Monitor is already the safest path and has the DXGI
+        // access-lost recovery machine.
+        let is_wgc = matches!(
+            self.last_source_creation_state
+                .as_ref()
+                .map(|s| s.effective_mode),
+            Some(crate::config::EffectiveCaptureMode::Wgc)
+        );
+        if !is_wgc {
+            return false;
+        }
+
+        let elapsed_ok = self
+            .recording_start_time
+            .is_some_and(|start| start.elapsed() > constants::FROZEN_CAPTURE_TIMEOUT);
+        if !elapsed_ok {
+            return false;
+        }
+
+        // `last_real_fps` is `None` until the second poll; treat "no sample
+        // yet" as not-frozen so we never fire on missing data.
+        let frozen = self
+            .last_real_fps
+            .is_some_and(|fps| fps <= constants::FROZEN_CAPTURE_FPS_THRESHOLD);
+        if frozen {
+            self.frozen_capture_fallback_fired = true;
+            // Reset last_application for the same reason check_hook_timeout
+            // does: the restart must re-evaluate the (now monitor) source
+            // from scratch rather than assuming the previous one was good.
+            self.last_application = None;
+        }
+        frozen
+    }
+
     /// Create (or reuse) the WASAPI desktop-output source, and optionally the
     /// WASAPI input (microphone) source, and assign them to the global OBS
     /// audio channels. Monitor capture has no hooked audio path, so without
@@ -1733,7 +2344,47 @@ fn set_output_source_on_channel(
     Ok(())
 }
 
-fn video_info(adapter_index: usize, (base_width, base_height): (u32, u32)) -> ObsVideoInfo {
+/// Downscale `(base_width, base_height)` so the height fits within `max_height`
+/// while preserving aspect ratio, rounding both dimensions to even values
+/// (H.264/HEVC require even dimensions). If the source is already at or below
+/// `max_height`, it is returned unchanged (only rounded to even). This is the
+/// v2.6.4 software-encoder degrade: cap the OUTPUT to 720p while leaving the
+/// capture base at native resolution so OBS bicubic-downscales for the weak CPU.
+fn fit_output_within_height(base_width: u32, base_height: u32, max_height: u32) -> (u32, u32) {
+    // Defensive: never divide by zero (callers already coerce 0 -> fallback,
+    // but keep this pure helper self-contained for its unit tests).
+    if base_height == 0 || base_width == 0 {
+        return (base_width.max(2), base_height.max(2));
+    }
+
+    let (out_w, out_h) = if base_height > max_height {
+        // Scale width by the same factor we scale height (max_height/base_height),
+        // computed in u64 to avoid overflow on large monitors.
+        let scaled_w =
+            ((base_width as u64) * (max_height as u64) / (base_height as u64)).max(1) as u32;
+        (scaled_w, max_height)
+    } else {
+        (base_width, base_height)
+    };
+
+    // Round DOWN to even; clamp to a 2px floor so we never emit a 0 dimension.
+    let even = |v: u32| (v & !1).max(2);
+    (even(out_w), even(out_h))
+}
+
+/// Build the OBS video-pipeline config.
+///
+/// `software_encoder` is `true` when the final chosen encoder is software x264
+/// (no hardware encoder available). In that case the OUTPUT is capped to
+/// [`constants::SOFTWARE_ENCODER_MAX_OUTPUT_HEIGHT`] (720p) to keep weak/iGPU
+/// CPUs usable; the capture base stays native so we still composite the full
+/// surface and OBS downscales. Hardware-encoder machines pass `false` and stay
+/// at native resolution.
+fn video_info(
+    adapter_index: usize,
+    (base_width, base_height): (u32, u32),
+    software_encoder: bool,
+) -> ObsVideoInfo {
     // Ensure valid dimensions — OBS returns "invalid parameter" if width or height is 0.
     // This can happen when the game window hasn't fully initialized or when using
     // process scan to detect games that don't have a visible window yet.
@@ -1753,14 +2404,36 @@ fn video_info(adapter_index: usize, (base_width, base_height): (u32, u32)) -> Ob
     // Output at the same resolution as the source to preserve aspect ratio.
     // Previously forced 1920x1080 output which stretched non-16:9 content.
     // Monitor capture grabs the full screen, so base = screen resolution.
+    //
+    // v2.6.4: when running on the software x264 encoder, cap the OUTPUT to 720p
+    // (base stays native; OBS bicubic-downscales). Hardware encoders keep native.
+    let (output_width, output_height) = if software_encoder {
+        let (w, h) = fit_output_within_height(
+            base_width,
+            base_height,
+            constants::SOFTWARE_ENCODER_MAX_OUTPUT_HEIGHT,
+        );
+        if (w, h) != (base_width, base_height) {
+            tracing::info!(
+                base = ?(base_width, base_height),
+                output = ?(w, h),
+                "Software x264 encoder: capping output to {}p to protect weak/iGPU CPU",
+                constants::SOFTWARE_ENCODER_MAX_OUTPUT_HEIGHT
+            );
+        }
+        (w, h)
+    } else {
+        (base_width, base_height)
+    };
+
     ObsVideoInfoBuilder::new()
         .adapter(adapter_index as u32)
         .fps_num(FPS)
         .fps_den(1)
         .base_width(base_width)
         .base_height(base_height)
-        .output_width(base_width)
-        .output_height(base_height)
+        .output_width(output_width)
+        .output_height(output_height)
         .scale_type(ObsScaleType::Bicubic)
         .build()
 }
@@ -1850,27 +2523,36 @@ fn prepare_source(
     state: &SourceCreationState,
     last_state: Option<&SourceCreationState>,
 ) -> Result<(ObsSourceRef, Option<MonitorCaptureInfo>)> {
-    // Audio capture disabled to save resources and avoid the WASAPI audio
-    // companion infinite retry loop bug on second recording. With audio disabled:
-    // - Saves ~1-3% CPU, 5-15 MB memory, and ~15% disk space
-    // - Eliminates the second recording crash (no WASAPI companion = no retry loop)
-    // - Recordings are video-only (no game audio)
-    let capture_audio = false;
+    // v2.6.4: audio capture RE-ENABLED. The PRD audit requires a valid audio
+    // track on every recording (QM3/QM4/V6/V7/U2). For GameHook/WGC this turns
+    // the source's own audio tap (the "WASAPI process-loopback companion") back
+    // on; for monitor capture the separate `attach_monitor_capture_audio` path
+    // (channel 1) already supplies desktop audio. Every recording now has audio.
+    //
+    // Audio was previously disabled (v2.6.0-2.6.3) to dodge a 2nd-recording
+    // freeze: the process-loopback companion binds to the game window handle,
+    // and when that handle changes between recordings (e.g. resolution change
+    // in GTA V) the stale companion enters an infinite retry loop ("window
+    // disappeared" → "Device invalidated. Retrying" every ~3s) that starves the
+    // OBS output. The mitigation below now carries the load.
+    let capture_audio = true;
 
-    // Force recreate WGC and GameHook sources to fix the second recording crash.
-    // These capture modes spawn a WASAPI process-loopback audio companion that
-    // binds to the game window handle. When the window changes (e.g., resolution
-    // change in GTA V), the old audio companion enters an infinite retry loop
-    // ("window disappeared" → "Device invalidated. Retrying" every ~3s), which
-    // starves the OBS output and causes the app to appear frozen.
+    // FIX for the 2nd-recording WASAPI freeze: force-recreate the WGC/GameHook
+    // source every recording. Tearing the old source out of the scene drops its
+    // audio companion with it, so the new source binds a FRESH process-loopback
+    // companion to the CURRENT window handle. There is therefore never a stale
+    // companion left polling a dead handle — the retry loop can't start.
     //
-    // By always recreating these sources, we ensure a fresh audio companion is
-    // bound to the current window. This is a simpler and more reliable fix than
-    // trying to detect when the window has changed.
+    // This is the load-bearing mitigation now that `capture_audio = true`
+    // (previously it was defense-in-depth while audio was off). It only fires
+    // when `last_source` is `Some` — i.e. the 2nd and subsequent recordings,
+    // which is exactly the case that used to freeze. The 1st recording has no
+    // prior source/companion to leak, so there is nothing to recreate.
     //
-    // NOTE: With capture_audio=false, the WASAPI companion is never created,
-    // so this issue is bypassed entirely. The force-recreate logic remains
-    // as defense-in-depth.
+    // Recreating (vs. trying to detect a window change and rebind in place) is
+    // both simpler and strictly safer: libobs's WASAPI source does not reliably
+    // rebind to a new window handle, so a fresh source is the only dependable
+    // way to guarantee a healthy companion per recording.
     if matches!(
         state.effective_mode,
         crate::config::EffectiveCaptureMode::Wgc | crate::config::EffectiveCaptureMode::GameHook
@@ -1878,7 +2560,7 @@ fn prepare_source(
         if let Some(source) = last_source.take() {
             tracing::info!(
                 mode = ?state.effective_mode,
-                "Force recreating source (fixes second recording crash with stale WASAPI audio companion)"
+                "Force recreating source so a fresh WASAPI audio companion binds to the current window (prevents 2nd-recording freeze)"
             );
             // Ignore removal errors - we're about to create a new source anyway
             let _ = scene.remove_source(&source);
@@ -2326,6 +3008,48 @@ mod tests {
             crate::config::EffectiveCaptureMode::GameHook,
             false
         ));
+    }
+
+    // --- v2.6.4 software-encoder 720p output cap -----------------------
+    //
+    // `fit_output_within_height` is the pure core of FIX 3: when the final
+    // encoder is software x264 we cap the OUTPUT height (base stays native).
+    // These lock in the aspect-preserving, even-dimension behaviour without a
+    // live OBS context.
+
+    #[test]
+    fn software_cap_downscales_1080p_to_720p_16x9() {
+        // 1920x1080 -> 1280x720 (exact 16:9, both even).
+        assert_eq!(fit_output_within_height(1920, 1080, 720), (1280, 720));
+    }
+
+    #[test]
+    fn software_cap_leaves_below_threshold_untouched() {
+        // A 1366x768 panel is above 720 -> scaled. A 1280x720 source is at the
+        // ceiling -> unchanged. A sub-720 source is left as-is (even already).
+        assert_eq!(fit_output_within_height(1280, 720, 720), (1280, 720));
+        assert_eq!(fit_output_within_height(1024, 576, 720), (1024, 576));
+    }
+
+    #[test]
+    fn software_cap_preserves_aspect_and_rounds_even() {
+        // 1366x768 -> height 720, width = 1366*720/768 = 1280.6 -> 1280 (even).
+        assert_eq!(fit_output_within_height(1366, 768, 720), (1280, 720));
+        // Ultrawide 3440x1440 -> height 720, width = 3440*720/1440 = 1720 (even).
+        assert_eq!(fit_output_within_height(3440, 1440, 720), (1720, 720));
+        // 4K 3840x2160 -> 1280x720.
+        assert_eq!(fit_output_within_height(3840, 2160, 720), (1280, 720));
+    }
+
+    #[test]
+    fn software_cap_never_emits_zero_or_odd_dimension() {
+        // Degenerate inputs must still yield a valid (even, >=2) pair.
+        let (w, h) = fit_output_within_height(0, 0, 720);
+        assert!(w >= 2 && h >= 2 && w % 2 == 0 && h % 2 == 0);
+        // A very tall, 1px-wide sliver must not round width to 0.
+        let (w, h) = fit_output_within_height(1, 4000, 720);
+        assert!(w >= 2 && w % 2 == 0, "width must be even and >= 2, got {w}");
+        assert_eq!(h, 720);
     }
 
     #[test]

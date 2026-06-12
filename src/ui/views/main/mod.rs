@@ -639,8 +639,10 @@ fn newer_release_available(ui: &mut Ui, release: &GitHubRelease) {
                 ui.add_space(4.0);
 
                 ui.label(
-                    RichText::new("Recording and uploading will be blocked until you update.")
-                        .size(14.0),
+                    RichText::new(
+                        "Recording continues — update when convenient for the latest fixes.",
+                    )
+                    .size(14.0),
                 );
 
                 ui.add_space(4.0);

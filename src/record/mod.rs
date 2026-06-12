@@ -2,6 +2,10 @@ mod action_camera_writer;
 pub(crate) mod fps_logger;
 mod input_recorder;
 mod local_recording;
+/// Self-diagnostic measurement of the actually-encoded mp4 (additive,
+/// read-only): verifies metadata.json's claimed resolution/fps/frame-count
+/// against the real file. See `mp4_probe.rs`.
+pub(crate) mod mp4_probe;
 mod obs_embedded_recorder;
 mod obs_socket_recorder;
 mod recorder;

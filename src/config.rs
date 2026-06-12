@@ -9,11 +9,23 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// PCI vendor ID for NVIDIA Corporation — used to identify NVIDIA GPUs in
-/// DXGI adapter enumeration. Stable across every NVIDIA GPU ever shipped.
+/// PCI vendor IDs — used to identify GPUs in DXGI adapter enumeration.
+/// Stable across every GPU that vendor has ever shipped.
 const NVIDIA_PCI_VENDOR_ID: u32 = 0x10DE;
+const AMD_PCI_VENDOR_ID: u32 = 0x1002;
+const INTEL_PCI_VENDOR_ID: u32 = 0x8086;
 
-/// Quick probe: does any DX12-capable GPU report NVIDIA as its vendor?
+/// A GPU vendor we can map to a hardware video encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GpuVendor {
+    Nvidia,
+    Amd,
+    Intel,
+}
+
+/// Quick probe: which hardware-encoder-capable GPU vendor does the system
+/// report? Returns the first matching adapter's vendor, or `None` if no
+/// NVIDIA / AMD / Intel adapter is found.
 ///
 /// v2.5.5: rewritten to use direct DXGI adapter enumeration via `wgpu`.
 /// v2.5.4 shelled out to `wmic path win32_VideoController get Name`, but
@@ -24,22 +36,229 @@ const NVIDIA_PCI_VENDOR_ID: u32 = 0x10DE;
 /// adapters at startup (see `src/main.rs` via `wgpu::Instance`), so doing
 /// it here too is essentially free, has no external process dependency,
 /// and works on every modern Windows SKU.
-fn detect_nvidia_gpu() -> Result<bool> {
+///
+/// v2.6.0: generalized from NVIDIA-only (`detect_nvidia_gpu`) to also
+/// recognize AMD (AMF) and Intel (QuickSync). Previously AMD/Intel users
+/// stayed on software X264, which is CPU-bound — confirmed ~1 FPS effective
+/// plus system-wide lag on an AMD Radeon 780M iGPU.
+fn detect_gpu_vendor() -> Result<Option<GpuVendor>> {
     #[cfg(target_os = "windows")]
     {
         use egui_wgpu::wgpu;
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let has_nvidia = instance
+        // Prefer the first adapter that maps to a hardware encoder. wgpu
+        // enumerates discrete adapters ahead of integrated ones, so the
+        // first NVIDIA/AMD/Intel match is the most capable available GPU.
+        let vendor = instance
             .enumerate_adapters(wgpu::Backends::DX12)
             .into_iter()
-            .any(|adapter| adapter.get_info().vendor == NVIDIA_PCI_VENDOR_ID);
-        Ok(has_nvidia)
+            .find_map(|adapter| match adapter.get_info().vendor {
+                NVIDIA_PCI_VENDOR_ID => Some(GpuVendor::Nvidia),
+                AMD_PCI_VENDOR_ID => Some(GpuVendor::Amd),
+                INTEL_PCI_VENDOR_ID => Some(GpuVendor::Intel),
+                _ => None,
+            });
+        Ok(vendor)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Ok(false)
+        Ok(None)
     }
+}
+
+/// Hardware-encoder preference order, best first.
+///
+/// This is the single source of truth for "which hardware encoder do we
+/// prefer when more than one is actually available" and is consulted by
+/// [`select_best_available_encoder`]. Order rationale:
+///
+/// * NVENC first — discrete NVIDIA silicon has a dedicated encode ASIC that is
+///   essentially free of the render pipeline; it is the highest-quality and
+///   lowest-overhead option whenever it is present.
+/// * AMF second — AMD's VCN encoder. On the AMD Radeon 780M test machine this
+///   is the proven-working path; keeping it ahead of QSV preserves that pick.
+/// * QSV last — Intel QuickSync, typically the integrated fallback on Optimus /
+///   hybrid laptops where it shares the iGPU with rendering.
+///
+/// Within each vendor the HEVC (H.265) variant is preferred over H.264 to match
+/// the GameData Labs buyer spec, but H.264 is accepted when HEVC is absent (some
+/// older silicon / drivers expose only the H.264 encoder).
+const HW_ENCODER_PREFERENCE: &[VideoEncoderType] = &[
+    VideoEncoderType::NvEncHevc,
+    VideoEncoderType::NvEnc,
+    VideoEncoderType::AmfHevc,
+    VideoEncoderType::Amf,
+    VideoEncoderType::QsvHevc,
+    VideoEncoderType::Qsv,
+];
+
+/// Reconcile a *requested* encoder against the encoders OBS actually probed as
+/// available on this machine, returning an encoder that is GUARANTEED to be a
+/// safe choice for the recorder to construct.
+///
+/// This is the robustness keystone for multi-GPU compatibility. `config.rs`
+/// (`detect_gpu_vendor` → `Config::load`) optimistically upgrades the encoder
+/// to a vendor's hardware encoder based purely on which GPU adapter is present
+/// in DXGI. But a GPU being *present* does not mean its OBS encoder *registered*:
+///
+/// * NVIDIA NVENC can fail to register when the driver is too old, the
+///   consumer-driver NVENC session cap is already saturated by other apps, or
+///   (Optimus / hybrid laptops) the discrete GPU is parked and the display is
+///   driven by the iGPU.
+/// * AMD AMF is only listed when libobs's `obs-amf-test.exe` probe succeeds; if
+///   that helper is missing, blocked, or returns nothing, AMF silently drops
+///   out of the available list.
+/// * Intel QSV requires a supported iGPU + driver.
+///
+/// In every one of those cases the requested encoder will be ABSENT from
+/// `available`. Constructing it anyway makes libobs error out and the whole
+/// recording fail. Instead we degrade deterministically:
+///
+/// 0. If a *software* encoder (`X264`) is requested but any hardware encoder
+///    genuinely registered with OBS, UPGRADE to the best available hardware.
+///    OBS always lists x264 as available (it is the always-constructible
+///    software encoder), so without this step a stale `X264` config would be
+///    honoured by step 1 even on a perfectly good NVENC machine — the exact
+///    RTX 4060 tester regression (software x264, CPU-bound, ~2 FPS). The
+///    OBS-probed `available` list is firmer ground truth than the DXGI vendor
+///    probe that drives the optimistic `Config::load` upgrade, so this rescue
+///    fires even when that probe silently failed. Hardware requests skip this
+///    step and fall through unchanged, preserving the proven AMD-AMF path.
+/// 1. If the requested encoder is genuinely available, keep it (this is the
+///    common path and keeps the proven AMD-AMF behaviour byte-for-byte
+///    identical).
+/// 2. If a HEVC encoder was requested but only its H.264 sibling is available
+///    (same vendor), step down to H.264 before changing vendor — the smallest
+///    possible degradation.
+/// 3. Otherwise pick the best *available* hardware encoder by
+///    [`HW_ENCODER_PREFERENCE`] (NVENC > AMF > QSV). This is what rescues an
+///    Optimus laptop whose NVENC didn't register but whose Intel QSV did: we
+///    use QSV instead of collapsing all the way to software.
+/// 4. If no hardware encoder is available at all, fall back to software
+///    [`VideoEncoderType::X264`]. x264 is OBS's built-in software encoder and is
+///    treated as always-constructible; the recorder additionally caps software
+///    output to 720p (see `obs_embedded_recorder::video_info`) so a weak/iGPU
+///    CPU isn't pegged.
+///
+/// The return value is therefore never "unset" and, whenever `available`
+/// contains at least one usable encoder, is always a member of `available`.
+/// In the degenerate case where the probe returned an empty list (or a list
+/// without x264), we still return `X264` as the universal last resort — that
+/// matches the recorder's existing "failed to probe, assume x264 only"
+/// contract and guarantees the caller always has *something* to construct.
+pub(crate) fn select_best_available_encoder(
+    requested: VideoEncoderType,
+    available: &[VideoEncoderType],
+) -> VideoEncoderType {
+    // 0. Software-to-hardware rescue (the RTX 4060 tester bug). A stored config
+    //    of `X264` must NOT win just because OBS always lists x264 as
+    //    "available" — x264 is the always-constructible software encoder, so it
+    //    is present in `available` on every machine. Honouring it here is
+    //    exactly how a tester with a perfectly good NVENC GPU ended up CPU-bound
+    //    on software x264 at ~2 FPS: the optimistic `Config::load` upgrade
+    //    (DXGI vendor probe → NvEnc) is the ONLY thing that flips X264->NvEnc,
+    //    and that probe can silently return `None`/`Err` (deprecated `wmic`,
+    //    remote desktop, hardened Windows SKU, driver quirks). When it does, a
+    //    stale software choice reaches the recorder unchallenged.
+    //
+    //    The encoders OBS actually probed (`available`) are the ground truth a
+    //    DXGI vendor string is not: a hardware encoder appearing in this list
+    //    means libobs registered it and it WILL construct. So if a *software*
+    //    encoder is requested but any hardware encoder genuinely registered,
+    //    upgrade to the best available hardware regardless of what the stored
+    //    config or the DXGI probe said. Hardware requests are unaffected (they
+    //    fall through to the availability check below), so the proven AMD-AMF
+    //    and explicit-hardware paths stay byte-for-byte identical. This is the
+    //    reconcile-side safety net the start_recording guard relies on.
+    if !HW_ENCODER_PREFERENCE.contains(&requested) {
+        if let Some(best) = HW_ENCODER_PREFERENCE
+            .iter()
+            .copied()
+            .find(|enc| available.contains(enc))
+        {
+            return best;
+        }
+    }
+
+    // 1. Honour the request when it's actually available. Keeps the working
+    //    AMD-AMF path (and any explicit user selection) identical.
+    if available.contains(&requested) {
+        return requested;
+    }
+
+    // 2. HEVC was requested but unavailable — try the same-vendor H.264 sibling
+    //    before switching vendor. `h264_fallback` is a no-op for non-HEVC
+    //    inputs, so this only ever fires for the HEVC variants.
+    if requested.is_hevc() {
+        let h264_sibling = requested.h264_fallback();
+        if h264_sibling != requested && available.contains(&h264_sibling) {
+            return h264_sibling;
+        }
+    }
+
+    // 3. Pick the best hardware encoder that genuinely registered.
+    if let Some(best) = HW_ENCODER_PREFERENCE
+        .iter()
+        .copied()
+        .find(|enc| available.contains(enc))
+    {
+        return best;
+    }
+
+    // 4. No hardware encoder available — software x264 is the guaranteed
+    //    terminal fallback (720p cap applied downstream in `video_info`).
+    VideoEncoderType::X264
+}
+
+/// Ordered list of encoders to *attempt to construct*, best first, when the
+/// already-selected `primary` encoder might fail to build at runtime.
+///
+/// [`select_best_available_encoder`] guarantees `primary` is *listed* by OBS,
+/// but a listed hardware encoder can still fail [`ObsVideoEncoder::new_from_info`]
+/// at construction time — the consumer-NVIDIA NVENC session cap is already
+/// saturated (another app, or our own prior session, holds all the encode
+/// sessions), the driver is stale, an Optimus dGPU is parked, or AMD's
+/// `obs-amf-test.exe` was blocked between probe and use. This chain lets the
+/// recorder degrade through the next-best *constructible* encoder instead of
+/// failing the whole recording with no video.
+///
+/// Ordering, deduplicated, with `primary` always first:
+///   1. `primary` (the encoder selection already settled on).
+///   2. Every hardware encoder in `available`, walked in [`HW_ENCODER_PREFERENCE`]
+///      order (NVENC-HEVC > NVENC > AMF-HEVC > AMF > QSV-HEVC > QSV), excluding
+///      `primary`. This is the SAME preference the rest of the pipeline uses.
+///   3. [`VideoEncoderType::X264`] as the terminal element — OBS's built-in
+///      software encoder is always constructible, so the chain can never end in
+///      "no encoder". (Skipped only if `primary` already *is* x264, since it's
+///      then already the first element.)
+///
+/// Purely a function of its inputs (no OBS state), so the degradation order is
+/// unit-tested below without a live OBS context.
+pub(crate) fn runtime_fallback_chain(
+    primary: VideoEncoderType,
+    available: &[VideoEncoderType],
+) -> Vec<VideoEncoderType> {
+    let mut chain = Vec::with_capacity(HW_ENCODER_PREFERENCE.len() + 2);
+    chain.push(primary);
+
+    // Next-best hardware encoders that actually registered, in canonical order,
+    // skipping the primary (already at the front) and any duplicates.
+    for enc in HW_ENCODER_PREFERENCE
+        .iter()
+        .copied()
+        .filter(|enc| available.contains(enc) && *enc != primary)
+    {
+        chain.push(enc);
+    }
+
+    // Terminal software fallback — always constructible. Only appended if it
+    // isn't already the primary, so x264-primary recordings don't list it twice.
+    if primary != VideoEncoderType::X264 {
+        chain.push(VideoEncoderType::X264);
+    }
+
+    chain
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -384,6 +603,19 @@ impl GameConfig {
     /// `game_exe_stem` is the lowercase filename without extension (e.g.
     /// `"cs2"`), matching the style used by `constants::GAME_WHITELIST`.
     pub fn effective_capture_mode(&self, game_exe_stem: &str) -> EffectiveCaptureMode {
+        // Minecraft (javaw) MUST use GameHook regardless of the persisted/bundled
+        // config. Confirmed on a real RTX 4060 + HAGS rig (2026-05-31): Monitor
+        // capture (DXGI Desktop Duplication) records a FULL-BLACK 5-minute video
+        // with only the hardware cursor visible — Hardware-Accelerated GPU
+        // Scheduling makes the duplication surface come back empty/black — and
+        // WGC can't grab MC's OpenGL surface either. GameHook injects into the
+        // game's GL swapchain directly (GPU→GPU), bypassing the desktop
+        // compositor and HAGS entirely. This is a hard override so a stale
+        // `capture_mode = Monitor` saved in %APPDATA% (e.g. from the v2.6.12
+        // bundle) can never reintroduce the black-screen regression.
+        if matches!(game_exe_stem, "javaw" | "minecraft") {
+            return EffectiveCaptureMode::GameHook;
+        }
         match self.capture_mode {
             CaptureMode::Monitor => EffectiveCaptureMode::Monitor,
             CaptureMode::GameHook => EffectiveCaptureMode::GameHook,
@@ -660,16 +892,22 @@ where
 pub struct Credentials {
     pub api_key: String,
     pub has_consented: bool,
-    /// R46 (GDPR/CCPA): the application version the user was shown when they
-    /// accepted the consent disclosure. `None` means the user has never
-    /// accepted any version. If this does not match the currently-running
-    /// `CARGO_PKG_VERSION`, the ConsentView is shown again so the user must
-    /// re-consent to any updated disclosure text.
+    /// R46 (GDPR/CCPA): the consent **disclosure** version the user accepted.
+    /// `None` means the user has never accepted any version. If this does not
+    /// match the active `constants::CONSENT_DISCLOSURE_VERSION`, the ConsentView
+    /// is shown again so the user must re-consent to the updated disclosure
+    /// text.
+    ///
+    /// IMPORTANT: this is the disclosure-text version, NOT the app's
+    /// `CARGO_PKG_VERSION`. Comparing against the disclosure version (rather
+    /// than the binary version) means patch/minor app updates keep consent
+    /// valid; only a disclosure-text change re-prompts. See
+    /// `consent_disclosure_version` for the full rationale.
     ///
     /// This field gates every code path that installs a global input hook or
     /// opens a video/audio capture pipeline — see `Credentials::consent_status`
     /// and `input_capture::ConsentGuard`. Serialized as a semver string (e.g.
-    /// `"2.5.5"`); `None` round-trips as `null` / missing.
+    /// `"2.6.0"`); `None` round-trips as `null` / missing.
     ///
     /// Credentials uses a manual Serialize/Deserialize via `CredentialsOnDisk`
     /// (the DPAPI wrap path), so `#[serde(default)]` would be a no-op here
@@ -814,25 +1052,34 @@ impl Credentials {
         Ok(())
     }
 
-    /// Compute the consent status for the currently-running binary.
+    /// Compute the consent status against the active consent **disclosure**
+    /// version.
     ///
-    /// Returns `Granted` iff the stored `consent_given_at_version` parses as
-    /// semver and equals `current_version`. Returns `NotGranted` if no
-    /// version has ever been accepted, and `VersionMismatch` if a prior
-    /// version was accepted but this binary is newer/older.
-    pub fn consent_status(&self, current_version: &Version) -> ConsentStatus {
+    /// `disclosure_version` is the version of the consent disclosure *text*
+    /// (see [`consent_disclosure_version`] /
+    /// [`constants::CONSENT_DISCLOSURE_VERSION`]), NOT the app's
+    /// `CARGO_PKG_VERSION`. Returns `Granted` iff the stored
+    /// `consent_given_at_version` equals `disclosure_version`, `NotGranted` if
+    /// no version has ever been accepted, and `VersionMismatch` if the user
+    /// accepted a different (older) disclosure that has since changed.
+    ///
+    /// Because the disclosure version only moves when the disclosure text
+    /// changes, patch/minor app updates no longer invalidate stored consent.
+    pub fn consent_status(&self, disclosure_version: &Version) -> ConsentStatus {
         match &self.consent_given_at_version {
             None => ConsentStatus::NotGranted,
-            Some(v) if v == current_version => ConsentStatus::Granted,
+            Some(v) if v == disclosure_version => ConsentStatus::Granted,
             Some(_) => ConsentStatus::VersionMismatch,
         }
     }
 
     /// Record that the user has accepted the consent disclosure at the given
-    /// version. The UI calls this when the user clicks "Accept".
-    pub fn record_consent(&mut self, current_version: Version) {
+    /// version. The UI calls this when the user clicks "Accept", passing the
+    /// active disclosure version (see [`consent_disclosure_version`]) so the
+    /// stored value matches what the gate later compares against.
+    pub fn record_consent(&mut self, disclosure_version: Version) {
         self.has_consented = true;
-        self.consent_given_at_version = Some(current_version);
+        self.consent_given_at_version = Some(disclosure_version);
     }
 }
 
@@ -840,16 +1087,45 @@ impl Credentials {
 ///
 /// Panics only if the Cargo.toml version literal is malformed — which would
 /// be caught at build time. Callers can treat this as infallible at runtime.
+///
+/// NOTE: This is the *application* version. It is intentionally NOT used to
+/// gate consent anymore — see [`consent_disclosure_version`] for why. Keeping
+/// it because other call sites (telemetry, update checks) still want the live
+/// binary version.
 pub fn current_pkg_version() -> Version {
     // `env!` is compile-time; the value comes straight from Cargo.toml.
     Version::parse(env!("CARGO_PKG_VERSION"))
         .expect("CARGO_PKG_VERSION must be valid semver; this is a build-time contract")
 }
 
-/// Build a [`ConsentGuard`] from the current config and running binary version.
+/// The version of the **consent disclosure text** the consent gate keys on.
+///
+/// R46 fix: the gate previously compared stored consent against
+/// `CARGO_PKG_VERSION`, so EVERY app version bump silently invalidated consent
+/// and blocked auto-recording (a tester hit exactly this on the 2.6.0 -> 2.6.3
+/// bumps: the recorder booted but never recorded). We now compare against the
+/// disclosure-text version in [`constants::CONSENT_DISCLOSURE_VERSION`], which
+/// is bumped only when the disclosure itself changes. Patch/minor app updates
+/// therefore keep consent valid; only a disclosure change re-prompts.
+///
+/// Panics only if the constant is malformed — a build-time contract, exactly
+/// like [`current_pkg_version`].
+pub fn consent_disclosure_version() -> Version {
+    Version::parse(constants::CONSENT_DISCLOSURE_VERSION).expect(
+        "constants::CONSENT_DISCLOSURE_VERSION must be valid semver; this is a build-time contract",
+    )
+}
+
+/// Build a [`ConsentGuard`] from the current config and the active consent
+/// disclosure version.
 ///
 /// This is the single entry point for every recording path that needs to
 /// verify consent — input capture, OBS recorder, etc.
+///
+/// The comparison is against [`consent_disclosure_version`] (the disclosure
+/// text version), NOT [`current_pkg_version`] (the app version), so a patch or
+/// minor app update keeps prior consent valid. The legal gate is preserved:
+/// the user must still have consented at the current disclosure version.
 ///
 /// CI mode (see [`ci_mode`]) short-circuits to a session-only granted guard
 /// without consulting the on-disk config. This is a test-scaffolding bypass:
@@ -859,8 +1135,8 @@ pub fn consent_guard_from_config(config: &Config) -> ConsentGuard {
     if ci_mode() {
         return ConsentGuard::granted();
     }
-    let current = current_pkg_version();
-    ConsentGuard::new(config.credentials.consent_status(&current))
+    let disclosure = consent_disclosure_version();
+    ConsentGuard::new(config.credentials.consent_status(&disclosure))
 }
 
 /// Returns `true` when the recorder is running under the automated CI test
@@ -1252,12 +1528,18 @@ impl Config {
         // encode essentially for free; x264 software encoding chews CPU
         // (we saw 1 FPS effective on an AMD iGPU, and NVIDIA users often
         // end up here by default too).
+        //
+        // v2.6.0: extended to AMD (AMF) and Intel (QuickSync). AMD/Intel
+        // users were stuck on software X264 — maxing the CPU and lagging the
+        // whole system (~1 FPS effective on an AMD Radeon 780M). We pick the
+        // H.264 hardware variant for each vendor to mirror the existing
+        // NVIDIA choice (NvEnc, not NvEncHevc) — lowest-risk codec parity.
         if matches!(
             config.preferences.encoder.encoder,
             constants::encoding::VideoEncoderType::X264
         ) {
-            match detect_nvidia_gpu() {
-                Ok(true) => {
+            match detect_gpu_vendor() {
+                Ok(Some(GpuVendor::Nvidia)) => {
                     tracing::info!("NVIDIA GPU detected — upgrading encoder X264 -> NvEnc");
                     config.preferences.encoder.encoder =
                         constants::encoding::VideoEncoderType::NvEnc;
@@ -1265,7 +1547,21 @@ impl Config {
                         tracing::warn!(e=?e, "Failed to persist NvEnc migration");
                     }
                 }
-                Ok(false) => {}
+                Ok(Some(GpuVendor::Amd)) => {
+                    tracing::info!("AMD GPU detected — upgrading encoder X264 -> Amf");
+                    config.preferences.encoder.encoder = constants::encoding::VideoEncoderType::Amf;
+                    if let Err(e) = config.save() {
+                        tracing::warn!(e=?e, "Failed to persist Amf migration");
+                    }
+                }
+                Ok(Some(GpuVendor::Intel)) => {
+                    tracing::info!("Intel GPU detected — upgrading encoder X264 -> Qsv");
+                    config.preferences.encoder.encoder = constants::encoding::VideoEncoderType::Qsv;
+                    if let Err(e) = config.save() {
+                        tracing::warn!(e=?e, "Failed to persist Qsv migration");
+                    }
+                }
+                Ok(None) => {}
                 Err(e) => {
                     tracing::debug!(e=?e, "GPU vendor probe failed, keeping X264");
                 }
@@ -1427,6 +1723,31 @@ impl ObsX264Settings {
     }
 }
 
+/// NVENC default preset for "record while gaming".
+///
+/// We record at 1080p30 / ~10 Mbps WHILE the user plays the same game on the
+/// same GPU, so the encoder must stay out of the game's way. NVENC presets run
+/// `p1` (fastest, lowest GPU load) .. `p7` (slowest, max quality, highest GPU +
+/// VRAM contention). The old default was `NVENC_PRESETS[0]` == `p7`, which
+/// maximises contention — the opposite of what this workload wants. `p5` is the
+/// balanced preset and is exactly OBS's own shipped default for the modern
+/// `obs-nvenc` encoder (`obs_data_set_default_string(settings, "preset", "p5")`
+/// in plugins/obs-nvenc/nvenc-properties.c), so it is a conservative, proven
+/// choice rather than an aggressive one. We resolve it by value from the
+/// validated `NVENC_PRESETS` list (never reordering that list — it also drives
+/// the settings-UI dropdown order) and fall back to the list's first element if
+/// `p5` is ever removed upstream.
+const NVENC_BALANCED_PRESET: &str = "p5";
+
+fn nvenc_default_preset() -> String {
+    constants::encoding::NVENC_PRESETS
+        .iter()
+        .copied()
+        .find(|p| *p == NVENC_BALANCED_PRESET)
+        .unwrap_or(constants::encoding::NVENC_PRESETS[0])
+        .to_string()
+}
+
 /// NVENC (NVIDIA GPU) encoder specific settings
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -1437,7 +1758,14 @@ pub struct FfmpegNvencSettings {
 impl Default for FfmpegNvencSettings {
     fn default() -> Self {
         Self {
-            preset2: constants::encoding::NVENC_PRESETS[0].to_string(),
+            // `preset2` is the field/JSON name kept for config back-compat; the
+            // value is the balanced `p5` preset (see `nvenc_default_preset`).
+            preset2: nvenc_default_preset(),
+            // `hq` (high quality) — kept as-is. Dropping the preset p7 -> p5 is
+            // the load reduction we want; `hq` remains OBS's default tune and is
+            // the safest choice without runtime A/B data. `ll`/`ull` (low
+            // latency) are available in NVENC_TUNE_OPTIONS if a future,
+            // GPU-tested change wants to lean further toward latency.
             tune: constants::encoding::NVENC_TUNE_OPTIONS[0].to_string(),
         }
     }
@@ -1447,10 +1775,43 @@ impl FfmpegNvencSettings {
         &self,
         updater: libobs_wrapper::data::ObsDataUpdater,
     ) -> libobs_wrapper::data::ObsDataUpdater {
+        // Set BOTH `preset` and `preset2` to the same value. This recorder
+        // instantiates the modern texture NVENC encoders (OBS_NVENC_H264_TEX /
+        // OBS_NVENC_HEVC_TEX); that plugin reads the `preset` key
+        // (plugins/obs-nvenc/nvenc-properties.c) and IGNORES `preset2`, while
+        // the legacy ffmpeg-nvenc plugin reads `preset2`
+        // (plugins/obs-ffmpeg/obs-ffmpeg-nvenc.c). Writing both means whichever
+        // NVENC plugin OBS ends up using honours our preset; the unused key is
+        // harmlessly ignored. Both keys accept the identical `p1`..`p7` enum.
         updater
+            .set_string("preset", self.preset2.as_str())
             .set_string("preset2", self.preset2.as_str())
             .set_string("tune", self.tune.as_str())
     }
+}
+
+/// QuickSync default `target_usage` for "record while gaming".
+///
+/// QSV `target_usage` maps speed/quality (obs-qsv11.c `update_targetusage`):
+/// `quality`/`veryslow` -> TU1 (slowest, most encoder passes), `balanced`/
+/// `medium` -> TU4, `speed`/`veryfast` -> TU7 (fastest). Intel QSV usually runs
+/// on the integrated GPU, which shares silicon and memory bandwidth with the
+/// game's own rendering, so the old default `QSV_TARGET_USAGES[0]` == `quality`
+/// (TU1) is the worst case for stutter. `balanced` (TU4) is OBS's own shipped
+/// default (`obs_data_set_default_string(settings, "target_usage", "TU4")` in
+/// obs-qsv11.c) — a conservative middle that frees iGPU headroom while keeping
+/// quality fine for AI-world-model training video. Resolved by value from the
+/// validated list (which also feeds the settings-UI dropdown, so it is NOT
+/// reordered), falling back to the list head if `balanced` is removed upstream.
+const QSV_BALANCED_TARGET_USAGE: &str = "balanced";
+
+fn qsv_default_target_usage() -> String {
+    constants::encoding::QSV_TARGET_USAGES
+        .iter()
+        .copied()
+        .find(|t| *t == QSV_BALANCED_TARGET_USAGE)
+        .unwrap_or(constants::encoding::QSV_TARGET_USAGES[0])
+        .to_string()
 }
 
 /// QuickSync H.264 encoder specific settings
@@ -1462,7 +1823,7 @@ pub struct ObsQsvSettings {
 impl Default for ObsQsvSettings {
     fn default() -> Self {
         Self {
-            target_usage: constants::encoding::QSV_TARGET_USAGES[0].to_string(),
+            target_usage: qsv_default_target_usage(),
         }
     }
 }
@@ -1694,6 +2055,361 @@ mod tests {
             assert_eq!(dec.as_slice(), input, "round-trip for {input:?}");
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Encoder fallback-chain tests (multi-GPU compatibility hardening)
+    //
+    // These pin the guaranteed decision tree of `select_best_available_encoder`
+    // so the recorder can never be handed an encoder OBS didn't actually probe
+    // as available, and always degrades NVENC > AMF > QSV > x264.
+    // -----------------------------------------------------------------------
+    use constants::encoding::VideoEncoderType as VE;
+
+    #[test]
+    fn encoder_keeps_request_when_available() {
+        // The common path: the requested encoder is present, so it is kept
+        // verbatim. This is what preserves the proven AMD-AMF behaviour.
+        let available = [VE::AmfHevc, VE::Amf, VE::X264];
+        assert_eq!(
+            select_best_available_encoder(VE::Amf, &available),
+            VE::Amf,
+            "an available requested encoder must be kept unchanged"
+        );
+        assert_eq!(
+            select_best_available_encoder(VE::AmfHevc, &available),
+            VE::AmfHevc
+        );
+    }
+
+    #[test]
+    fn encoder_hevc_steps_down_to_same_vendor_h264() {
+        // HEVC requested, only the H.264 sibling registered → smallest possible
+        // degradation is the same-vendor H.264 encoder, NOT a vendor switch.
+        let available = [VE::NvEnc, VE::X264];
+        assert_eq!(
+            select_best_available_encoder(VE::NvEncHevc, &available),
+            VE::NvEnc,
+            "HEVC must step down to same-vendor H.264 before changing vendor"
+        );
+    }
+
+    #[test]
+    fn encoder_falls_through_to_best_available_hardware() {
+        // Optimus laptop scenario: config picked NVENC (NVIDIA adapter present)
+        // but NVENC never registered (old driver / session cap / parked dGPU).
+        // Intel QSV did register → we must use QSV, not collapse to software.
+        let available = [VE::QsvHevc, VE::Qsv, VE::X264];
+        assert_eq!(
+            select_best_available_encoder(VE::NvEnc, &available),
+            VE::QsvHevc,
+            "must pick the best AVAILABLE hardware encoder when the requested one is absent"
+        );
+        // And the HEVC-NVENC request degrades the same way.
+        assert_eq!(
+            select_best_available_encoder(VE::NvEncHevc, &available),
+            VE::QsvHevc
+        );
+    }
+
+    #[test]
+    fn encoder_prefers_nvenc_over_amf_over_qsv() {
+        // When several hardware encoders are simultaneously available and the
+        // request matches none of them, the priority order must hold.
+        let all_hw = [
+            VE::Qsv,
+            VE::QsvHevc,
+            VE::Amf,
+            VE::AmfHevc,
+            VE::NvEnc,
+            VE::NvEncHevc,
+            VE::X264,
+        ];
+        // Request something not in the list to force the preference walk.
+        // (Construct an impossible request by asking for a HW encoder we then
+        // exclude.) Easiest: request X264's "upgrade" by asking for QSV when
+        // everything is present — QSV IS present so it would be kept; instead
+        // exclude the requested one explicitly.
+        let without_request: Vec<VE> = all_hw.iter().copied().filter(|e| *e != VE::Qsv).collect();
+        assert_eq!(
+            select_best_available_encoder(VE::Qsv, &without_request),
+            VE::NvEncHevc,
+            "NVENC (HEVC) must win when present alongside AMF and QSV"
+        );
+
+        let nvenc_absent: Vec<VE> = without_request
+            .iter()
+            .copied()
+            .filter(|e| *e != VE::NvEncHevc && *e != VE::NvEnc)
+            .collect();
+        assert_eq!(
+            select_best_available_encoder(VE::Qsv, &nvenc_absent),
+            VE::AmfHevc,
+            "AMF (HEVC) must win over QSV when NVENC is absent"
+        );
+    }
+
+    #[test]
+    fn encoder_falls_back_to_x264_when_no_hardware() {
+        // No-discrete-GPU / iGPU-without-encoder machine: only software x264 is
+        // available. The requested hardware encoder must collapse to x264.
+        let available = [VE::X264];
+        assert_eq!(
+            select_best_available_encoder(VE::NvEncHevc, &available),
+            VE::X264,
+            "with no hardware encoder available, must fall back to software x264"
+        );
+        assert_eq!(select_best_available_encoder(VE::Amf, &available), VE::X264);
+    }
+
+    #[test]
+    fn encoder_x264_request_upgrades_to_available_hardware() {
+        // The RTX 4060 tester bug, pinned. A stored config of x264 must NOT be
+        // honoured when a real hardware encoder registered with OBS: x264 is
+        // always in `available` (it is the always-constructible software
+        // encoder), so honouring it is precisely how an NVENC-capable machine
+        // ended up CPU-bound on software at ~2 FPS. With NVENC present we must
+        // upgrade to it, deterministically preferring HEVC NVENC.
+        let available = [VE::NvEncHevc, VE::NvEnc, VE::X264];
+        assert_eq!(
+            select_best_available_encoder(VE::X264, &available),
+            VE::NvEncHevc,
+            "a stale x264 config must be overridden to the best available \
+             hardware encoder (NVENC) — this is the tester's choppy-video fix"
+        );
+
+        // AMD-only machine: x264 config must upgrade to AMF, not stay software.
+        let amd = [VE::AmfHevc, VE::Amf, VE::X264];
+        assert_eq!(select_best_available_encoder(VE::X264, &amd), VE::AmfHevc);
+
+        // Intel-only machine: x264 config must upgrade to QSV.
+        let intel = [VE::QsvHevc, VE::Qsv, VE::X264];
+        assert_eq!(select_best_available_encoder(VE::X264, &intel), VE::QsvHevc);
+    }
+
+    #[test]
+    fn encoder_x264_request_stays_x264_without_hardware() {
+        // The only case x264 is honoured: no hardware encoder registered at
+        // all. x264 is then the correct (and only) choice, and the downstream
+        // 720p software cap protects the CPU.
+        let software_only = [VE::X264];
+        assert_eq!(
+            select_best_available_encoder(VE::X264, &software_only),
+            VE::X264,
+            "x264 must remain x264 when no hardware encoder is available"
+        );
+    }
+
+    #[test]
+    fn encoder_empty_probe_yields_x264() {
+        // Degenerate case: the probe returned nothing usable. We still hand the
+        // caller x264 (the universal software encoder) rather than something
+        // unconstructible or leaving the choice unset.
+        assert_eq!(
+            select_best_available_encoder(VE::NvEnc, &[]),
+            VE::X264,
+            "an empty availability list must still resolve to x264"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Runtime construct-time fallback chain (a *listed* encoder can still fail
+    // to construct: saturated NVENC session cap, stale driver, parked Optimus
+    // dGPU, blocked AMD obs-amf-test). These pin the degradation ORDER, which
+    // is the only part testable without a live OBS context.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fallback_chain_tries_primary_first_then_x264_terminal() {
+        // The common multi-GPU machine: NVENC-HEVC primary, with its H.264
+        // sibling also listed. The chain must lead with the primary, walk the
+        // remaining available hardware in preference order, and ALWAYS end at
+        // x264 so a construction storm can still degrade to software.
+        let available = [VE::NvEncHevc, VE::NvEnc, VE::X264];
+        assert_eq!(
+            runtime_fallback_chain(VE::NvEncHevc, &available),
+            vec![VE::NvEncHevc, VE::NvEnc, VE::X264],
+            "primary first, then next-best hardware, then x264 terminal"
+        );
+    }
+
+    #[test]
+    fn fallback_chain_excludes_primary_from_hardware_walk() {
+        // Primary must never appear twice. Here AMF is primary; the hardware
+        // walk skips it and offers QSV next, then x264.
+        let available = [VE::AmfHevc, VE::Amf, VE::QsvHevc, VE::Qsv, VE::X264];
+        assert_eq!(
+            runtime_fallback_chain(VE::Amf, &available),
+            vec![VE::Amf, VE::AmfHevc, VE::QsvHevc, VE::Qsv, VE::X264],
+            "primary (AMF) appears once; rest follow HW preference order"
+        );
+    }
+
+    #[test]
+    fn fallback_chain_walks_full_preference_order() {
+        // Everything is available and the primary is the lowest-priority QSV:
+        // the remaining hardware must be walked NVENC>AMF>QSV (minus the
+        // primary), terminating in x264.
+        let all = [
+            VE::NvEncHevc,
+            VE::NvEnc,
+            VE::AmfHevc,
+            VE::Amf,
+            VE::QsvHevc,
+            VE::Qsv,
+            VE::X264,
+        ];
+        assert_eq!(
+            runtime_fallback_chain(VE::Qsv, &all),
+            vec![
+                VE::Qsv,
+                VE::NvEncHevc,
+                VE::NvEnc,
+                VE::AmfHevc,
+                VE::Amf,
+                VE::QsvHevc,
+                VE::X264,
+            ],
+        );
+    }
+
+    #[test]
+    fn fallback_chain_x264_primary_is_not_duplicated() {
+        // When x264 itself is the primary (no hardware registered), the chain
+        // is just [x264] — the terminal append is suppressed so it isn't listed
+        // twice.
+        assert_eq!(
+            runtime_fallback_chain(VE::X264, &[VE::X264]),
+            vec![VE::X264],
+            "x264 primary must not duplicate the terminal x264"
+        );
+    }
+
+    #[test]
+    fn fallback_chain_appends_x264_even_when_probe_omitted_it() {
+        // Defense-in-depth: even a degenerate `available` that somehow lacks
+        // x264 must still terminate in x264 (the always-constructible software
+        // encoder), so the recorder can never be left with "no encoder".
+        assert_eq!(
+            runtime_fallback_chain(VE::NvEncHevc, &[VE::NvEncHevc]),
+            vec![VE::NvEncHevc, VE::X264],
+            "x264 terminal is appended regardless of the probed list"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Encoder-SETTINGS defaults (record-while-gaming, low GPU contention).
+    //
+    // These pin the per-encoder preset / rate-control defaults so we record at
+    // 1080p30 ~10 Mbps without the encoder fighting the game for GPU/VRAM.
+    // They assert pure `Default` values only — `apply_to_data_updater` needs a
+    // live OBS runtime (Windows/GPU) and is not unit-testable here.
+    //
+    // Every asserted value is also checked to be a member of the validated,
+    // OBS-recognised constant list for that key, so a typo can never ship a
+    // string the encoder would silently ignore.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nvenc_default_preset_is_balanced_not_max_quality() {
+        let s = FfmpegNvencSettings::default();
+        // Balanced `p5` (OBS's own default), NOT the slowest/max-contention p7.
+        assert_eq!(
+            s.preset2, "p5",
+            "NVENC default preset must be the balanced p5, not p7"
+        );
+        assert_ne!(
+            s.preset2,
+            constants::encoding::NVENC_PRESETS[0],
+            "NVENC default must no longer be NVENC_PRESETS[0] (p7, max quality)"
+        );
+        // Must be a value the obs-nvenc/ffmpeg-nvenc plugins recognise.
+        assert!(
+            constants::encoding::NVENC_PRESETS.contains(&s.preset2.as_str()),
+            "NVENC preset must be a recognised p1..p7 value, got {:?}",
+            s.preset2
+        );
+        // Tune stays a recognised option (hq/ll/ull); we kept hq.
+        assert!(
+            constants::encoding::NVENC_TUNE_OPTIONS.contains(&s.tune.as_str()),
+            "NVENC tune must be a recognised value, got {:?}",
+            s.tune
+        );
+    }
+
+    #[test]
+    fn nvenc_default_preset_resolver_falls_back_to_list_head() {
+        // The resolver picks the balanced preset by value; if it is ever
+        // missing from the list it must degrade to the first element rather
+        // than panic or emit an empty string.
+        let p = nvenc_default_preset();
+        assert!(
+            constants::encoding::NVENC_PRESETS.contains(&p.as_str()),
+            "resolved NVENC preset must come from the validated list, got {p:?}"
+        );
+        assert!(!p.is_empty(), "resolved NVENC preset must be non-empty");
+    }
+
+    #[test]
+    fn qsv_default_target_usage_is_balanced_not_max_quality() {
+        let s = ObsQsvSettings::default();
+        // Balanced (TU4, OBS's own default), NOT `quality` (TU1, slowest).
+        assert_eq!(
+            s.target_usage, "balanced",
+            "QSV default target_usage must be balanced, not quality"
+        );
+        assert_ne!(
+            s.target_usage,
+            constants::encoding::QSV_TARGET_USAGES[0],
+            "QSV default must no longer be QSV_TARGET_USAGES[0] (quality, slowest)"
+        );
+        assert!(
+            constants::encoding::QSV_TARGET_USAGES.contains(&s.target_usage.as_str()),
+            "QSV target_usage must be a recognised value, got {:?}",
+            s.target_usage
+        );
+    }
+
+    #[test]
+    fn qsv_default_target_usage_resolver_falls_back_to_list_head() {
+        let t = qsv_default_target_usage();
+        assert!(
+            constants::encoding::QSV_TARGET_USAGES.contains(&t.as_str()),
+            "resolved QSV target_usage must come from the validated list, got {t:?}"
+        );
+        assert!(!t.is_empty(), "resolved QSV target_usage must be non-empty");
+    }
+
+    #[test]
+    fn amf_default_preset_stays_speed() {
+        // AMF was already tuned to `speed` (v2.6.4) for iGPU contention; this is
+        // a regression guard so it is never bumped back to quality/balanced.
+        let s = ObsAmfSettings::default();
+        assert_eq!(
+            s.preset, "speed",
+            "AMF default preset must stay speed for low GPU contention"
+        );
+        assert!(
+            constants::encoding::AMF_PRESETS.contains(&s.preset.as_str()),
+            "AMF preset must be a recognised value, got {:?}",
+            s.preset
+        );
+    }
+
+    #[test]
+    fn x264_default_preset_stays_fast() {
+        // x264 is the CPU fallback (720p-capped elsewhere); it must stay on a
+        // fast preset so software encoding stays light. Regression guard.
+        let s = ObsX264Settings::default();
+        assert_eq!(
+            s.preset, "veryfast",
+            "x264 default preset must stay veryfast so the CPU fallback is light"
+        );
+        assert!(
+            constants::encoding::X264_PRESETS.contains(&s.preset.as_str()),
+            "x264 preset must be a recognised value, got {:?}",
+            s.preset
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1815,14 +2531,73 @@ mod consent_tests {
     }
 
     #[test]
+    fn consent_disclosure_version_parses() {
+        // Build-time contract: CONSENT_DISCLOSURE_VERSION parses as semver.
+        // If this panics, the constant literal is broken.
+        let _ = consent_disclosure_version();
+    }
+
+    #[test]
     fn consent_guard_from_config_respects_stored_version() {
         let mut cfg = Config::default();
         // Without consent: guard refuses.
         assert!(!consent_guard_from_config(&cfg).is_granted());
 
-        // With consent at the current binary version: guard permits.
-        cfg.credentials.record_consent(current_pkg_version());
+        // With consent at the active disclosure version: guard permits. The
+        // guard keys on the disclosure version, so this is the value the UI
+        // records on Accept.
+        cfg.credentials.record_consent(consent_disclosure_version());
         assert!(consent_guard_from_config(&cfg).is_granted());
+    }
+
+    #[test]
+    fn patch_bump_does_not_invalidate_consent() {
+        // R46 regression: consent must survive an app patch/minor bump. The
+        // gate compares against the DISCLOSURE version, which does NOT move
+        // when CARGO_PKG_VERSION bumps. A tester hit the old bug (2.6.0 ->
+        // 2.6.3 bumps silently invalidated consent, so the recorder booted but
+        // never recorded).
+        //
+        // Self-contained replay of that scenario: the user consented under the
+        // disclosure shipped at 2.6.0, then the app patched forward. As long as
+        // the stored consent equals the active *disclosure* version, the status
+        // is Granted regardless of how far the binary version has moved.
+        let disclosure = Version::parse("2.6.0").unwrap();
+        let mut cfg = Config::default();
+        cfg.credentials.record_consent(disclosure.clone());
+
+        // The binary is now several patches ahead (2.6.3), but the gate keys on
+        // the disclosure version, so consent stands.
+        assert_eq!(
+            cfg.credentials.consent_status(&disclosure),
+            ConsentStatus::Granted,
+            "an app patch/minor bump must NOT invalidate consent — only a \
+             disclosure-text change (CONSENT_DISCLOSURE_VERSION bump) may"
+        );
+
+        // And end-to-end through the real entry point against the live
+        // disclosure constant: consenting at the active disclosure version
+        // yields a granted guard.
+        let mut cfg2 = Config::default();
+        cfg2.credentials
+            .record_consent(consent_disclosure_version());
+        assert!(consent_guard_from_config(&cfg2).is_granted());
+    }
+
+    #[test]
+    fn changed_disclosure_version_forces_reconsent() {
+        // The legal gate is preserved: if the user accepted an OLDER disclosure
+        // than the active one, they must re-consent.
+        let mut cfg = Config::default();
+        cfg.credentials
+            .record_consent(Version::parse("0.0.1").unwrap());
+        assert_eq!(
+            cfg.credentials
+                .consent_status(&consent_disclosure_version()),
+            ConsentStatus::VersionMismatch,
+            "a stored consent at a different disclosure version must re-prompt"
+        );
+        assert!(!consent_guard_from_config(&cfg).is_granted());
     }
 
     /// `Preferences::enable_route_type_tagging` MUST default to `false` so
