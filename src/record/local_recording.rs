@@ -1031,6 +1031,11 @@ impl LocalRecording {
 
     /// Write metadata to disk and validate the recording.
     /// Creates a [`constants::filename::recording::INVALID`] file if validation fails.
+    ///
+    /// `recording_bitrate_kbps` is the clamped value handed to the OBS
+    /// encoder at recording start (PRD R2.10) — it ends up in the on-disk
+    /// `metadata.json` so the buyer ingest can audit per-session bitrate
+    /// against the 6–12 Mbps band without re-reading user preferences.
     #[allow(clippy::too_many_arguments)]
     // TODO: refactor all of these arguments into a single struct
     pub(crate) async fn write_metadata_and_validate(
@@ -1047,6 +1052,8 @@ impl LocalRecording {
         recorder_extra: Option<serde_json::Value>,
         frame_count: Option<u64>,
         dropped_input_events: u64,
+        route_type: Option<u8>,
+        recording_bitrate_kbps: u32,
     ) -> Result<()> {
         // Resolve metadata path from recording location
         let metadata_path = recording_location.join(constants::filename::recording::METADATA);
@@ -1130,7 +1137,15 @@ impl LocalRecording {
                 .map(|a| hardware_specs::GpuSpecs::from_name(&a.name))
                 .collect(),
         ) {
-            Ok(specs) => Some(specs),
+            // R5.2: enrich GPU entries with driver_version. On non-Windows
+            // hosts this is a no-op; on Windows it walks the DISPLAY_DEVICE
+            // chain and substring-matches against the friendly name. We do
+            // this AFTER `get_hardware_specs` so any failure in the
+            // enrichment doesn't lose the rest of the data.
+            Ok(mut specs) => {
+                hardware_specs::enrich_gpu_specs_with_driver_version(&mut specs.gpus);
+                Some(specs)
+            }
             Err(e) => {
                 tracing::warn!("Failed to get hardware specs: {}", e);
                 None
@@ -1175,6 +1190,16 @@ impl LocalRecording {
             capture_resolution: Some(capture_resolution),
             wall_clock_start: Some(wall_clock_start),
             wall_clock_end: Some(wall_clock_end),
+            // Only persist a tag the operator actually set (1..=3). Defensive
+            // filter against malformed input (e.g. a future code path that
+            // writes 4 / 255) — buyer's schema only accepts {1,2,3}, so we
+            // would rather omit the field than ship a poison value the
+            // pipeline can't reject without a separate validation pass.
+            route_type: route_type.filter(|n| (1..=3).contains(n)),
+            // R2.10: stamp the effective (clamped) encoder bitrate so the
+            // buyer ingest can audit per-session bitrate against the
+            // 6–12 Mbps band.
+            encoder_bitrate_kbps: Some(recording_bitrate_kbps),
         };
 
         // Write metadata to disk using atomic + fsync'd write.
@@ -1547,13 +1572,27 @@ mod durability_tests {
             "metadata.json must exist after finalize"
         );
 
-        // (b) No `.tmp` sibling was left behind.
+        // (b) No `.tmp` sibling was left behind. Post-R5.6 the tempfile
+        // name carries a random suffix (`metadata.json.tmp.<rand>`), so
+        // the legacy `<path>.tmp` path is never even created — but we
+        // also scan the directory for ANY file whose name starts with the
+        // tempfile prefix to catch a partial cleanup.
         let tmp_sibling = session_dir
             .path()
             .join(format!("{}.tmp", constants::filename::recording::METADATA));
         assert!(
             !tmp_sibling.exists(),
             "metadata.json.tmp must not remain after successful rename"
+        );
+        let orphan_tmps: Vec<_> = std::fs::read_dir(session_dir.path())
+            .expect("read session dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(
+            orphan_tmps.is_empty(),
+            "R5.6: no `<path>.tmp.*` tempfiles must leak from a successful write, got: {orphan_tmps:?}"
         );
 
         // (c) Content round-trips through JSON.

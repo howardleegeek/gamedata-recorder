@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
     time::Instant,
 };
 
@@ -44,6 +44,12 @@ pub trait VideoRecorder {
     /// alongside desktop audio in monitor-capture mode. Recorders that use
     /// OBS's game-capture hook (or the socket backend's window-capture)
     /// ignore this — the hook already taps game/desktop audio directly.
+    /// `recording_bitrate_kbps`: effective (clamped) recording bitrate in
+    /// kbps. PRD R2.10. Recorders that drive a real encoder (the embedded
+    /// OBS recorder) must pass this through to the encoder `bitrate`
+    /// setting. The socket recorder ignores it: that backend talks to a
+    /// user-managed OBS process whose encoder settings are owned by the
+    /// user's OBS config and out of our scope.
     #[allow(clippy::too_many_arguments)]
     async fn start_recording(
         &mut self,
@@ -54,6 +60,7 @@ pub trait VideoRecorder {
         video_settings: EncoderSettings,
         game_config: GameConfig,
         record_microphone: bool,
+        recording_bitrate_kbps: u32,
         game_resolution: (u32, u32),
         event_stream: InputEventStream,
         consent: ConsentGuard,
@@ -251,6 +258,22 @@ impl Recorder {
                 .config
                 .read_safe()
                 .unwrap_or_else(|e| e.into_inner());
+            // Atomically consume the pending route_type tag. We swap to 0
+            // so the next recording starts fresh — even if the user
+            // forgets to retag, we won't reuse a stale value.
+            //
+            // Only honour the tag when the feature flag is on AND the value
+            // is in the documented {1,2,3} domain. When the flag is off, we
+            // still clear the slot (defensive: if the flag is toggled mid-
+            // session, the recorder must NOT smuggle a previously-set tag
+            // through after the flag is disabled).
+            let raw_pending = self.app_state.next_route_type.swap(0, Ordering::AcqRel);
+            let route_type =
+                if config.preferences.enable_route_type_tagging && (1..=3).contains(&raw_pending) {
+                    Some(raw_pending)
+                } else {
+                    None
+                };
             let params = RecordingParams {
                 recording_location: recording_location.clone(),
                 game_exe: game_exe.clone(),
@@ -265,6 +288,13 @@ impl Recorder {
                     .unwrap_or_default(),
                 record_microphone: config.preferences.record_microphone,
                 disable_action_camera_output: config.preferences.disable_action_camera_output,
+                route_type,
+                // R2.10: read the raw user value and clamp to the buyer
+                // band exactly once here. Downstream (`Recording`, the
+                // video recorder, `metadata.json`) sees only the clamped
+                // value, which keeps the warning one-shot per recording
+                // start rather than per encoder-data update.
+                recording_bitrate_kbps: config.preferences.effective_recording_bitrate_kbps(),
             };
             // Compute the guard again under the same lock snapshot so we
             // don't race with the user revoking consent between the top-of-
@@ -284,6 +314,24 @@ impl Recorder {
         };
 
         delete_recording_on_exit.disarm();
+
+        // Publish the in-flight clip's tag for UI / overlay readers. Mirrors
+        // the `Recording::route_type` we just snapshotted into the recorder
+        // params. We do this AFTER the `Recording::start` succeeds so a
+        // failed start (e.g. OBS init error) doesn't leave a stale tag
+        // visible to the UI for the next attempt.
+        let started_route_type = recording.route_type();
+        if let Ok(mut slot) = self.app_state.current_recording_route_type.write_safe() {
+            *slot = started_route_type;
+        }
+        // Publish the HWND for the ui-refusal detector task BEFORE we
+        // flip the visible recording state. Strict ordering (`Release`)
+        // pairs with the detector's `Acquire` read so a detector tick
+        // that observes a non-zero HWND is guaranteed to see the
+        // updated `RecordingStatus::Recording` next.
+        self.app_state
+            .recording_hwnd_raw
+            .store(hwnd.0 as isize, std::sync::atomic::Ordering::Release);
 
         self.recording = Some(recording);
         *self
@@ -324,6 +372,13 @@ impl Recorder {
             return Ok(None);
         };
 
+        // Clear the published recording HWND so the ui-refusal detector
+        // stops trying to inspect a window we're about to tear down.
+        // Release-store mirrors the Release-store on start.
+        self.app_state
+            .recording_hwnd_raw
+            .store(0, std::sync::atomic::Ordering::Release);
+
         let session_path = recording.recording_location().to_path_buf();
 
         recording
@@ -338,6 +393,13 @@ impl Recorder {
             .state
             .write_safe()
             .unwrap_or_else(|e| e.into_inner()) = RecordingStatus::Stopped;
+
+        // Clear the in-flight tag. The pending slot (`next_route_type`) is
+        // independent and was already consumed at start, so the next
+        // recording will require a fresh F1/F2/F3 press to set a tag.
+        if let Ok(mut slot) = self.app_state.current_recording_route_type.write_safe() {
+            *slot = None;
+        }
 
         tracing::info!("Recording stopped");
         Ok(Some(session_path))
@@ -401,6 +463,94 @@ impl Recorder {
     /// Returns the current game exe name if recording, None otherwise
     pub fn current_game_exe(&self) -> Option<String> {
         self.recording.as_ref().map(|r| r.game_exe().to_string())
+    }
+
+    /// Returns the HWND of the currently recording game window, if any.
+    /// Used by the UI-refusal detector to ask Win32 the right questions
+    /// about the right window.
+    pub fn current_recording_hwnd(&self) -> Option<HWND> {
+        self.recording.as_ref().map(|r| r.hwnd())
+    }
+
+    /// Aborts the in-progress recording: stops the video pipeline, deletes
+    /// the on-disk session folder, and returns to `RecordingStatus::Stopped`.
+    /// The session folder is **not** enqueued for upload — this is the
+    /// critical contract for the UI-refusal detector. The buyer pays for
+    /// clean clips; a popup-tainted partial clip must never reach the
+    /// upload queue.
+    ///
+    /// Best-effort: even if the video recorder reports an error during
+    /// `stop_recording`, we proceed to delete the folder anyway. The goal
+    /// is "no partial clip on disk, no upload" — not "perfectly clean
+    /// teardown".
+    pub async fn abort(&mut self, _input_capture: &InputCapture) -> Result<Option<PathBuf>> {
+        let Some(recording) = self.recording.take() else {
+            return Ok(None);
+        };
+
+        // Clear the published recording HWND immediately. Even if the
+        // teardown below races with one more detector tick, that tick
+        // will see HWND=0 and skip.
+        self.app_state
+            .recording_hwnd_raw
+            .store(0, std::sync::atomic::Ordering::Release);
+
+        let session_path = recording.recording_location().to_path_buf();
+
+        // Stop the encoder so the MP4 file is closed and we can remove
+        // the directory. We swallow errors here — even a half-closed MP4
+        // gets unlinked when we delete the parent folder.
+        if let Err(e) = self.video_recorder.stop_recording().await {
+            tracing::warn!(
+                e=?e,
+                session_path=%session_path.display(),
+                "abort(): video_recorder.stop_recording() failed; proceeding with folder \
+                 delete anyway (partial clip will be removed)"
+            );
+        }
+
+        // Discard the Recording struct so its input_writer + fps_logger
+        // drop cleanly. We DO NOT call `recording.stop(...)` because that
+        // path writes metadata.json and is the "successful save" path —
+        // exactly the opposite of what an abort wants.
+        drop(recording);
+
+        // Delete the session folder. Best-effort: a transient `EBUSY` on
+        // Windows (rare, but possible if the encoder's file handle hasn't
+        // released yet) gets logged but doesn't fail the abort — the
+        // folder is still flagged as in-progress and the upload worker
+        // will not touch it without a metadata.json.
+        match tokio::fs::remove_dir_all(&session_path).await {
+            Ok(()) => {
+                tracing::info!(
+                    session_path=%session_path.display(),
+                    "abort(): deleted partial recording folder"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    e=?e,
+                    session_path=%session_path.display(),
+                    "abort(): failed to delete partial recording folder; it will not be \
+                     enqueued for upload (no metadata.json), but the bytes remain on disk"
+                );
+            }
+        }
+
+        *self
+            .app_state
+            .state
+            .write_safe()
+            .unwrap_or_else(|e| e.into_inner()) = RecordingStatus::Stopped;
+
+        // Symmetric with stop(): clear the in-flight tag. The pending slot
+        // (`next_route_type`) is independent and is consumed at start, so
+        // the next recording requires a fresh F1/F2/F3 press to set a tag.
+        if let Ok(mut slot) = self.app_state.current_recording_route_type.write_safe() {
+            *slot = None;
+        }
+
+        Ok(Some(session_path))
     }
 }
 

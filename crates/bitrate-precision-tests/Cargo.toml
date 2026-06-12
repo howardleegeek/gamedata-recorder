@@ -1,0 +1,32 @@
+[package]
+name = "bitrate-precision-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# This crate exists ONLY to compile the cross-platform pure-logic parts of
+# the R2.10 bitrate band — `src/config_bitrate.rs` (clamp + defaults + band
+# constants) — on non-Windows hosts (macOS / Linux CI) so we can run its
+# unit + integration tests without dragging in libobs-wrapper / glfw /
+# tray-icon / egui_overlay (the Windows-only deps of the top-level
+# `gamedata-recorder` crate).
+#
+# The bitrate source file is source-included via `#[path = ...]` from
+# `src/lib.rs`, NOT compiled as part of the top-level crate's `cargo build`
+# from this crate. Building this crate on Windows is also fine — it just
+# compiles the same logic as a library.
+#
+# Mirrors the pattern used by `crates/action-camera-tests/`.
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Capture `tracing::warn!` events emitted by the clamp into an in-memory
+# buffer so tests can assert that the one-shot warning fired exactly once
+# when out-of-band kbps was passed. `tracing-subscriber` is already a
+# workspace dep (used by the top-level crate's `main.rs` for the file
+# logger) so this is additive only to the test target.
+tracing-subscriber = { workspace = true }

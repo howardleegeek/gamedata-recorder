@@ -17,6 +17,17 @@ pub struct SessionMetadata {
     pub version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// Operator-set per-clip route tag, captured from F1/F2/F3 hotkeys at the
+    /// start of the recording. `1` = 常规漫游 (regular roaming), `2` = 特殊
+    /// 路线 (special route), `3` = 循环录制 (loop recording). `None` means
+    /// the operator did not press a tag hotkey before the recording started
+    /// (or the feature flag `Preferences::enable_route_type_tagging` was
+    /// disabled). When `None`, the field is omitted from the serialized JSON
+    /// so the buyer's pipeline can flag the clip for human review without
+    /// reading a fabricated value as ground truth. Buyer-spec §2 in
+    /// `docs/RECORDER_BUYER_SPEC_FEATURES.md`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub route_type: Option<u8>,
 }
 
 impl SessionMetadata {
@@ -30,6 +41,7 @@ impl SessionMetadata {
             game,
             version,
             notes: None,
+            route_type: None,
         }
     }
 
@@ -331,6 +343,72 @@ mod tests {
         assert_eq!(meta.frame_duration_ns, 16_666_667);
         meta.finalize(216_000, 5_400_000_000, 1_564_294_558_000_000_000);
         assert_eq!(meta.total_frames, 216_000);
+    }
+
+    /// `SessionMetadata::new` defaults `route_type` to `None` — operators
+    /// must opt-in via F1/F2/F3, not by default. This guards against a
+    /// future refactor that accidentally hardcodes the field to `Some(1)`
+    /// (which would poison the buyer's training set with "regular roaming"
+    /// for every clip that wasn't actively tagged).
+    #[test]
+    fn session_metadata_new_has_no_route_type() {
+        let meta = SessionMetadata::new(
+            "session_test".to_string(),
+            "test_game".to_string(),
+            "2.6.0".to_string(),
+        );
+        assert_eq!(
+            meta.route_type, None,
+            "untagged session must default to route_type = None"
+        );
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(
+            !json.contains("route_type"),
+            "untagged session.json must not contain a route_type field, got: {json}"
+        );
+    }
+
+    /// When the operator tagged the clip via F1/F2/F3, `route_type` must
+    /// serialize as a JSON integer (not a string, not an object), so the
+    /// buyer's pipeline can read it without a custom deserializer.
+    #[test]
+    fn session_metadata_route_type_serializes_as_integer() {
+        for tag in 1u8..=3 {
+            let mut meta = SessionMetadata::new(
+                "session_test".to_string(),
+                "test_game".to_string(),
+                "2.6.0".to_string(),
+            );
+            meta.route_type = Some(tag);
+            let json = serde_json::to_string(&meta).unwrap();
+            let needle = format!("\"route_type\":{tag}");
+            assert!(
+                json.contains(&needle),
+                "expected `{needle}` in session.json, got: {json}"
+            );
+        }
+    }
+
+    /// Wire-format regression: a legacy `session.json` (pre-route_type
+    /// feature) must still deserialize cleanly. Field is optional with
+    /// `default`, so loaders never trip on its absence.
+    #[test]
+    fn session_metadata_deserializes_legacy_wire_shape_without_route_type() {
+        let legacy = r#"{
+            "session_id": "legacy_session",
+            "created_at": "2026-04-01T12:00:00Z",
+            "duration_seconds": 330,
+            "total_frames": 9900,
+            "total_actions": 1234,
+            "game": "Cyberpunk2077",
+            "version": "2.1"
+        }"#;
+        let meta: SessionMetadata = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            meta.route_type, None,
+            "legacy session.json deserializes with no route_type"
+        );
+        assert_eq!(meta.game, "Cyberpunk2077");
     }
 
     /// Regression: the legacy hardware.json shape (no cpu_physical_cores,

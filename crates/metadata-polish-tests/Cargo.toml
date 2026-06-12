@@ -1,0 +1,35 @@
+[package]
+name = "metadata-polish-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# This crate exists ONLY to compile the cross-platform pure-logic parts of
+# R5.2 (system metadata extension), R5.3 (fps_stats percentile math), and
+# R5.6 (atomic finalization helpers) on non-Windows hosts (macOS / Linux CI)
+# so we can run unit + integration tests without dragging in libobs-wrapper /
+# glfw / tray-icon / egui_overlay (the Windows-only deps of the top-level
+# `gamedata-recorder` crate).
+#
+# Mirrors the pattern established by `crates/action-camera-tests/`:
+# source-include files via `#[path = ...]` from `src/lib.rs`, expose a
+# `crate::util::durable_write` shim for the writer code that does
+# `use crate::util::durable_write;`, and let the same source compile on Mac
+# without changes.
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+color-eyre = { workspace = true }
+constants = { workspace = true }
+sysinfo = { workspace = true }
+# Required as a regular dep because src/util/durable_write.rs is
+# source-included from the top-level crate via #[path = ...] in
+# src/util_mod.rs (added in the R5.6 commit). The atomic-write helper
+# uses `tempfile::Builder::tempfile_in` for collision-free temp names.
+tempfile = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

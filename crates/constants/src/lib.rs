@@ -435,6 +435,12 @@ pub mod filename {
         pub const METADATA: &str = "metadata.json";
         /// Per-second FPS log (buyer spec requirement)
         pub const FPS_LOG: &str = "fps_log.json";
+        /// Aggregate FPS statistics for the whole session — `{ median, p1,
+        /// p5, p50, p95, p99, mean, min, max }` computed from REAL per-frame
+        /// timestamps. Sidecar to `fps_log.json` (PRD R5.3); the per-second
+        /// log is the heartbeat aggregate, this file is the per-frame
+        /// distribution.
+        pub const FPS_STATS: &str = "fps_stats.json";
         /// Per-frame timestamp log — one `{idx, t_ns}` JSON object per line.
         /// Enables precise frame-to-input alignment downstream.
         pub const FRAMES_JSONL: &str = "frames.jsonl";

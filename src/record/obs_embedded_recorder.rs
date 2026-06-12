@@ -300,6 +300,7 @@ impl VideoRecorder for ObsEmbeddedRecorder {
         video_settings: EncoderSettings,
         game_config: GameConfig,
         record_microphone: bool,
+        recording_bitrate_kbps: u32,
         (base_width, base_height): (u32, u32),
         event_stream: InputEventStream,
         consent: ConsentGuard,
@@ -324,6 +325,7 @@ impl VideoRecorder for ObsEmbeddedRecorder {
                     video_settings,
                     game_config,
                     record_microphone,
+                    recording_bitrate_kbps,
                     recording_path,
                     game_exe: game_exe.to_string(),
                     hwnd: SendableComp(hwnd),
@@ -644,6 +646,10 @@ struct RecordingRequest {
     /// taps game audio) and for the window-capture fallback (which already
     /// uses `set_capture_audio`).
     record_microphone: bool,
+    /// Effective (clamped) recording bitrate in kbps — passed verbatim to
+    /// `EncoderSettings::apply_to_obs_data` so the OBS encoder's `bitrate`
+    /// setting matches `Preferences::recording_bitrate_kbps`. PRD R2.10.
+    recording_bitrate_kbps: u32,
     recording_path: String,
     game_exe: String,
     // SAFETY: HWND is wrapped in SendableComp to allow passing across threads.
@@ -1321,7 +1327,8 @@ impl RecorderState {
         }
 
         // (The video encoder was already constructed above, before `reset_video`,
-        // so the 720p software cap could observe the actually-constructed encoder.
+        // so the 720p software cap could observe the actually-constructed encoder
+        // with the bitrate from `request.recording_bitrate_kbps` applied.
         // `video_encoder` / `actual_encoder_type` hold that result.)
 
         // Update the output path settings (when output is not active)

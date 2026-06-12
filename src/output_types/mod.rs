@@ -1,3 +1,4 @@
+pub mod fps_stats;
 pub mod lem_metadata;
 pub mod lem_types;
 
@@ -73,6 +74,30 @@ pub struct Metadata {
     /// Wall-clock end in RFC 3339.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub wall_clock_end: Option<String>,
+    /// Operator-set per-clip route tag, captured from F1/F2/F3 hotkeys at the
+    /// start of the recording. `1` = 常规漫游 (regular roaming), `2` = 特殊
+    /// 路线 (special route), `3` = 循环录制 (loop recording). `None` means
+    /// the operator did not press a tag hotkey before this recording started
+    /// (or the feature flag `Preferences::enable_route_type_tagging` was
+    /// disabled). Omitted from serialized JSON when `None` so the buyer's
+    /// pipeline can detect "operator forgot to tag" instead of training on a
+    /// fabricated value. Buyer-spec §2 in
+    /// `docs/RECORDER_BUYER_SPEC_FEATURES.md`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub route_type: Option<u8>,
+    /// Effective video encoder bitrate, in kilobits per second (PRD R2.10).
+    ///
+    /// This is the *clamped* value actually fed to the OBS encoder
+    /// (`Preferences::recording_bitrate_kbps` after
+    /// `clamp_recording_bitrate_kbps`), not the raw user preference. The
+    /// buyer ingest reads this back to audit per-session bitrate against
+    /// the 6–12 Mbps R2.10 band.
+    ///
+    /// `Option<u32>` for backward compatibility: recordings produced before
+    /// this field existed don't have it in their `metadata.json`, and
+    /// `#[serde(default)]` makes those files parse cleanly with `None`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub encoder_bitrate_kbps: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -592,5 +617,109 @@ impl std::str::FromStr for InputEvent {
 
         let event_type = InputEventType::from_id_and_json_args(event_type, event_args)?;
         Ok(InputEvent::new(timestamp, event_type))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal `Metadata` with only the required fields populated.
+    /// The rest are `Option::None`, mirroring what an older recorder
+    /// version would produce. Used by the `route_type` schema tests below.
+    fn minimal_metadata() -> Metadata {
+        Metadata {
+            game_exe: "test_game.exe".to_string(),
+            window_name: None,
+            dropped_input_events: None,
+            game_resolution: None,
+            recorder_version: None,
+            recorder_commit: None,
+            session_id: "test-session".to_string(),
+            hardware_id: "test-hardware".to_string(),
+            hardware_specs: None,
+            gamepads: HashMap::new(),
+            start_timestamp: 0.0,
+            end_timestamp: 0.0,
+            duration: 0.0,
+            input_stats: None,
+            recorder: None,
+            recorder_extra: None,
+            average_fps: None,
+            platform: None,
+            fps_effective: None,
+            frame_count: None,
+            duration_ns: None,
+            capture_resolution: None,
+            wall_clock_start: None,
+            wall_clock_end: None,
+            route_type: None,
+        }
+    }
+
+    /// Wire-format invariant: untagged clips' `metadata.json` must NOT
+    /// contain a `route_type` key. The buyer's pipeline keys on field
+    /// absence vs an explicit integer to decide whether to flag a clip
+    /// for review — emitting a fabricated default would silently train
+    /// the model on the wrong tag.
+    #[test]
+    fn metadata_omits_route_type_when_none() {
+        let m = minimal_metadata();
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            !json.contains("route_type"),
+            "untagged metadata.json must not contain route_type, got: {json}"
+        );
+    }
+
+    /// When the operator tagged the clip, `route_type` must serialize as
+    /// a JSON integer matching the {1,2,3} domain. Catches accidental
+    /// stringification by future refactors.
+    #[test]
+    fn metadata_serializes_route_type_as_integer() {
+        for tag in 1u8..=3 {
+            let mut m = minimal_metadata();
+            m.route_type = Some(tag);
+            let json = serde_json::to_string(&m).unwrap();
+            let needle = format!("\"route_type\":{tag}");
+            assert!(
+                json.contains(&needle),
+                "expected `{needle}` in metadata.json, got: {json}"
+            );
+        }
+    }
+
+    /// Backwards compat: a legacy `metadata.json` (pre-route_type
+    /// feature) must still deserialize. The field has `default`, so
+    /// `serde_json` fills in `None` automatically.
+    #[test]
+    fn metadata_deserializes_legacy_wire_shape_without_route_type() {
+        let legacy = r#"{
+            "game_exe": "test_game.exe",
+            "session_id": "legacy",
+            "hardware_id": "legacy",
+            "start_timestamp": 0.0,
+            "end_timestamp": 0.0,
+            "duration": 0.0
+        }"#;
+        let m: Metadata = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            m.route_type, None,
+            "legacy metadata deserializes with no route_type"
+        );
+        assert_eq!(m.game_exe, "test_game.exe");
+    }
+
+    /// Round-trip: serialize a tagged metadata, deserialize it back,
+    /// the tag must survive intact. Guards against a future
+    /// `#[serde(rename)]` or `#[serde(deserialize_with)]` slipping past
+    /// review.
+    #[test]
+    fn metadata_route_type_round_trips_through_serde() {
+        let mut m = minimal_metadata();
+        m.route_type = Some(2);
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Metadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.route_type, Some(2));
     }
 }

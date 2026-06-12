@@ -6,7 +6,12 @@ use crate::{
     },
     assets::load_cue_bytes,
     play_time::PlayTimeTransition,
-    record::LocalRecording,
+    record::{
+        LocalRecording,
+        ui_refusal_detector::{
+            RefusalDetector, UiRefusalReason, capture_frame_hash, capture_window_snapshot,
+        },
+    },
     system::keycode::name_to_virtual_keycode,
     // error_message_box removed — never show popups during recording
     upload,
@@ -200,6 +205,23 @@ async fn main(
         api_client.clone(),
         upload_trigger_rx,
     ));
+
+    // UI-refusal detector channel + dedicated 1Hz task.
+    //
+    // The detector runs in its OWN tokio task (not on the game render
+    // thread, not even on the encoder-poll path) and posts a single
+    // `UiRefusalReason` over this channel on the first refusal it sees.
+    // The main loop reacts via a `select!` arm below: aborts the
+    // recording, deletes the partial clip, and surfaces a tray
+    // notification. The channel is bounded (size 4) — back-pressure on
+    // repeated refusals is fine, we only need one to fire the abort.
+    //
+    // Bounded over unbounded so an unreachable main loop can't unbounded-
+    // grow the queue. If a refusal is dropped because the main loop is
+    // stuck, the next tick will produce the same refusal a second later.
+    let (refusal_tx, mut refusal_rx) = tokio::sync::mpsc::channel::<UiRefusalReason>(4);
+    tracing::debug!("Spawning UI refusal detector task");
+    tokio::spawn(ui_refusal_detector_task(app_state.clone(), refusal_tx));
 
     let mut state = State {
         recording_state: RecordingState::Idle,
@@ -935,6 +957,52 @@ async fn main(
                 }
                 *app_state.last_foregrounded_game.write_safe()
                     .unwrap_or_else(|e| e.into_inner()) = foregrounded;
+                // 5-min auto-cap timer (buyer-spec, default-off).
+                //
+                // Evaluate the cross-platform policy kernel before the
+                // generic tick state machine: if the cap fires we want
+                // the resulting `Recording -> Idle` transition to win
+                // over any conflicting tick decision (e.g. a workstation
+                // lock pause), since landing inside the 5..=6 min
+                // acceptance window is the buyer's hard requirement.
+                //
+                // The clear-on-transition discipline in
+                // `handle_transition` guarantees:
+                //   * `start.is_none()` outside an active recording, so
+                //     this branch is dormant when there is no clip to cap;
+                //   * the post-transition `recording_start_time` is `None`
+                //     again, so a subsequent tick cannot double-fire.
+                {
+                    let auto_cap_cfg = match app_state.config.read_safe() {
+                        Ok(cfg) => auto_cap::Config {
+                            enabled: cfg.preferences.enable_auto_cap_5min,
+                            duration_sec: cfg.preferences.auto_cap_duration_sec,
+                        },
+                        Err(_) => {
+                            tracing::warn!(
+                                "config RwLock poisoned during auto-cap tick; treating cap as disabled"
+                            );
+                            auto_cap::Config::disabled_default()
+                        }
+                    };
+                    let recording_start = app_state
+                        .recording_start_time
+                        .read_safe()
+                        .map(|guard| *guard)
+                        .unwrap_or(None);
+                    if let auto_cap::ShouldStop::Yes =
+                        auto_cap::evaluate(auto_cap_cfg, recording_start, Instant::now())
+                    {
+                        // The kernel already logged at info level — drive
+                        // the same graceful stop F9 takes.
+                        if let Err(e) = state.handle_transition(RecordingState::Idle).await {
+                            tracing::error!(
+                                e = ?e,
+                                "Failed to drive auto-cap stop transition"
+                            );
+                        }
+                    }
+                }
                 // Tick state machine
                 if let Some((to_state, task)) = state.tick().await {
                     if let Err(e) = state.handle_transition(to_state).await {
@@ -944,6 +1012,36 @@ async fn main(
                 // Periodically force the UI to rerender so that it will process events, even if not visible
                 app_state.ui_update_tx.send(UiUpdate::ForceUpdate).ok();
             },
+            // UI-refusal detector: independent 1Hz task posts a `UiRefusalReason`
+            // here when it sees a buyer-rejected UI condition. We respond by
+            // aborting the in-progress recording (drops the partial clip, does
+            // NOT enqueue for upload) and surfacing a tray notification.
+            //
+            // The detector only sends when the recording is actually active
+            // AND the pref is on, so we don't need to re-check those flags
+            // here. But we DO re-check `recording_state == Recording` to
+            // guard against a race where the user manually stopped between
+            // the detector's snapshot and our receive.
+            Some(reason) = refusal_rx.recv() => {
+                if !matches!(state.recording_state, RecordingState::Recording) {
+                    tracing::debug!(
+                        ?reason,
+                        recording_state=?state.recording_state,
+                        "UI refusal received but no recording active; ignoring"
+                    );
+                    continue;
+                }
+                tracing::warn!(
+                    reason=?reason,
+                    "UI refusal detected; aborting in-progress recording"
+                );
+                if let Err(e) = state.handle_ui_refusal(reason).await {
+                    tracing::error!(
+                        e=?e,
+                        "Failed to abort recording on UI refusal"
+                    );
+                }
+            },
         }
     }
 
@@ -951,6 +1049,135 @@ async fn main(
         tracing::error!(e=?e, "Failed to stop recording on shutdown");
     }
     Ok(())
+}
+
+/// Independent 1Hz tokio task that polls window state and fires a single
+/// `UiRefusalReason` over `tx` on first detection of a buyer-rejected UI
+/// condition. Idle when the recording pref is off OR when no recording is
+/// active — the per-tick work is bounded to a config-read + a single
+/// `RecordingStatus` enum check until a recording starts.
+///
+/// Lives for the lifetime of the tokio runtime. Errors writing to `tx`
+/// (receiver dropped on shutdown) terminate the task quietly.
+///
+/// The Windows path uses Win32 APIs to read foreground/popup/overlay
+/// state. The non-Windows path is a no-op that just sleeps — the
+/// recorder itself is Windows-only in production; this stub exists only
+/// so cross-platform builds (macOS / Linux CI) compile.
+async fn ui_refusal_detector_task(
+    app_state: Arc<AppState>,
+    tx: tokio::sync::mpsc::Sender<UiRefusalReason>,
+) {
+    #[cfg(target_os = "windows")]
+    {
+        ui_refusal_detector_task_windows(app_state, tx).await;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // No-op: the detector never triggers on non-Windows. We park the
+        // task on a long sleep so it doesn't busy-wait, and drop `tx`
+        // immediately so any send attempts would fail fast (none will,
+        // because we never send).
+        let _ = (app_state, tx);
+        std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn ui_refusal_detector_task_windows(
+    app_state: Arc<AppState>,
+    tx: tokio::sync::mpsc::Sender<UiRefusalReason>,
+) {
+    // Pre-allocate the detector with a 1-second nominal interval. The
+    // ACTUAL interval is read from config each iteration (so changing
+    // `refusal_check_interval_sec` at runtime takes effect on the next
+    // tick), but the stall-window math is interval-aware so this is
+    // safe.
+    let mut detector = RefusalDetector::default();
+    let mut last_known_interval = Duration::from_secs(1);
+
+    loop {
+        // Read pref + interval once per tick. Defaults are conservative:
+        // pref off OR interval-zero ⇒ sleep 1s and loop. Clamped to
+        // [1, 30] so a typo can't wedge the task or DOS the OS APIs.
+        let (enabled, interval_secs) = match app_state.config.read_safe() {
+            Ok(cfg) => (
+                cfg.preferences.enable_ui_refusal_detector,
+                cfg.preferences.refusal_check_interval_sec,
+            ),
+            Err(poisoned) => {
+                let cfg = poisoned.into_inner();
+                (
+                    cfg.preferences.enable_ui_refusal_detector,
+                    cfg.preferences.refusal_check_interval_sec,
+                )
+            }
+        };
+        let interval = Duration::from_secs(interval_secs.clamp(1, 30) as u64);
+        if interval != last_known_interval {
+            // Rebuild the detector with the new interval so the stall-
+            // threshold math stays consistent.
+            detector = RefusalDetector::new(interval);
+            last_known_interval = interval;
+        }
+
+        tokio::time::sleep(interval).await;
+
+        if !enabled {
+            // Pref off ⇒ detector NEVER triggers. We still loop (so a
+            // runtime flip-on takes effect on the next tick), but we
+            // never call the platform shim and never read app_state
+            // beyond the config check.
+            continue;
+        }
+
+        // Only run when there's an active recording. We read the
+        // published HWND with `Acquire` so a non-zero read is guaranteed
+        // to be paired with the `RecordingStatus::Recording` write that
+        // happened-before it on the main task.
+        let raw_hwnd = app_state
+            .recording_hwnd_raw
+            .load(std::sync::atomic::Ordering::Acquire);
+        if raw_hwnd == 0 {
+            // No active recording ⇒ reset the detector's stall counter so
+            // a freshly-started recording doesn't inherit an old hash.
+            detector = RefusalDetector::new(interval);
+            continue;
+        }
+
+        // Reconstruct the HWND. Safety: the value came from a previous
+        // `hwnd.0 as isize` Release-store on the recording start path.
+        // It's still a valid Win32 HWND because the recording is still
+        // active (the abort/stop paths clear the cell to 0 BEFORE
+        // calling any teardown).
+        let hwnd = windows::Win32::Foundation::HWND(raw_hwnd as *mut std::ffi::c_void);
+        if hwnd.0.is_null() {
+            continue;
+        }
+
+        let snap = capture_window_snapshot(hwnd);
+        let frame_hash = capture_frame_hash(hwnd);
+        if let Some(reason) = detector.observe(&snap, frame_hash) {
+            tracing::warn!(
+                ?reason,
+                "ui_refusal_detector_task: refusal detected — notifying main loop"
+            );
+            // Show the tray notification IMMEDIATELY from this task so
+            // operators see the reason even if the main loop is briefly
+            // busy. The actual abort happens on the main loop (it owns
+            // the Recorder); we do not race.
+            crate::ui::notification::show_ui_refusal_notification(reason);
+            if tx.send(reason).await.is_err() {
+                // Receiver dropped — main loop has shut down. Exit
+                // cleanly.
+                return;
+            }
+            // After a fired refusal, reset so we don't immediately
+            // re-fire on the next tick (the main loop's abort path will
+            // take some time, and the recording is already gone).
+            detector = RefusalDetector::new(interval);
+        }
+    }
 }
 
 /// State machine-esque representation of the recording state. This is only accessible from tokio_thread.
@@ -1049,6 +1276,19 @@ enum RecordingState {
     /// upon both input & window focus detected. Stores the PID of the paused
     /// application to detect if it closes while paused.
     Paused { pid: game_process::Pid },
+}
+
+impl RecordingState {
+    /// Returns true when a recording is in flight or paused (i.e. there's an
+    /// active clip whose tag has already been captured). Used by the
+    /// F1/F2/F3 route_type handler to distinguish "tag the next clip" (Idle)
+    /// from "tag will apply to next clip" (Recording / Paused).
+    fn is_recording(&self) -> bool {
+        matches!(
+            self,
+            RecordingState::Recording | RecordingState::Paused { .. }
+        )
+    }
 }
 struct State {
     recording_state: RecordingState,
@@ -1153,18 +1393,104 @@ const AUTO_RECORD_TEST_GAME_STEM: &str = "test_game";
 /// transition completes before another one can start.
 const HOTKEY_TRANSITION_THROTTLE_MS: u64 = 200;
 
+/// Map an F1/F2/F3 virtual-key code to its `route_type` value:
+/// - `F1` (`0x70`) → 1 (常规漫游, regular roaming)
+/// - `F2` (`0x71`) → 2 (特殊路线, special route)
+/// - `F3` (`0x72`) → 3 (循环录制, loop recording)
+///
+/// Returns `None` for any other key. Keycodes match the table in
+/// `src/system/keycode.rs`. We hard-code them here (rather than calling
+/// `name_to_virtual_keycode` per keypress) because (a) F1-F3 are not
+/// user-rebindable for this feature — the hotkey identity is part of the
+/// buyer spec — and (b) the input loop is hot and we want zero allocation
+/// per keypress.
+fn route_type_for_key(key: u16) -> Option<u8> {
+    match key {
+        0x70 => Some(1),
+        0x71 => Some(2),
+        0x72 => Some(3),
+        _ => None,
+    }
+}
+
+/// Human-readable label for a `route_type` value, used only in tracing
+/// breadcrumbs. Matches the labels in
+/// `docs/RECORDER_BUYER_SPEC_FEATURES.md` §2 so operators can correlate
+/// log lines with the buyer's schema documentation.
+fn route_type_label(tag: u8) -> &'static str {
+    match tag {
+        1 => "regular roaming (常规漫游)",
+        2 => "special route (特殊路线)",
+        3 => "loop recording (循环录制)",
+        _ => "unknown",
+    }
+}
+
 impl State {
     async fn on_input(&mut self, e: Event) {
-        let (start_key, stop_key) = match self.app_state.config.read() {
+        let (start_key, stop_key, route_type_tagging_enabled) = match self.app_state.config.read() {
             Ok(cfg) => (
                 name_to_virtual_keycode(cfg.preferences.start_recording_key()),
                 name_to_virtual_keycode(cfg.preferences.stop_recording_key()),
+                cfg.preferences.enable_route_type_tagging,
             ),
             Err(_) => {
                 tracing::error!("Config RwLock poisoned in on_input, using F9 defaults");
-                (name_to_virtual_keycode("F9"), name_to_virtual_keycode("F9"))
+                (
+                    name_to_virtual_keycode("F9"),
+                    name_to_virtual_keycode("F9"),
+                    false,
+                )
             }
         };
+
+        // F1/F2/F3 → route_type ∈ {1,2,3} tagging. Gated behind
+        // `Preferences::enable_route_type_tagging` (default false) so the
+        // legacy recording path is byte-for-byte unaffected when disabled.
+        //
+        // Pressed BEFORE recording: tag remembered for the next clip
+        // (consumed atomically by `Recorder::start`).
+        // Pressed DURING recording: tag still recorded for the NEXT clip;
+        // we log a warn-level breadcrumb so the operator can see in the
+        // log that their press only takes effect after the current clip
+        // stops. The current clip's tag is captured at start and never
+        // re-written.
+        if route_type_tagging_enabled
+            && let Some(key) = e.key_press_keycode()
+            && let Some(tag) = route_type_for_key(key)
+        {
+            self.app_state.next_route_type.store(tag, Ordering::Release);
+            let label = route_type_label(tag);
+            if self.recording_state.is_recording() {
+                tracing::warn!(
+                    route_type = tag,
+                    label,
+                    "route_type hotkey pressed during active recording; \
+                     tag will apply to the NEXT recording, current clip's \
+                     tag is unchanged"
+                );
+            } else {
+                tracing::info!(
+                    route_type = tag,
+                    label,
+                    "route_type hotkey set; will apply to next recording"
+                );
+            }
+            // Treat F1/F2/F3 as fully consumed — do NOT fall through to
+            // the start/stop hotkey arms below. The user has explicitly
+            // bound F1-F3 to tagging in the preferences UI; reusing them
+            // for start/stop would silently double-fire. Note that the
+            // user must rebind start/stop off F1-F3 themselves; defaults
+            // are F9 so the conflict never arises in practice, and we
+            // still call `seen_input` below so the keypress is recorded
+            // in `inputs.csv`.
+            if let Err(e) = self.recorder.seen_input(e).await {
+                tracing::error!(e=?e, "Failed to seen input after route_type hotkey");
+            }
+            self.last_active = Instant::now();
+            return;
+        }
+
         if let Err(e) = self.recorder.seen_input(e).await {
             tracing::error!(e=?e, "Failed to seen input");
         }
@@ -1718,6 +2044,18 @@ impl State {
                     self.actively_recording_window
                 );
                 self.last_active = Instant::now();
+                // Auto-cap timer: stamp the start instant so the 1 Hz
+                // perform_checks tick can decide whether the configured
+                // duration has elapsed. We always write `Some(now)`
+                // unconditionally — the policy itself short-circuits
+                // when the feature is disabled, so leaving a stale
+                // timestamp in place would not fire it. Writing
+                // explicitly here is still the right discipline so a
+                // future toggle of `enable_auto_cap_5min` mid-recording
+                // has a fresh anchor to measure from.
+                if let Ok(mut start) = self.app_state.recording_start_time.write_safe() {
+                    *start = Some(Instant::now());
+                }
                 // Notify play time tracker of recording start
                 self.app_state
                     .play_time_state
@@ -1747,6 +2085,16 @@ impl State {
                     &mut self.cue_cache,
                 )
                 .await?;
+                // Auto-cap timer: recording is over, clear the start
+                // stamp so any subsequent perform_checks tick that
+                // observes the stale `Some(_)` cannot re-fire a stop on
+                // a recording that does not exist. This is the path the
+                // F9 hotkey takes — clearing here is what makes
+                // "manual F9 before cap fires" cleanly cancel the
+                // policy (see `auto_cap::evaluate` invariants).
+                if let Ok(mut start) = self.app_state.recording_start_time.write_safe() {
+                    *start = None;
+                }
                 // Notify play time tracker of recording stop
                 self.app_state
                     .play_time_state
@@ -1778,6 +2126,16 @@ impl State {
                     &mut self.cue_cache,
                 )
                 .await?;
+                // Auto-cap timer: while paused no clip is accruing, so
+                // we clear the start instant. When the recording later
+                // resumes (Paused -> Recording branch above) it will be
+                // re-stamped — the buyer's `5 ≤ duration ≤ 6 min` rule
+                // is per-clip, so a pause-resume cycle is the right
+                // moment to restart the timer rather than letting paused
+                // wall-clock time count against the cap.
+                if let Ok(mut start) = self.app_state.recording_start_time.write_safe() {
+                    *start = None;
+                }
                 *self
                     .app_state
                     .state
@@ -1814,6 +2172,15 @@ impl State {
                     .unwrap_or_else(|e| e.into_inner())
                     .preferences
                     .honk;
+                // Defensive: clear the auto-cap start stamp on the
+                // Paused -> Idle leg too. In practice Paused already
+                // zeroed it on the prior Recording -> Paused
+                // transition, but keeping the write here means every
+                // path that lands in Idle leaves the field cleared,
+                // which is the invariant the policy relies on.
+                if let Ok(mut start) = self.app_state.recording_start_time.write_safe() {
+                    *start = None;
+                }
                 // When user stop keys recording while paused, or when the paused app closes
                 *self
                     .app_state
@@ -1904,6 +2271,13 @@ impl State {
                     return Err(e);
                 }
                 self.last_active = Instant::now();
+                // Auto-cap timer: a Recording -> Recording restart
+                // produces a new clip, so the cap window resets. The
+                // "second recording resets timer" invariant in
+                // `tests/auto_cap.rs` is the regression check.
+                if let Ok(mut start) = self.app_state.recording_start_time.write_safe() {
+                    *start = Some(Instant::now());
+                }
                 RecordingState::Recording
             }
             (old_state, new_state) => {
@@ -2280,6 +2654,68 @@ impl State {
         if self.app_state.upload_trigger_tx.send(trigger).is_err() {
             tracing::error!("Auto-upload worker channel closed; dropping auto-upload request");
         }
+    }
+
+    /// Abort the in-progress recording because the UI-refusal detector
+    /// observed a buyer-rejected condition. This is the abort path that
+    /// the detector's spawned task fires through a channel into the main
+    /// loop.
+    ///
+    /// Contract (from the spec):
+    ///   - Partial clip on disk is deleted.
+    ///   - Partial clip is NOT enqueued for upload.
+    ///   - User sees a tray notification ("Recording rejected: {reason}").
+    ///   - State machine returns to `Idle`.
+    ///
+    /// The tray notification is already shown from the detector task —
+    /// we don't double-fire it here.
+    async fn handle_ui_refusal(&mut self, reason: UiRefusalReason) -> Result<()> {
+        // P0-3: clear crashed game info on abort (this is an
+        // operator-meaningful stop, like a hotkey stop).
+        self.crashed_game_info = None;
+
+        // Abort the recording. `Recorder::abort` deletes the partial
+        // clip; it does NOT call `maybe_trigger_auto_upload`, which is
+        // the critical contract.
+        let session_path = self.recorder.abort(&self.input_capture).await?;
+
+        if let Some(ref path) = session_path {
+            tracing::warn!(
+                reason=?reason,
+                session=%path.display(),
+                "ui-refusal: aborted recording; partial clip removed; NOT enqueued for upload"
+            );
+        } else {
+            tracing::debug!(
+                reason=?reason,
+                "ui-refusal: abort() found no active recording; no-op"
+            );
+        }
+
+        // Drop the state machine back to Idle. We deliberately do NOT
+        // call `handle_transition(RecordingState::Idle)` here because
+        // that path goes through `stop_recording_with_notification`
+        // which writes metadata.json (saving the clip) and would also
+        // enqueue auto-upload. Both are wrong for an abort.
+        self.recording_state = RecordingState::Idle;
+
+        // Mirror the visible UI state.
+        *self
+            .app_state
+            .state
+            .write_safe()
+            .unwrap_or_else(|e| e.into_inner()) = RecordingStatus::Stopped;
+
+        // Notify play-time tracker that recording stopped (not due to
+        // idle — due to UI refusal).
+        if let Ok(mut play_time) = self.app_state.play_time_state.write() {
+            play_time.handle_transition(PlayTimeTransition {
+                is_recording: false,
+                due_to_idle: false,
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -2861,5 +3297,61 @@ mod session_dir_name_tests {
             parts[3].chars().all(|c| c.is_ascii_hexdigit()),
             "suffix must be hex"
         );
+    }
+}
+
+#[cfg(test)]
+mod route_type_tests {
+    use super::{route_type_for_key, route_type_label};
+
+    /// F1 (`0x70`) maps to 1 (常规漫游).
+    #[test]
+    fn f1_keycode_maps_to_1() {
+        assert_eq!(route_type_for_key(0x70), Some(1));
+    }
+
+    /// F2 (`0x71`) maps to 2 (特殊路线).
+    #[test]
+    fn f2_keycode_maps_to_2() {
+        assert_eq!(route_type_for_key(0x71), Some(2));
+    }
+
+    /// F3 (`0x72`) maps to 3 (循环录制).
+    #[test]
+    fn f3_keycode_maps_to_3() {
+        assert_eq!(route_type_for_key(0x72), Some(3));
+    }
+
+    /// Any other key code must return `None` so non-tag keys (including
+    /// the start/stop hotkey F9 at `0x78` and F4 at `0x73` sitting right
+    /// after F3 in the table) never accidentally trigger a tag.
+    #[test]
+    fn non_tag_keycodes_return_none() {
+        for non_tag in [0x00u16, 0x0D, 0x73, 0x74, 0x78, 0xFF, 0xFFFF] {
+            assert_eq!(
+                route_type_for_key(non_tag),
+                None,
+                "keycode {non_tag:#06X} must not map to a route_type"
+            );
+        }
+    }
+
+    /// Labels exist for every valid tag — used in tracing breadcrumbs
+    /// so operators can correlate log lines with the buyer's docs.
+    #[test]
+    fn labels_cover_all_valid_tags() {
+        for tag in 1u8..=3 {
+            let label = route_type_label(tag);
+            assert!(
+                !label.is_empty() && label != "unknown",
+                "tag {tag} must have a real label, got `{label}`"
+            );
+        }
+        // Sentinel values get a defensive "unknown" — we never want a
+        // panic in the input loop just because a future code path
+        // misroutes a value.
+        assert_eq!(route_type_label(0), "unknown");
+        assert_eq!(route_type_label(4), "unknown");
+        assert_eq!(route_type_label(255), "unknown");
     }
 }

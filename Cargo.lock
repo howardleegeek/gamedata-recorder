@@ -465,6 +465,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "auto-cap"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -582,6 +589,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2261d10cca569e4643e526d8dc2e62e433cc8aba21ab764233731f8d369bf394"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "bitrate-precision-tests"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1673,10 +1690,12 @@ checksum = "a3d8a32ae18130a3c84dd492d4215c3d913c3b07c6b63c2eb3eb7ff1101ab7bf"
 name = "engine-telemetry"
 version = "0.1.0"
 dependencies = [
+ "libloading 0.8.8",
  "serde",
  "serde_json",
  "tempfile",
  "tracing",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -2119,6 +2138,7 @@ name = "gamedata-recorder"
 version = "2.6.16"
 dependencies = [
  "async-trait",
+ "auto-cap",
  "backoff",
  "catppuccin-egui",
  "chrono",
@@ -3175,6 +3195,7 @@ dependencies = [
  "gilrs 0.11.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "gilrs 0.11.0 (git+https://gitlab.com/gilrs-project/gilrs.git)",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3440,7 +3461,7 @@ checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 [[package]]
 name = "libobs"
 version = "4.0.2+32.0.2"
-source = "git+https://github.com/libobs-rs/libobs-rs.git#9406f52e1bc8a93b992be9b04725ff8ab54bf3c6"
+source = "git+https://github.com/libobs-rs/libobs-rs.git?rev=9406f52e1bc8a93b992be9b04725ff8ab54bf3c6#9406f52e1bc8a93b992be9b04725ff8ab54bf3c6"
 dependencies = [
  "bindgen",
  "pkg-config",
@@ -3449,7 +3470,7 @@ dependencies = [
 [[package]]
 name = "libobs-simple"
 version = "5.0.6+32.0.2"
-source = "git+https://github.com/libobs-rs/libobs-rs.git#9406f52e1bc8a93b992be9b04725ff8ab54bf3c6"
+source = "git+https://github.com/libobs-rs/libobs-rs.git?rev=9406f52e1bc8a93b992be9b04725ff8ab54bf3c6#9406f52e1bc8a93b992be9b04725ff8ab54bf3c6"
 dependencies = [
  "display-info",
  "libobs",
@@ -3465,7 +3486,7 @@ dependencies = [
 [[package]]
 name = "libobs-simple-macro"
 version = "6.0.1"
-source = "git+https://github.com/libobs-rs/libobs-rs.git#9406f52e1bc8a93b992be9b04725ff8ab54bf3c6"
+source = "git+https://github.com/libobs-rs/libobs-rs.git?rev=9406f52e1bc8a93b992be9b04725ff8ab54bf3c6#9406f52e1bc8a93b992be9b04725ff8ab54bf3c6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3475,7 +3496,7 @@ dependencies = [
 [[package]]
 name = "libobs-window-helper"
 version = "0.2.1"
-source = "git+https://github.com/libobs-rs/libobs-rs.git#9406f52e1bc8a93b992be9b04725ff8ab54bf3c6"
+source = "git+https://github.com/libobs-rs/libobs-rs.git?rev=9406f52e1bc8a93b992be9b04725ff8ab54bf3c6#9406f52e1bc8a93b992be9b04725ff8ab54bf3c6"
 dependencies = [
  "windows 0.62.2",
 ]
@@ -3483,7 +3504,7 @@ dependencies = [
 [[package]]
 name = "libobs-wrapper"
 version = "6.0.4+32.0.2"
-source = "git+https://github.com/libobs-rs/libobs-rs.git#9406f52e1bc8a93b992be9b04725ff8ab54bf3c6"
+source = "git+https://github.com/libobs-rs/libobs-rs.git?rev=9406f52e1bc8a93b992be9b04725ff8ab54bf3c6#9406f52e1bc8a93b992be9b04725ff8ab54bf3c6"
 dependencies = [
  "chrono",
  "display-info",
@@ -3660,6 +3681,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "metadata-polish-tests"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "constants",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -6769,6 +6804,13 @@ dependencies = [
  "memoffset",
  "tempfile",
  "winapi",
+]
+
+[[package]]
+name = "ui-refusal-tests"
+version = "0.1.0"
+dependencies = [
+ "game-process",
 ]
 
 [[package]]

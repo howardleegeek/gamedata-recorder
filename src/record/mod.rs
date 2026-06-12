@@ -10,6 +10,7 @@ mod obs_embedded_recorder;
 mod obs_socket_recorder;
 mod recorder;
 mod recording;
+pub mod ui_refusal_detector;
 
 // LEM format modules
 pub mod lem_input_recorder;
