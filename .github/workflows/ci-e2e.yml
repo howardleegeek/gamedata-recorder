@@ -78,6 +78,8 @@ jobs:
         shell: pwsh
 
       - name: Pre-stage OBS runtime next to the recorder binary
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # The recorder needs libobs DLLs + data folder next to the
         # .exe at runtime. `.cargo/config.toml` pins the triple so
         # the exe lands under target\x86_64-pc-windows-msvc\release\.

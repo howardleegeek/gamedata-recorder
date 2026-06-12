@@ -51,6 +51,8 @@ jobs:
         run: New-Item -ItemType Directory -Force -Path dist
 
       - name: Install and run cargo-obs-build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cargo install cargo-obs-build
           cargo obs-build build --out-dir dist\
