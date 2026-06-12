@@ -21,9 +21,10 @@
 
 use std::io;
 
-use engine_telemetry::{
-    CyberpunkHook, EngineFrame, EngineHook, GtaVHook, HookError, write_telemetry_sidecar,
-};
+use engine_telemetry::{EngineFrame, HookError, write_telemetry_sidecar};
+// Only the mock-contract tests (cfg-gated below) drive the hooks directly.
+#[cfg(not(target_os = "windows"))]
+use engine_telemetry::{CyberpunkHook, EngineHook, GtaVHook};
 
 // ---------------------------------------------------------------------------
 // Schema pin: canonical JSON fixture
@@ -207,6 +208,12 @@ fn sidecar_writer_creates_file_with_trailing_newline_optional() {
 // Mock hook invariant-violation branch
 // ---------------------------------------------------------------------------
 
+// On Windows `CyberpunkHook`/`GtaVHook` resolve to the real engine hooks,
+// which return `NotAttached` without the game + RED4ext/ScriptHookV DLLs
+// present (i.e. always in CI). These mock-contract tests only apply where
+// the mock build is selected; the macOS cross-platform Coverage job keeps
+// exercising them.
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn cyberpunk_hook_captures_at_least_a_thousand_frames_without_drift() {
     // Burn the mock for a full second of 30 fps frames; assert
@@ -225,6 +232,7 @@ fn cyberpunk_hook_captures_at_least_a_thousand_frames_without_drift() {
     }
 }
 
+#[cfg(not(target_os = "windows"))] // mock-contract test, see note above
 #[test]
 fn gta_v_hook_captures_a_thousand_frames_without_drift() {
     // Same contract as the cyberpunk test, applied to the sibling RAGE
@@ -395,6 +403,7 @@ fn euler_zyx_reference_values_match_spec_tolerance() {
 // Cross-hook behavioural contract
 // ---------------------------------------------------------------------------
 
+#[cfg(not(target_os = "windows"))] // mock-contract test, see note above
 #[test]
 fn both_hooks_advance_player_position_monotonically() {
     // Property test: regardless of axis (Cyberpunk = +X, GTA = +Y), the
@@ -416,6 +425,7 @@ fn both_hooks_advance_player_position_monotonically() {
     assert_eq!(gv1.player_position[2], gv0.player_position[2]);
 }
 
+#[cfg(not(target_os = "windows"))] // mock-contract test, see note above
 #[test]
 fn both_hooks_have_unique_mock_fov() {
     // Cyberpunk mock = 70°, GTA mock = 50°. Distinct mocks let the buyer

@@ -213,8 +213,11 @@ fn qsv_target_usage_default_is_quality() {
 
 #[test]
 fn amf_presets_locked() {
-    // AMD AMF presets are exactly three: quality, balanced, speed.
-    assert_eq!(AMF_PRESETS, &["quality", "balanced", "speed"]);
+    // v2.6.4: "speed" is now index 0 (default). On iGPUs (AMD Radeon 780M
+    // etc.) the "quality" preset's extra encoder passes starve the encoder
+    // AND game rendering via shared memory bandwidth — causing whole-system
+    // stutter. "speed" frees the iGPU and is sufficient for training video.
+    assert_eq!(AMF_PRESETS, &["speed", "balanced", "quality"]);
 }
 
 #[test]
@@ -259,16 +262,20 @@ fn rate_control_is_cbr() {
 }
 
 #[test]
-fn b_frames_count_is_two() {
-    // B-frames = 2 is the OBS default. Locking it down for explicit
-    // contract test rather than letting the default drift.
-    assert_eq!(B_FRAMES, 2);
+fn b_frames_disabled_for_realtime_capture() {
+    // v2.6.4: B-frames = 0 (was 2). B-frames add encoder latency +
+    // reference buffering that loads the iGPU encoder. For real-time
+    // capture on integrated GPUs we disable them. CBR holds the bitrate
+    // target regardless.
+    assert_eq!(B_FRAMES, 0);
 }
 
 #[test]
-fn quality_enhancers_enabled() {
-    // PSY-AQ + lookahead = quality knobs we want on by default. Buyer
-    // spec values quality over CPU savings.
-    assert!(PSYCHO_AQ);
-    assert!(LOOKAHEAD);
+fn quality_enhancers_disabled_for_realtime_capture() {
+    // v2.6.4: PSYCHO_AQ + LOOKAHEAD both false (were true). Psycho AQ is
+    // an extra encoder pass that steals iGPU headroom; lookahead buffers
+    // future frames for rate-control decisions adding latency. Both off
+    // for smoother real-time iGPU capture.
+    assert!(!PSYCHO_AQ);
+    assert!(!LOOKAHEAD);
 }
