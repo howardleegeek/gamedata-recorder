@@ -19,7 +19,7 @@ use windows::Win32::{
 };
 
 use crate::{
-    app_state::{AppState, RecordingStatus},
+    app_state::{AppState, RecordingStatus, RwLockExt as _},
     assets::{get_logo_default_bytes, get_logo_recording_bytes},
     config::OverlayLocation,
     system::hardware_specs::get_primary_monitor_resolution,
@@ -47,13 +47,20 @@ impl OverlayApp {
     pub fn new(app_state: Arc<AppState>, stopped_rx: tokio::sync::broadcast::Receiver<()>) -> Self {
         tracing::debug!("OverlayApp::new() called");
         let (overlay_location, overlay_opacity) = {
-            let config = app_state.config.read().unwrap();
+            let config = app_state
+                .config
+                .read_safe()
+                .unwrap_or_else(|e| e.into_inner());
             (
                 config.preferences.overlay_location,
                 config.preferences.overlay_opacity,
             )
         };
-        let rec_status = app_state.state.read().unwrap().clone();
+        let rec_status = app_state
+            .state
+            .read_safe()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         tracing::debug!("OverlayApp::new() complete");
         Self {
             initialized: false,
@@ -163,7 +170,11 @@ impl EguiOverlay for OverlayApp {
         glfw_backend: &mut egui_window_glfw_passthrough::GlfwBackend,
     ) {
         let (curr_opacity, curr_location) = {
-            let config = self.app_state.config.read().unwrap();
+            let config = self
+                .app_state
+                .config
+                .read_safe()
+                .unwrap_or_else(|e| e.into_inner());
             (
                 config.preferences.overlay_opacity,
                 config.preferences.overlay_location,
@@ -208,7 +219,12 @@ impl EguiOverlay for OverlayApp {
         };
 
         // only repaint the window every 500ms or when the recording state changes
-        let curr_state = self.app_state.state.read().unwrap().clone();
+        let curr_state = self
+            .app_state
+            .state
+            .read_safe()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if self.last_paint_time.elapsed() > Duration::from_millis(500)
             || curr_state != self.rec_status
         {

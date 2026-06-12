@@ -1,0 +1,70 @@
+[package]
+name = "engine-telemetry"
+version = "0.1.0"
+edition = "2024"
+description = "Per-title engine telemetry sidecar (RTTI / matrix readback) for ground-truth gameplay data"
+
+# ───────────────────────────────────────────────────────────────────────────
+# What this crate is — and what it is NOT.
+#
+# This is the **engine-state sidecar** companion to `crates/depth-hook`.
+# Where `depth-hook` reverse-engineers GPU state (DX12 depth + projection),
+# this crate reverse-engineers CPU-side engine state — the player position,
+# the camera Follow Offset, the metric scale used to convert engine units
+# into meters — by reading the target process's RTTI / object table at the
+# start of each rendered frame.
+#
+# Per docs/CAPTURE_PERFORMANCE_INVESTIGATION.md the encoder pipeline already
+# runs at a steady 30 fps; the only missing axis is engine telemetry. With
+# (depth, camera matrices, player transform, metric_scale) all aligned per
+# frame the recording becomes ground-truth 3D — the moat over the commodity
+# raw-video farms — without retraining anything.
+#
+# Platform scope:
+#   - Real RTTI walking is Windows-only (windows-rs + ReadProcessMemory or
+#     in-process RED4ext / CET adapters). All of that lives behind
+#     `#[cfg(windows)]` in the future `rtti::` module.
+#   - On macOS / Linux this crate is **pure Rust** so the developer box
+#     and CI can `cargo test` it. The `CyberpunkHook` placeholder
+#     compiles everywhere and emits deterministic mock frames so the
+#     telemetry plumbing (sidecar writer, JSON contract, frame queue)
+#     is unit-testable independently of the actual hook.
+#
+# Cross-platform crate similar to `crates/action-camera-tests`. No Win32
+# deps. Source-includes via `#[path]` are intentionally NOT used yet —
+# the puffydev hand-off keeps this crate hermetic so the Windows engineer
+# only has to add a single `[target.'cfg(windows)'.dependencies]` block
+# (commented as a TODO below) without touching the cross-platform surface.
+# ───────────────────────────────────────────────────────────────────────────
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+# Windows-only dependencies — to be added by puffydev when implementing
+# the real RTTI walker. Kept as a TODO comment so reviewers see the seam.
+#
+# When the Windows engineer picks this up, the block below becomes:
+#
+#     [target.'cfg(windows)'.dependencies]
+#     windows = { workspace = true, features = [
+#         "Win32_System_Diagnostics_Debug",     # ReadProcessMemory
+#         "Win32_System_ProcessStatus",         # K32EnumProcessModules
+#         "Win32_System_Threading",             # OpenProcess
+#         "Win32_System_LibraryLoader",         # GetModuleHandleW
+#         "Win32_Graphics_Direct3D12",          # swap-chain present sync
+#     ] }
+#     # Optional in-process adapter (preferred over OOP RPM where allowed):
+#     # red4ext-rs = "0.8"   # only if RED4ext is the chosen attach surface.
+#
+# TODO(puffydev): add the windows feature block above + the RTTI walker
+#                 module in src/rtti.rs with #[cfg(windows)] gating.
+# TODO(puffydev): if/when this crate needs to cross-check exe stems
+#                 against the recorder's whitelist, add
+#                 `constants = { workspace = true }` here — it's
+#                 cross-platform and already a workspace dependency.
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = { workspace = true }

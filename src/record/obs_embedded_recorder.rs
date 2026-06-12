@@ -825,6 +825,9 @@ struct RecorderState {
     last_application: Option<(String, SendableComp<HWND>)>,
     /// Track the last source creation state to force recreation when it changes
     last_source_creation_state: Option<SourceCreationState>,
+    /// Store monitor capture info to recreate the source after DXGI access-lost
+    /// recovery (monitor sleep/wake). Only populated when using monitor capture mode.
+    last_monitor_capture_info: Option<MonitorCaptureInfo>,
     is_recording: bool,
     recording_start_time: Option<Instant>,
 
@@ -882,6 +885,18 @@ struct SourceCreationState {
     use_window_capture: bool,
     effective_mode: crate::config::EffectiveCaptureMode,
 }
+
+/// Information needed to recreate a monitor capture source after DXGI
+/// access-lost recovery. Stored during recording start and used when
+/// resuming from monitor sleep/wake (P0-2 fix).
+#[derive(Clone, Debug)]
+struct MonitorCaptureInfo {
+    /// Index of the monitor being captured
+    monitor_idx: usize,
+    /// Total number of monitors available at capture start
+    monitor_count: usize,
+}
+
 impl RecorderState {
     fn new(
         adapter_index: usize,
@@ -974,6 +989,7 @@ impl RecorderState {
                 last_video_encoder_type: None,
                 last_application: None,
                 last_source_creation_state: None,
+                last_monitor_capture_info: None,
                 is_recording: false,
                 recording_start_time: None,
                 last_total_frames: None,
@@ -1269,15 +1285,20 @@ impl RecorderState {
         let use_monitor_capture_audio =
             should_attach_monitor_audio(effective_mode, monitors_available);
 
-        let source = prepare_source(
+        let last_source = self.source.take();
+        let last_state_ref = self.last_source_creation_state.as_ref();
+        let (source, monitor_info) = prepare_source(
             &mut self.obs_context,
             &request.game_exe,
             request.hwnd.0,
             &mut scene,
-            self.source.take(),
+            last_source,
             &source_creation_state,
-            self.last_source_creation_state.as_ref(),
+            last_state_ref,
         )?;
+
+        // P0-2: Store monitor capture info for DXGI session rebuild
+        self.last_monitor_capture_info = monitor_info;
 
         // Register the source
         scene.set_to_channel(0)?;
@@ -1655,6 +1676,8 @@ impl RecorderState {
             self.last_fps_instant = None;
             self.last_real_fps = None;
             self.frozen_capture_fallback_fired = false;
+            // P0-2: Clear monitor capture info when stopping recording
+            self.last_monitor_capture_info = None;
         } else {
             tracing::warn!("No active recording to stop");
         }
@@ -1942,6 +1965,38 @@ impl RecorderState {
                         "Interactive desktop is back — resuming recording \
                          from DXGI access-lost pause"
                     );
+
+                    // P0-2: On Win11 build 26200, libobs's monitor-capture source
+                    // does NOT reliably re-acquire the DXGI duplicator after
+                    // monitor sleep/wake. We must explicitly recreate the source
+                    // to force a new duplicator acquisition.
+                    let source_recreated =
+                        if let Some(info) = self.last_monitor_capture_info.clone() {
+                            tracing::info!(
+                                monitor_idx = info.monitor_idx,
+                                "Recreating monitor capture source to rebuild DXGI duplicator"
+                            );
+                            match self.recreate_monitor_capture_source(&info) {
+                                Ok(()) => {
+                                    tracing::info!("Successfully recreated monitor capture source");
+                                    true
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        e=?e,
+                                        "Failed to recreate monitor capture source; \
+                                         will try unpause without source recreation"
+                                    );
+                                    false
+                                }
+                            }
+                        } else {
+                            tracing::debug!(
+                                "No monitor capture info stored, skipping source recreation"
+                            );
+                            false
+                        };
+
                     match self.output.pause(false) {
                         Ok(()) => {
                             // Send VIDEO_RESUMED event to input log so data consumers
@@ -1950,14 +2005,14 @@ impl RecorderState {
                                 let _ = stream.send(InputEventType::VideoResumed);
                             }
                             self.access_lost_state = AccessLostState::Active;
-                            // If duplication is still broken, the logger
-                            // will latch the flag again on the very next
-                            // frame attempt and the Active-branch above
-                            // will re-pause. We explicitly do NOT remove
-                            // and re-add the source on a re-failure — the
-                            // task spec forbids it, and libobs's monitor-
-                            // capture source re-acquires a duplicator on
-                            // its own once access is granted again.
+                            // P0-2: Log whether we recreated the source for debugging
+                            if source_recreated {
+                                tracing::info!("DXGI duplicator rebuilt via source recreation");
+                            } else {
+                                tracing::debug!(
+                                    "Resumed without source recreation (relying on libobs recovery)"
+                                );
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -1972,6 +2027,64 @@ impl RecorderState {
                 false
             }
         }
+    }
+
+    /// P0-2: Recreate the monitor capture source after DXGI access-lost recovery
+    /// (monitor sleep/wake). On Win11 build 26200, libobs's monitor-capture source
+    /// does NOT reliably re-acquire the DXGI duplicator, so we must explicitly
+    /// recreate it.
+    ///
+    /// This updates the existing source with the monitor info, which forces
+    /// OBS to release the old duplicator and acquire a new one.
+    fn recreate_monitor_capture_source(&mut self, info: &MonitorCaptureInfo) -> eyre::Result<()> {
+        use libobs_simple::sources::windows::MonitorCaptureSourceUpdater;
+
+        // Get the current monitor list
+        let monitors = MonitorCaptureSourceBuilder::get_monitors().unwrap_or_default();
+
+        if monitors.is_empty() {
+            bail!("No monitors available for source recreation");
+        }
+
+        // Handle case where monitor count changed (e.g., user unplugged a monitor)
+        let monitor_idx = if info.monitor_idx >= monitors.len() {
+            tracing::warn!(
+                requested_idx = info.monitor_idx,
+                available_count = monitors.len(),
+                "Previously captured monitor no longer available, falling back to primary"
+            );
+            0
+        } else {
+            info.monitor_idx
+        };
+
+        let monitor = &monitors[monitor_idx];
+        tracing::info!(
+            monitor_idx,
+            monitor_count = monitors.len(),
+            ?monitor,
+            "Updating monitor capture source"
+        );
+
+        // Update the existing source with the monitor
+        let Some(ref mut source) = self.source else {
+            bail!("No source exists to update");
+        };
+
+        source
+            .create_updater::<MonitorCaptureSourceUpdater>()?
+            .set_monitor(monitor)
+            .update()?;
+
+        // Update the stored monitor info in case we fell back to primary
+        if monitor_idx != info.monitor_idx {
+            self.last_monitor_capture_info = Some(MonitorCaptureInfo {
+                monitor_idx,
+                monitor_count: monitors.len(),
+            });
+        }
+
+        Ok(())
     }
 
     fn check_hook_timeout(&mut self) -> bool {
@@ -2402,7 +2515,7 @@ fn prepare_source(
     mut last_source: Option<ObsSourceRef>,
     state: &SourceCreationState,
     last_state: Option<&SourceCreationState>,
-) -> Result<ObsSourceRef> {
+) -> Result<(ObsSourceRef, Option<MonitorCaptureInfo>)> {
     // v2.6.4: audio capture RE-ENABLED. The PRD audit requires a valid audio
     // track on every recording (QM3/QM4/V6/V7/U2). For GameHook/WGC this turns
     // the source's own audio tap (the "WASAPI process-loopback companion") back
@@ -2532,6 +2645,14 @@ fn prepare_source(
                     monitor
                 );
 
+                // P0-2: Return monitor capture info for DXGI session rebuild after
+                // monitor sleep/wake. We need to recreate the source with the
+                // same monitor when resuming from access-lost pause.
+                let monitor_info = Some(MonitorCaptureInfo {
+                    monitor_idx,
+                    monitor_count: monitors.len(),
+                });
+
                 // Log the effective DPI scale of the capture monitor so we can
                 // diagnose future "wrong resolution" / "blurry recording" reports.
                 // We are per-monitor-v2 DPI-aware (see build.rs), so Windows hands
@@ -2547,13 +2668,14 @@ fn prepare_source(
                         .create_updater::<MonitorCaptureSourceUpdater>()?
                         .set_monitor(monitor)
                         .update()?;
-                    Ok(source)
+                    return Ok((source, monitor_info));
                 } else {
                     tracing::info!("Creating new monitor capture source");
-                    obs_context
+                    let source = obs_context
                         .source_builder::<MonitorCaptureSourceBuilder, _>(OWL_MONITOR_CAPTURE_NAME)?
                         .set_monitor(monitor)
-                        .add_to_scene(scene)
+                        .add_to_scene(scene)?;
+                    return Ok((source, monitor_info));
                 }
             }
         }
@@ -2696,7 +2818,7 @@ fn prepare_source(
         }
     };
 
-    Ok(result?)
+    Ok((result?, None))
 }
 
 #[derive(Debug, serde::Serialize)]

@@ -1,0 +1,56 @@
+[package]
+name = "depth-hook"
+version = "0.1.0"
+edition = "2024"
+description = "Per-title DX12 depth-buffer capture for ground-truth 3D gameplay data"
+
+# ───────────────────────────────────────────────────────────────────────────
+# Structural moat layer for gamedata-recorder.
+#
+# Each DepthHookProfile added to this crate = one more title where we ship
+# ground-truth depth instead of ML-estimated depth. That is the premium that
+# justifies the $300–800/hr enriched-tier pricing and is the thing the
+# commodity Chinese network-café video farms cannot match without a DX12
+# reverse-engineering team of their own.
+#
+# Platform scope:
+#   - Real DX12 command-queue hooking is Windows-only (windows-rs + MinHook /
+#     detours-rs). All of that lives behind `#[cfg(windows)]` in `dx12::`.
+#   - On macOS / Linux, this crate compiles down to just the pure-Rust
+#     profile registry + types so `cargo check` stays green on the Mac
+#     developer box. That keeps CI and local dev fast; the Windows engineer
+#     fills in the actual hook.
+# ───────────────────────────────────────────────────────────────────────────
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+# Windows-only dependencies.
+#
+# DX12 hooking requires the `windows-rs` crate with Direct3D12 + DXGI
+# feature gates, plus an inline-hook engine (MinHook via detours-rs or
+# retour) to patch ID3D12CommandQueue::ExecuteCommandLists at runtime.
+# We intentionally DO NOT add those dependencies in this scaffold commit —
+# that pulls Windows-only build artifacts into every `cargo check` on Mac
+# and is better done by the Windows engineer who is also writing the
+# `dx12::hook` implementation and can validate linkage on their box.
+#
+# When the Windows engineer picks this up, the block below becomes:
+#
+#     [target.'cfg(windows)'.dependencies]
+#     windows = { workspace = true, features = [
+#         "Win32_Graphics_Direct3D12",
+#         "Win32_Graphics_Dxgi",
+#         "Win32_Graphics_Dxgi_Common",
+#     ] }
+#     retour = "0.3"   # or detours-rs = "0.1"
+#
+# Kept as TODO comment to make the seam explicit for code review.
+# TODO(windows-engineer): add windows = "0.62" + retour under cfg(windows)
+# TODO(windows-engineer): add constants.workspace = true if profile lookup
+#                         wants to cross-check against GAME_WHITELIST.
+
+[dev-dependencies]
+serde_json.workspace = true

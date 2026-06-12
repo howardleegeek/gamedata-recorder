@@ -2,7 +2,7 @@ use crate::{
     api::ApiClient,
     app_state::{
         AppState, AsyncRequest, ForegroundedGame, GitHubRelease, ListeningForNewHotkey,
-        RecordingStatus, UiUpdate,
+        RecordingStatus, RwLockExt as _, UiUpdate,
     },
     assets::load_cue_bytes,
     play_time::PlayTimeTransition,
@@ -104,7 +104,10 @@ async fn main(
         let encoders = recorder.available_video_encoders();
 
         {
-            let mut config = app_state.config.write().unwrap();
+            let mut config = app_state
+                .config
+                .write_safe()
+                .unwrap_or_else(|e| e.into_inner());
             // Reconcile the saved encoder against what OBS actually probed.
             // Previously this collapsed straight to software x264 whenever the
             // saved encoder was unavailable, which degraded e.g. a QSV-but-not-
@@ -209,6 +212,8 @@ async fn main(
         has_seen_any_input: false,
         actively_recording_window: None,
         last_auto_record_attempt: None,
+        last_hotkey_transition_instant: None,
+        crashed_game_info: None,
         user_stopped_game_exe: None,
         #[cfg(windows)]
         stability_tracker: None,
@@ -376,7 +381,8 @@ async fn main(
                         opener::open(&path).ok();
                     }
                     AsyncRequest::UpdateUnsupportedGames(new_games) => {
-                        let mut unsupported_games = app_state.unsupported_games.write().unwrap();
+                        let mut unsupported_games = app_state.unsupported_games.write_safe()
+                            .unwrap_or_else(|e| e.into_inner());
                         let old_game_count = unsupported_games.games.len();
                         *unsupported_games = new_games;
                         tracing::info!(
@@ -390,7 +396,8 @@ async fn main(
                         } else {
                             match valid_api_key_and_user_id.clone() {
                                 Some((api_key, user_id)) => {
-                                    let filters = app_state.upload_filters.read().unwrap();
+                                    let filters = app_state.upload_filters.read_safe()
+                                        .unwrap_or_else(|e| e.into_inner());
                                     let start_date = filters.start_date;
                                     let end_date = filters.end_date;
                                     drop(filters);
@@ -422,7 +429,8 @@ async fn main(
                         } else {
                             match valid_api_key_and_user_id.clone() {
                                 Some((api_key, user_id)) => {
-                                    let filters = app_state.upload_filters.read().unwrap();
+                                    let filters = app_state.upload_filters.read_safe()
+                                        .unwrap_or_else(|e| e.into_inner());
                                     let start_date = filters.start_date;
                                     let end_date = filters.end_date;
                                     drop(filters);
@@ -713,7 +721,8 @@ async fn main(
                             },
                             (false, _) => {
                                 tracing::info!("Offline mode disabled, going online");
-                                let api_key = app_state.config.read().unwrap().credentials.api_key.clone();
+                                let api_key = app_state.config.read_safe()
+                                    .unwrap_or_else(|e| e.into_inner()).credentials.api_key.clone();
                                 app_state.ui_update_tx.send(UiUpdate::UpdateUserId(Ok("Authenticating...".to_string()))).ok();
                                 app_state.async_request_tx.send(AsyncRequest::CancelOfflineBackoff).await.ok();
                                 app_state.async_request_tx.send(AsyncRequest::ValidateApiKey { api_key }).await.ok();
@@ -794,7 +803,8 @@ async fn main(
                             (true, true) => {
                                 let retry_count = app_state.offline.retry_count.load(Ordering::SeqCst);
                                 tracing::info!("Offline backoff retry #{} - attempting API validation", retry_count + 1);
-                                let api_key = app_state.config.read().unwrap().credentials.api_key.clone();
+                                let api_key = app_state.config.read_safe()
+                                    .unwrap_or_else(|e| e.into_inner()).credentials.api_key.clone();
                                 // Attempt validation
                                 let response = api_client.validate_api_key(&api_key).await;
                                 match response {
@@ -899,6 +909,15 @@ async fn main(
                                 );
                                 state.user_stopped_game_exe = None;
                             }
+                            // P0-3: Also clear crashed game info when switching games
+                            if state.crashed_game_info.is_some() {
+                                tracing::debug!(
+                                    old_game = ?state.crashed_game_info.map(|(exe, _)| exe),
+                                    new_game = ?exe_name,
+                                    "Clearing crashed_game_info: game changed"
+                                );
+                                state.crashed_game_info = None;
+                            }
                         }
                     }
                 }
@@ -911,15 +930,11 @@ async fn main(
                     && fg.is_recordable()
                     && fg.exe_name.is_some()
                 {
-                    *app_state
-                        .last_recordable_game
-                        .write()
-                        .unwrap_or_else(|p| p.into_inner()) = fg.exe_name.clone();
+                    *app_state.last_recordable_game.write_safe()
+                        .unwrap_or_else(|e| e.into_inner()) = fg.exe_name.clone();
                 }
-                *app_state
-                    .last_foregrounded_game
-                    .write()
-                    .unwrap_or_else(|p| p.into_inner()) = foregrounded;
+                *app_state.last_foregrounded_game.write_safe()
+                    .unwrap_or_else(|e| e.into_inner()) = foregrounded;
                 // Tick state machine
                 if let Some((to_state, task)) = state.tick().await {
                     if let Err(e) = state.handle_transition(to_state).await {
@@ -951,7 +966,10 @@ fn enable_window_capture_for_game(app_state: &AppState, game_exe: &str) -> Resul
         .unwrap_or_else(|| game_exe.to_string())
         .to_lowercase();
 
-    let mut config = app_state.config.write().unwrap();
+    let mut config = app_state
+        .config
+        .write_safe()
+        .unwrap_or_else(|e| e.into_inner());
     let game_config = config
         .preferences
         .games
@@ -1049,6 +1067,13 @@ struct State {
     actively_recording_window: Option<HWND>,
     /// Cooldown for auto-record: prevents rapid start/stop churn on unhookable games
     last_auto_record_attempt: Option<Instant>,
+    /// Tracks when the last hotkey-triggered state transition occurred to
+    /// prevent race conditions from rapid F9 presses (P0-1 fix).
+    last_hotkey_transition_instant: Option<Instant>,
+    /// P0-3: Track game that was being recorded when it crashed/stopped,
+    /// and when it stopped. Used to bypass cooldown/stability gates when the
+    /// same game restarts, enabling instant recording resume.
+    crashed_game_info: Option<(String, Instant)>,
     /// Suppresses auto-record for this game after user manually stopped it.
     /// Cleared when the foreground game changes.
     user_stopped_game_exe: Option<String>,
@@ -1122,6 +1147,12 @@ const AUTO_RECORD_PROCESS_ALIVE_SECS: u64 = 20;
 /// record to fire within seconds of launch.
 #[cfg(windows)]
 const AUTO_RECORD_TEST_GAME_STEM: &str = "test_game";
+
+/// Minimum time between hotkey-triggered state transitions to prevent
+/// race conditions from rapid F9 presses. This ensures the async
+/// transition completes before another one can start.
+const HOTKEY_TRANSITION_THROTTLE_MS: u64 = 200;
+
 impl State {
     async fn on_input(&mut self, e: Event) {
         let (start_key, stop_key) = match self.app_state.config.read() {
@@ -1141,6 +1172,21 @@ impl State {
         self.has_seen_any_input = true;
         if let Err(e) = match (&self.recording_state, e.key_press_keycode()) {
             (RecordingState::Idle, key) if key == start_key => {
+                // P0-1: Throttle hotkey transitions to prevent race conditions
+                // from rapid F9 presses. Ensure at least HOTKEY_TRANSITION_THROTTLE_MS
+                // has passed since the last hotkey-triggered transition.
+                if let Some(last) = self.last_hotkey_transition_instant {
+                    let elapsed = last.elapsed().as_millis() as u64;
+                    if elapsed < HOTKEY_TRANSITION_THROTTLE_MS {
+                        tracing::debug!(
+                            elapsed_ms = elapsed,
+                            throttle_ms = HOTKEY_TRANSITION_THROTTLE_MS,
+                            "Ignoring start hotkey press: throttled (too soon since last transition)"
+                        );
+                        return;
+                    }
+                }
+
                 if self.app_state.is_out_of_date.load(Ordering::SeqCst) {
                     // Don't block recording with a modal dialog — it steals game focus
                     // and causes the user to be kicked back to desktop.
@@ -1153,6 +1199,19 @@ impl State {
                 self.handle_transition(RecordingState::Recording).await
             }
             (RecordingState::Recording | RecordingState::Paused { .. }, key) if key == stop_key => {
+                // P0-1: Throttle stop hotkey as well
+                if let Some(last) = self.last_hotkey_transition_instant {
+                    let elapsed = last.elapsed().as_millis() as u64;
+                    if elapsed < HOTKEY_TRANSITION_THROTTLE_MS {
+                        tracing::debug!(
+                            elapsed_ms = elapsed,
+                            throttle_ms = HOTKEY_TRANSITION_THROTTLE_MS,
+                            "Ignoring stop hotkey press: throttled (too soon since last transition)"
+                        );
+                        return;
+                    }
+                }
+
                 // Remember which game the user manually stopped so auto-record
                 // won't immediately restart it (cleared when foreground game changes)
                 let fg = self
@@ -1214,10 +1273,14 @@ impl State {
             .unwrap_or_default()
             {
                 // game closed
+                // P0-3: Track the crashed game so we can auto-record it immediately
+                // when it restarts, without waiting for cooldown/stability gates.
                 tracing::info!(
                     pid = recording.pid().0,
-                    "Game process no longer exists, stopping recording"
+                    game = %game_name,
+                    "Game process no longer exists, stopping recording and tracking for auto-resume"
                 );
+                self.crashed_game_info = Some((game_name.clone(), Instant::now()));
                 Some((RecordingState::Idle, "stop recording on game process exit"))
             } else if self.last_active.elapsed() > MAX_IDLE_DURATION && self.has_seen_any_input {
                 // idle timeout
@@ -1324,7 +1387,11 @@ impl State {
                     .to_lowercase();
 
                 let should_fallback = {
-                    let config = self.app_state.config.read().unwrap();
+                    let config = self
+                        .app_state
+                        .config
+                        .read_safe()
+                        .unwrap_or_else(|e| e.into_inner());
                     let game_config = config
                         .preferences
                         .games
@@ -1538,12 +1605,43 @@ impl State {
                     // window (e.g. CS2's 600x286 loader). test_game is an
                     // explicit carve-out so CI still triggers on its 720p
                     // client rect.
-                    #[cfg(windows)]
-                    let gate_passed = self.update_stability_tracker_and_check(game);
-                    #[cfg(not(windows))]
-                    let gate_passed = true;
+                    // P0-3: Check if this is the same game that recently crashed.
+                    // If so, bypass cooldown and reduce stability gates to enable instant resume.
+                    let is_crashed_game_restart =
+                        if let Some((ref crashed_exe, crash_time)) = self.crashed_game_info {
+                            if let Some(ref exe_name) = game.exe_name {
+                                // Same game crashed within 2 minutes - enable instant resume
+                                exe_name == crashed_exe
+                                    && crash_time.elapsed() < std::time::Duration::from_secs(120)
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
 
-                    if gate_passed {
+                    // For crashed game restarts, use reduced stability gates (2s instead of 20s)
+                    // and bypass the 30s cooldown entirely.
+                    let (gate_passed, skip_cooldown) = if is_crashed_game_restart {
+                        tracing::info!(
+                            game = ?game.exe_name,
+                            "Detected crashed game restart - using instant resume mode"
+                        );
+                        #[cfg(windows)]
+                        let passed = self.update_stability_tracker_and_check_reduced(game);
+                        #[cfg(not(windows))]
+                        let passed = true;
+                        (passed, true) // Skip cooldown for crashed game restarts
+                    } else {
+                        // Normal auto-record path with full stability gates
+                        #[cfg(windows)]
+                        let passed = self.update_stability_tracker_and_check(game);
+                        #[cfg(not(windows))]
+                        let passed = true;
+                        (passed, false)
+                    };
+
+                    if gate_passed && (skip_cooldown || cooldown_elapsed) {
                         self.last_auto_record_attempt = Some(std::time::Instant::now());
                         tracing::info!(
                             game = ?game.exe_name,
@@ -1551,6 +1649,15 @@ impl State {
                         );
                         if let Err(e) = self.handle_transition(RecordingState::Recording).await {
                             tracing::error!(e=?e, "Failed to auto-start recording, cooldown 30s");
+                        } else {
+                            // P0-3: Clear crashed game info after successfully starting recording
+                            if is_crashed_game_restart {
+                                tracing::info!(
+                                    game = ?game.exe_name,
+                                    "Successfully resumed recording after crash, clearing crash tracking"
+                                );
+                                self.crashed_game_info = None;
+                            }
                         }
                     }
                 } else {
@@ -1624,7 +1731,15 @@ impl State {
             }
             (RecordingState::Recording, RecordingState::Idle) => {
                 // Stop recording and return to Idle
-                let honk = self.app_state.config.read().unwrap().preferences.honk;
+                // P0-3: Clear crashed game info on user-initiated stop (not crash)
+                self.crashed_game_info = None;
+                let honk = self
+                    .app_state
+                    .config
+                    .read_safe()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .preferences
+                    .honk;
                 let session_path = stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
@@ -1649,7 +1764,13 @@ impl State {
                 // Pause recording (due to idle or unfocused window)
                 // Check if this was due to idle timeout before we stop
                 let due_to_idle = self.last_active.elapsed() > MAX_IDLE_DURATION;
-                let honk = self.app_state.config.read().unwrap().preferences.honk;
+                let honk = self
+                    .app_state
+                    .config
+                    .read_safe()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .preferences
+                    .honk;
                 let session_path = stop_recording_with_notification(
                     &mut self.recorder,
                     &self.input_capture,
@@ -1657,7 +1778,11 @@ impl State {
                     &mut self.cue_cache,
                 )
                 .await?;
-                *self.app_state.state.write().unwrap() = RecordingStatus::Paused;
+                *self
+                    .app_state
+                    .state
+                    .write_safe()
+                    .unwrap_or_else(|e| e.into_inner()) = RecordingStatus::Paused;
                 // Notify play time tracker of pause (with idle buffer cancellation if due to idle)
                 self.app_state
                     .play_time_state
@@ -1682,9 +1807,19 @@ impl State {
                     self.recorder.recording().is_none(),
                     "Paused->Idle: recorder still has active recording"
                 );
-                let honk = self.app_state.config.read().unwrap().preferences.honk;
+                let honk = self
+                    .app_state
+                    .config
+                    .read_safe()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .preferences
+                    .honk;
                 // When user stop keys recording while paused, or when the paused app closes
-                *self.app_state.state.write().unwrap() = RecordingStatus::Stopped;
+                *self
+                    .app_state
+                    .state
+                    .write_safe()
+                    .unwrap_or_else(|e| e.into_inner()) = RecordingStatus::Stopped;
                 // Play a mild version of the stop recording cue to signal we're done
                 let stop_recording_cue = self
                     .app_state
@@ -1732,8 +1867,8 @@ impl State {
                 let unsupported_games = self
                     .app_state
                     .unsupported_games
-                    .read()
-                    .unwrap_or_else(|p| p.into_inner())
+                    .read_safe()
+                    .unwrap_or_else(|e| e.into_inner())
                     .clone();
                 let _ = stop_recording_with_notification(
                     &mut self.recorder,
@@ -1778,6 +1913,8 @@ impl State {
                 ));
             }
         };
+        // P0-1: Update the hotkey transition timestamp after successful transition
+        self.last_hotkey_transition_instant = Some(Instant::now());
         Ok(())
     }
 
@@ -1978,6 +2115,120 @@ impl State {
         true
     }
 
+    /// P0-3: Reduced stability gate for crashed game restarts. Same logic as
+    /// `update_stability_tracker_and_check` but with much shorter timeouts (2s
+    /// instead of 10s/20s) to enable instant recording resume when a game restarts.
+    #[cfg(windows)]
+    fn update_stability_tracker_and_check_reduced(
+        &mut self,
+        game: &crate::app_state::ForegroundedGame,
+    ) -> bool {
+        const REDUCED_STABLE_SECS: u64 = 2;
+        const REDUCED_PROCESS_ALIVE_SECS: u64 = 2;
+
+        let Some(exe_name) = game.exe_name.as_deref() else {
+            return false;
+        };
+
+        // test_game carve-out: instant resume even for CI
+        let stem = std::path::Path::new(exe_name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if stem == AUTO_RECORD_TEST_GAME_STEM && crate::config::ci_mode() {
+            return true;
+        }
+
+        // Sample the current client rect
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.is_invalid() {
+            return false;
+        }
+        let (w, h) = match get_recording_base_resolution(hwnd) {
+            Ok(wh) => wh,
+            Err(_) => return false,
+        };
+
+        let now = Instant::now();
+        let meets_threshold = w >= AUTO_RECORD_MIN_WIDTH && h >= AUTO_RECORD_MIN_HEIGHT;
+
+        // For crashed game restarts, we're more lenient: if the window
+        // is already at threshold, fire immediately. Otherwise, wait 2s.
+        let bound_to_same_exe = self
+            .stability_tracker
+            .as_ref()
+            .is_some_and(|t| t.exe_name == exe_name);
+
+        if !bound_to_same_exe {
+            if meets_threshold {
+                self.stability_tracker = Some(StabilityTracker {
+                    exe_name: exe_name.to_string(),
+                    last_wh: (w, h),
+                    stable_since: now,
+                    process_spawned: now,
+                });
+                tracing::info!(
+                    game = ?exe_name,
+                    width = w,
+                    height = h,
+                    "Reduced stability gate: crashed game restart, window already at threshold - firing immediately"
+                );
+                return true; // Fire immediately for crashed game restarts
+            }
+            // Bootstrap tracker even if below threshold
+            self.stability_tracker = Some(StabilityTracker {
+                exe_name: exe_name.to_string(),
+                last_wh: (w, h),
+                stable_since: now,
+                process_spawned: now,
+            });
+            return false;
+        }
+
+        let tracker = self.stability_tracker.as_mut().unwrap();
+
+        if !meets_threshold {
+            tracker.last_wh = (w, h);
+            tracker.stable_since = now;
+            return false;
+        }
+
+        let (lw, lh) = tracker.last_wh;
+        if w > lw || h > lh || w < lw || h < lh {
+            tracker.last_wh = (w, h);
+            tracker.stable_since = now;
+            return false;
+        }
+
+        // Check reduced gates (2s instead of 10s/20s)
+        let stable_for = now.saturating_duration_since(tracker.stable_since);
+        let alive_for = now.saturating_duration_since(tracker.process_spawned);
+        let stable_required = Duration::from_secs(REDUCED_STABLE_SECS);
+        let alive_required = Duration::from_secs(REDUCED_PROCESS_ALIVE_SECS);
+
+        if stable_for < stable_required || alive_for < alive_required {
+            tracing::debug!(
+                game = ?exe_name,
+                stable_ms = stable_for.as_millis() as u64,
+                alive_ms = alive_for.as_millis() as u64,
+                "Reduced stability gate: waiting (2s gates)"
+            );
+            return false;
+        }
+
+        tracing::info!(
+            game = ?exe_name,
+            width = w,
+            height = h,
+            stable_secs = stable_for.as_secs(),
+            "Crashed game restart stable at {}x{} for {}s — firing auto-record",
+            w,
+            h,
+            stable_for.as_secs()
+        );
+        true
+    }
+
     /// Triggers auto-upload if the preference is enabled.
     /// Should be called after a recording is completed/saved. The
     /// `session_path` identifies the session that just finished and is used
@@ -2093,7 +2344,10 @@ fn notify_of_recording_state_change(
     if should_play_sound {
         // Get selected cue filenames
         let cue_filename = {
-            let cfg = app_state.config.read().unwrap();
+            let cfg = app_state
+                .config
+                .read_safe()
+                .unwrap_or_else(|e| e.into_inner());
             if is_recording {
                 cfg.preferences.audio_cues.start_recording.clone()
             } else {
@@ -2114,8 +2368,14 @@ fn play_cue(
     ) -> Box<dyn Source + Send + 'static>,
 ) {
     // Apply configured honk volume (0-255 -> 0.0-1.0)
-    let volume =
-        (app_state.config.read().unwrap().preferences.honk_volume as f32 / 255.0).clamp(0.0, 1.0);
+    let volume = (app_state
+        .config
+        .read_safe()
+        .unwrap_or_else(|e| e.into_inner())
+        .preferences
+        .honk_volume as f32
+        / 255.0)
+        .clamp(0.0, 1.0);
 
     sink.set_volume(volume);
 
@@ -2534,7 +2794,10 @@ async fn wait_for_consent(
 
     loop {
         let guard = {
-            let config = app_state.config.read().unwrap();
+            let config = app_state
+                .config
+                .read_safe()
+                .unwrap_or_else(|e| e.into_inner());
             crate::config::consent_guard_from_config(&config)
         };
         if guard.is_granted() {
