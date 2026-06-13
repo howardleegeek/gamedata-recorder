@@ -458,6 +458,9 @@ pub mod filename {
         /// implementations produce byte-for-byte equivalent shapes for the
         /// same source data.
         pub const ACTION_CAMERA_JSON: &str = "action_camera.json";
+        /// Per-session game info sidecar (R5.1 P0 buyer contract).
+        /// Written alongside `metadata.json` when `route_type` is set.
+        pub const GAMEINFO: &str = "gameinfo.json";
     }
 
     pub mod persistent {

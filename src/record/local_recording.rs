@@ -278,6 +278,44 @@ fn parse_session_timestamp(folder_name: &str) -> Option<std::time::SystemTime> {
         .map(|secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
 }
 
+/// Best-effort version string extraction from a game window title.
+///
+/// Scans `window_name` for the first occurrence of a dotted numeric version
+/// pattern (e.g. `"Minecraft* 1.21.4"` → `"1.21.4"`, `"SomeGame v2.0"` →
+/// `"2.0"`). Returns `None` when no such pattern is found.
+fn parse_game_version(window_name: &str) -> Option<String> {
+    let bytes = window_name.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut dots = 0;
+        let mut valid = true;
+        while i < len {
+            if bytes[i].is_ascii_digit() {
+                i += 1;
+            } else if bytes[i] == b'.' {
+                dots += 1;
+                i += 1;
+                if i >= len || !bytes[i].is_ascii_digit() {
+                    valid = false;
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        if valid && dots >= 1 {
+            return Some(window_name[start..i].to_string());
+        }
+    }
+    None
+}
+
 /// Convert a `SystemTime` to Unix-epoch-UTC seconds as `f64`.
 ///
 /// This is the single, audited source of truth for every "utc"/"wall_clock"
@@ -1124,6 +1162,9 @@ impl LocalRecording {
         // Wall-clock strings in RFC 3339 for human-friendly audit trails.
         let wall_clock_start = chrono::DateTime::<chrono::Utc>::from(start_time).to_rfc3339();
         let wall_clock_end = chrono::DateTime::<chrono::Utc>::from(end_system_time).to_rfc3339();
+        // Clone for the gameinfo sidecar (R5.1) — `wall_clock_start` is moved
+        // into the Metadata struct below.
+        let gameinfo_started_at = wall_clock_start.clone();
 
         // Capture resolution is what we encoded — currently fixed by constants::RECORDING_*.
         // Exposed as a field so downstream tools don't have to hard-code the constant.
@@ -1281,6 +1322,46 @@ impl LocalRecording {
 
         let metadata_json = serde_json::to_string_pretty(&metadata_value)?;
         durable_write::write_atomic_async(&metadata_path, metadata_json.into_bytes()).await?;
+
+        // === GAMEINFO SIDECAR (R5.1, P0, buyer contract) ===
+        // Per-session `gameinfo.json` written alongside `metadata.json` only
+        // when `route_type` is set (tagged clips). Untagged clips (route_type
+        // is None) MUST NOT produce this file — same omit semantics as the
+        // `route_type` field in metadata.json.
+        if let Some(rt) = route_type {
+            let game_title = metadata_value["window_name"]
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    metadata_value["game_exe"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .trim_end_matches(".exe")
+                        .to_string()
+                });
+
+            let game_version: Option<String> = metadata_value["window_name"]
+                .as_str()
+                .and_then(parse_game_version);
+
+            let session_id = metadata_value["session_id"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+
+            let gameinfo = serde_json::json!({
+                "game_title": game_title,
+                "game_version": game_version,
+                "session_id": session_id,
+                "route_type": rt,
+                "started_at": gameinfo_started_at,
+                "duration_s": duration,
+            });
+
+            let gameinfo_path = recording_location.join(constants::filename::recording::GAMEINFO);
+            let gameinfo_json = serde_json::to_string_pretty(&gameinfo)?;
+            durable_write::write_atomic_async(&gameinfo_path, gameinfo_json.into_bytes()).await?;
+        }
 
         // Validate the recording immediately after stopping to create [`constants::filename::recording::INVALID`] file if needed
         tracing::info!("Validating recording at {}", recording_location.display());
@@ -1625,5 +1706,166 @@ mod durability_tests {
             new,
             "atomic write must fully replace the file, not merge"
         );
+    }
+}
+
+#[cfg(test)]
+mod parse_game_version_tests {
+    use super::parse_game_version;
+
+    #[test]
+    fn extracts_version_from_window_with_version() {
+        assert_eq!(
+            parse_game_version("Minecraft* 1.21.4"),
+            Some("1.21.4".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_two_part_version() {
+        assert_eq!(parse_game_version("SomeGame v2.0"), Some("2.0".to_string()));
+    }
+
+    #[test]
+    fn no_version_returns_none() {
+        assert_eq!(parse_game_version("No version here"), None);
+    }
+
+    #[test]
+    fn empty_string_returns_none() {
+        assert_eq!(parse_game_version(""), None);
+    }
+
+    #[test]
+    fn window_name_is_none_returns_none_for_game_version() {
+        // Verifying the Option chain: when window_name itself is absent,
+        // parse_game_version is never called (the spec says fall back to
+        // `game_exe` for title, `null` for version). This test just
+        // confirms the function handles a no-match gracefully.
+        assert_eq!(parse_game_version("javaw.exe"), None);
+    }
+
+    #[test]
+    fn extracts_first_version_when_multiple_present() {
+        assert_eq!(
+            parse_game_version("Game 1.0 (build 2.3.4)"),
+            Some("1.0".to_string())
+        );
+    }
+}
+
+#[cfg(test)]
+mod gameinfo_writer_tests {
+    use crate::util::durable_write;
+    use tempfile::TempDir;
+
+    /// Construct a gameinfo JSON value matching the R5.1 buyer schema.
+    /// Duplicated from the inline construction in
+    /// `write_metadata_and_validate` so we can verify the schema shape
+    /// without pulling in the full recording finalize path.
+    fn make_gameinfo_json(
+        game_title: &str,
+        game_version: Option<&str>,
+        session_id: &str,
+        route_type: u8,
+        started_at: &str,
+        duration_s: f64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "game_title": game_title,
+            "game_version": game_version,
+            "session_id": session_id,
+            "route_type": route_type,
+            "started_at": started_at,
+            "duration_s": duration_s,
+        })
+    }
+
+    #[test]
+    fn gameinfo_schema_has_all_six_fields_with_correct_types() {
+        let v = make_gameinfo_json(
+            "Minecraft",
+            Some("1.21.4"),
+            "test-session-001",
+            2,
+            "2026-06-01T12:00:00Z",
+            123.456,
+        );
+
+        assert_eq!(v["game_title"], "Minecraft");
+        assert_eq!(v["game_version"], "1.21.4");
+        assert_eq!(v["session_id"], "test-session-001");
+        assert_eq!(v["route_type"], 2);
+        assert_eq!(v["started_at"], "2026-06-01T12:00:00Z");
+        // duration_s is a float, not integer
+        assert!(v["duration_s"].is_number());
+        assert!((v["duration_s"].as_f64().unwrap() - 123.456).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gameinfo_schema_with_null_game_version() {
+        let v = make_gameinfo_json(
+            "eldenring",
+            None,
+            "test-session-002",
+            1,
+            "2026-06-01T13:00:00Z",
+            60.0,
+        );
+
+        assert_eq!(v["game_title"], "eldenring");
+        assert!(v["game_version"].is_null());
+        assert_eq!(v["route_type"], 1);
+        assert_eq!(v["duration_s"], 60.0);
+    }
+
+    #[test]
+    fn gameinfo_is_written_atomically_via_temp_rename() {
+        let session_dir = TempDir::new().expect("tempdir for fake session");
+        let gameinfo_path = session_dir
+            .path()
+            .join(constants::filename::recording::GAMEINFO);
+
+        let v = make_gameinfo_json(
+            "Minecraft",
+            Some("1.21.4"),
+            "session-atomic-001",
+            3,
+            "2026-06-01T14:00:00Z",
+            99.9,
+        );
+        let json = serde_json::to_string_pretty(&v).expect("serialize");
+
+        durable_write::write_atomic(&gameinfo_path, json.as_bytes())
+            .expect("atomic write should succeed");
+
+        // (a) Final file exists.
+        assert!(
+            gameinfo_path.exists(),
+            "gameinfo.json must exist after atomic write"
+        );
+
+        // (b) No `.tmp` leftover.
+        let orphan_tmps: Vec<_> = std::fs::read_dir(session_dir.path())
+            .expect("read session dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(
+            orphan_tmps.is_empty(),
+            "no tempfiles must leak after successful write, got: {orphan_tmps:?}"
+        );
+
+        // (c) Content round-trips through JSON with correct schema.
+        let read_back = std::fs::read_to_string(&gameinfo_path).expect("read gameinfo.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&read_back).expect("gameinfo.json must parse as JSON");
+        assert_eq!(parsed["game_title"], "Minecraft");
+        assert_eq!(parsed["game_version"], "1.21.4");
+        assert_eq!(parsed["session_id"], "session-atomic-001");
+        assert_eq!(parsed["route_type"], 3);
+        assert_eq!(parsed["started_at"], "2026-06-01T14:00:00Z");
+        assert!((parsed["duration_s"].as_f64().unwrap() - 99.9).abs() < 1e-9);
     }
 }
