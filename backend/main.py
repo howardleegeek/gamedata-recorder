@@ -64,9 +64,7 @@ if not DATABASE_URL:
     DB_PORT = os.getenv("DB_PORT", "5432")
     DB_NAME = os.getenv("DB_NAME", "gamedata")
     # URL-encode credentials to handle special characters in passwords
-    DATABASE_URL = (
-        f"postgresql+asyncpg://{DB_USER}:{quote(DB_PASSWORD, safe='')}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    )
+    DATABASE_URL = f"postgresql+asyncpg://{DB_USER}:{quote(DB_PASSWORD, safe='')}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 # Create database engine and session factory
 db_engine = create_async_db_engine(DATABASE_URL)
@@ -81,8 +79,8 @@ AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 # S3 client timeout configuration (prevents hanging requests)
 S3_TIMEOUT_CONFIG = BotoConfig(
     connect_timeout=10,  # seconds to establish connection
-    read_timeout=30,     # seconds to read data
-    retries={"max_attempts": 3, "mode": "adaptive"}
+    read_timeout=30,  # seconds to read data
+    retries={"max_attempts": 3, "mode": "adaptive"},
 )
 
 # Upload limits
@@ -255,7 +253,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 def sanitize_filename(filename: str) -> str:
     """Sanitize filename to prevent path traversal attacks.
-    
+
     Extracts only the base filename (stripping all path components), removes
     null bytes, and strips leading dots to prevent hidden file targeting.
     This is more secure than string replacement which can be bypassed.
@@ -285,9 +283,7 @@ def sanitize_filename(filename: str) -> str:
 def generate_token(user_id: str) -> str:
     """Generate HMAC-signed token."""
     payload = f"{user_id}:{int(time.time())}"
-    sig = hmac.new(
-        API_SECRET.encode(), payload.encode(), hashlib.sha256
-    ).hexdigest()
+    sig = hmac.new(API_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
     return f"{payload}:{sig}"
 
 
@@ -395,7 +391,9 @@ class UploadInitRequest(BaseModel):
 
     filename: str = Field(..., max_length=255)
     total_size_bytes: int = Field(..., gt=0)
-    chunk_size_bytes: Optional[int] = Field(33554432, gt=0, le=1073741824)  # Max 1GB per chunk
+    chunk_size_bytes: Optional[int] = Field(
+        33554432, gt=0, le=1073741824
+    )  # Max 1GB per chunk
     game_exe: Optional[str] = Field(None, max_length=255)
     video_duration_seconds: Optional[float] = Field(None, ge=0)
     video_width: Optional[int] = Field(None, ge=0)
@@ -462,30 +460,51 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    # Create user
+    # Create user — dev mode auto-activates so testers can login immediately
     user_id = f"user_{uuid.uuid4().hex[:12]}"
+    is_dev = ENVIRONMENT == "development"
     user = User(
         id=user_id,
         email=normalized_email,
         password_hash=hash_password(req.password),
         display_name=req.display_name,
-        status=UserStatus.PENDING_VERIFICATION,
+        status=UserStatus.ACTIVE if is_dev else UserStatus.PENDING_VERIFICATION,
         provider="email",
     )
 
     db.add(user)
+
+    if is_dev:
+        audit = AuditLog(
+            id=f"audit_{uuid.uuid4().hex[:12]}",
+            user_id=user_id,
+            action="user_registered",
+            resource_type="user",
+            resource_id=user_id,
+            details={"status": "active", "reason": "dev-auto-activated"},
+            status="success",
+        )
+        db.add(audit)
+
     await db.commit()
 
     # Generate token
     token = generate_token(user_id)
 
-    logger.info(f"New user registered: {user_id} ({normalized_email})")
+    logger.info(
+        f"New user registered: {user_id} ({normalized_email})"
+        + (" (dev auto-activated)" if is_dev else "")
+    )
 
     return {
         "token": token,
         "user_id": user_id,
         "email": normalized_email,
-        "message": "Registration successful. Please verify your email.",
+        "message": (
+            "Registration successful."
+            if is_dev
+            else "Registration successful. Please verify your email."
+        ),
     }
 
 
@@ -497,9 +516,7 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
 
     # Find user by email with row lock to prevent TOCTOU race on status check
     result = await db.execute(
-        select(User)
-        .where(User.email == normalized_email)
-        .with_for_update()
+        select(User).where(User.email == normalized_email).with_for_update()
     )
     user = result.scalar_one_or_none()
 
@@ -547,12 +564,14 @@ async def get_me(current_user: User = Depends(get_current_user)):
         "balance_usd": round(current_user.balance_usd, 2),
         "total_earned_usd": round(current_user.total_earned_usd, 2),
         "total_hours_recorded": round(current_user.total_hours_recorded, 2),
-        "created_at": current_user.created_at.isoformat()
-        if current_user.created_at
-        else None,
-        "last_login_at": current_user.last_login_at.isoformat()
-        if current_user.last_login_at
-        else None,
+        "created_at": (
+            current_user.created_at.isoformat() if current_user.created_at else None
+        ),
+        "last_login_at": (
+            current_user.last_login_at.isoformat()
+            if current_user.last_login_at
+            else None
+        ),
     }
 
 
@@ -585,9 +604,7 @@ async def upload_init(
             detail=f"Upload too large: {req.total_size_bytes} bytes (max {MAX_UPLOAD_BYTES})",
         )
     chunk_size = req.chunk_size_bytes or 33554432
-    total_chunks = min(
-        max(1, math.ceil(req.total_size_bytes / chunk_size)), MAX_CHUNKS
-    )
+    total_chunks = min(max(1, math.ceil(req.total_size_bytes / chunk_size)), MAX_CHUNKS)
 
     # Sanitize filename to prevent path traversal
     safe_filename = sanitize_filename(req.filename)
@@ -698,7 +715,9 @@ async def upload_chunk(
     if chunk_number < 1:
         raise HTTPException(status_code=400, detail="chunk_number must be >= 1")
     if chunk_number > MAX_CHUNKS:
-        raise HTTPException(status_code=400, detail=f"chunk_number exceeds maximum ({MAX_CHUNKS})")
+        raise HTTPException(
+            status_code=400, detail=f"chunk_number exceeds maximum ({MAX_CHUNKS})"
+        )
 
     # Find upload
     result = await db.execute(
@@ -715,7 +734,7 @@ async def upload_chunk(
     if chunk_number > upload.total_chunks:
         raise HTTPException(
             status_code=400,
-            detail=f"chunk_number exceeds total_chunks ({upload.total_chunks})"
+            detail=f"chunk_number exceeds total_chunks ({upload.total_chunks})",
         )
 
     if upload.status != UploadStatus.IN_PROGRESS:
@@ -796,7 +815,9 @@ async def upload_complete(
         game = game_result.scalar_one_or_none()
         if game:
             earnings_per_hour *= (
-                game.earnings_multiplier if game.earnings_multiplier is not None else 1.0
+                game.earnings_multiplier
+                if game.earnings_multiplier is not None
+                else 1.0
             )
 
     earnings = round(duration_hours * earnings_per_hour, 2)
@@ -880,7 +901,9 @@ async def earnings_history(
     if page < 1:
         raise HTTPException(status_code=400, detail="page must be >= 1")
     if per_page < 1 or per_page > 100:
-        raise HTTPException(status_code=400, detail="per_page must be between 1 and 100")
+        raise HTTPException(
+            status_code=400, detail="per_page must be between 1 and 100"
+        )
     offset = (page - 1) * per_page
 
     result = await db.execute(
@@ -943,7 +966,9 @@ async def list_uploads(
     if page < 1:
         raise HTTPException(status_code=400, detail="page must be >= 1")
     if per_page < 1 or per_page > 100:
-        raise HTTPException(status_code=400, detail="per_page must be between 1 and 100")
+        raise HTTPException(
+            status_code=400, detail="per_page must be between 1 and 100"
+        )
     query = select(Upload).where(Upload.user_id == current_user.id)
 
     if status:
@@ -1115,6 +1140,8 @@ if __name__ == "__main__":
     try:
         port = int(port_str)
     except ValueError:
-        logger.error(f"Invalid PORT environment variable: '{port_str}'. Using default 8080.")
+        logger.error(
+            f"Invalid PORT environment variable: '{port_str}'. Using default 8080."
+        )
         port = 8080
     uvicorn.run(app, host="0.0.0.0", port=port)
