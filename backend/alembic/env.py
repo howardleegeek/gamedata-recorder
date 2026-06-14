@@ -37,7 +37,9 @@ def get_database_url():
     database_url = os.getenv("DATABASE_URL")
     if database_url:
         # Ensure asyncpg driver - handle both 'postgres://' and 'postgresql://' prefixes
-        if database_url.startswith("postgres://") and not database_url.startswith("postgresql://"):
+        if database_url.startswith("postgres://") and not database_url.startswith(
+            "postgresql://"
+        ):
             database_url = database_url.replace(
                 "postgres://", "postgresql+asyncpg://", 1
             )
