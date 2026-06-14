@@ -64,9 +64,7 @@ if not DATABASE_URL:
     DB_PORT = os.getenv("DB_PORT", "5432")
     DB_NAME = os.getenv("DB_NAME", "gamedata")
     # URL-encode credentials to handle special characters in passwords
-    DATABASE_URL = (
-        f"postgresql+asyncpg://{DB_USER}:{quote(DB_PASSWORD, safe='')}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    )
+    DATABASE_URL = f"postgresql+asyncpg://{DB_USER}:{quote(DB_PASSWORD, safe='')}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 # Create database engine and session factory
 db_engine = create_async_db_engine(DATABASE_URL)
@@ -81,8 +79,8 @@ AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 # S3 client timeout configuration (prevents hanging requests)
 S3_TIMEOUT_CONFIG = BotoConfig(
     connect_timeout=10,  # seconds to establish connection
-    read_timeout=30,     # seconds to read data
-    retries={"max_attempts": 3, "mode": "adaptive"}
+    read_timeout=30,  # seconds to read data
+    retries={"max_attempts": 3, "mode": "adaptive"},
 )
 
 # Upload limits
@@ -255,7 +253,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 def sanitize_filename(filename: str) -> str:
     """Sanitize filename to prevent path traversal attacks.
-    
+
     Extracts only the base filename (stripping all path components), removes
     null bytes, and strips leading dots to prevent hidden file targeting.
     This is more secure than string replacement which can be bypassed.
@@ -285,9 +283,7 @@ def sanitize_filename(filename: str) -> str:
 def generate_token(user_id: str) -> str:
     """Generate HMAC-signed token."""
     payload = f"{user_id}:{int(time.time())}"
-    sig = hmac.new(
-        API_SECRET.encode(), payload.encode(), hashlib.sha256
-    ).hexdigest()
+    sig = hmac.new(API_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
     return f"{payload}:{sig}"
 
 
@@ -395,7 +391,9 @@ class UploadInitRequest(BaseModel):
 
     filename: str = Field(..., max_length=255)
     total_size_bytes: int = Field(..., gt=0)
-    chunk_size_bytes: Optional[int] = Field(33554432, gt=0, le=1073741824)  # Max 1GB per chunk
+    chunk_size_bytes: Optional[int] = Field(
+        33554432, gt=0, le=1073741824
+    )  # Max 1GB per chunk
     game_exe: Optional[str] = Field(None, max_length=255)
     video_duration_seconds: Optional[float] = Field(None, ge=0)
     video_width: Optional[int] = Field(None, ge=0)
@@ -426,6 +424,53 @@ class PayoutRequest(BaseModel):
     amount_usd: float = Field(..., gt=0)
     method: str = Field(..., pattern="^(paypal|stripe|bank_transfer)$")
     method_details: Optional[dict] = None
+
+
+# --- Tracker Upload Request/Response Models ---
+# Contract source: src/api/multipart_upload.rs (recorder is source of truth)
+
+
+class TrackerInitRequest(BaseModel):
+    """Matches InitMultipartUploadRequest from recorder src/api/multipart_upload.rs."""
+
+    filename: str = Field(..., max_length=255)
+    content_type: str = Field(default="application/x-tar", max_length=100)
+    total_size_bytes: int = Field(..., gt=0)
+    chunk_size_bytes: Optional[int] = Field(None, gt=0)
+    tags: Optional[List[str]] = None
+    video_filename: Optional[str] = Field(None, max_length=255)
+    control_filename: Optional[str] = Field(None, max_length=255)
+    video_duration_seconds: Optional[float] = Field(None, ge=0)
+    video_width: Optional[int] = Field(None, ge=0)
+    video_height: Optional[int] = Field(None, ge=0)
+    video_codec: Optional[str] = Field(None, max_length=50)
+    video_fps: Optional[float] = Field(None, ge=0)
+    additional_metadata: Optional[dict] = None
+    uploading_recorder_version: Optional[str] = Field(None, max_length=50)
+    uploader_hwid: Optional[str] = Field(None, max_length=255)
+    upload_timestamp: Optional[str] = Field(None, max_length=50)
+
+
+class TrackerChunkRequest(BaseModel):
+    """Matches UploadMultipartChunkRequest from recorder."""
+
+    upload_id: str = Field(..., max_length=36)
+    chunk_number: int = Field(..., ge=1)
+    chunk_hash: Optional[str] = Field(None, max_length=64)
+
+
+class TrackerChunkEtag(BaseModel):
+    """Single chunk etag inside CompleteMultipartUploadRequest."""
+
+    chunk_number: int
+    etag: str
+
+
+class TrackerCompleteRequest(BaseModel):
+    """Matches CompleteMultipartUploadRequest from recorder."""
+
+    upload_id: str = Field(..., max_length=36)
+    chunk_etags: List[TrackerChunkEtag] = Field(default=[])
 
 
 # --- Endpoints ---
@@ -497,9 +542,7 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
 
     # Find user by email with row lock to prevent TOCTOU race on status check
     result = await db.execute(
-        select(User)
-        .where(User.email == normalized_email)
-        .with_for_update()
+        select(User).where(User.email == normalized_email).with_for_update()
     )
     user = result.scalar_one_or_none()
 
@@ -547,12 +590,14 @@ async def get_me(current_user: User = Depends(get_current_user)):
         "balance_usd": round(current_user.balance_usd, 2),
         "total_earned_usd": round(current_user.total_earned_usd, 2),
         "total_hours_recorded": round(current_user.total_hours_recorded, 2),
-        "created_at": current_user.created_at.isoformat()
-        if current_user.created_at
-        else None,
-        "last_login_at": current_user.last_login_at.isoformat()
-        if current_user.last_login_at
-        else None,
+        "created_at": (
+            current_user.created_at.isoformat() if current_user.created_at else None
+        ),
+        "last_login_at": (
+            current_user.last_login_at.isoformat()
+            if current_user.last_login_at
+            else None
+        ),
     }
 
 
@@ -585,9 +630,7 @@ async def upload_init(
             detail=f"Upload too large: {req.total_size_bytes} bytes (max {MAX_UPLOAD_BYTES})",
         )
     chunk_size = req.chunk_size_bytes or 33554432
-    total_chunks = min(
-        max(1, math.ceil(req.total_size_bytes / chunk_size)), MAX_CHUNKS
-    )
+    total_chunks = min(max(1, math.ceil(req.total_size_bytes / chunk_size)), MAX_CHUNKS)
 
     # Sanitize filename to prevent path traversal
     safe_filename = sanitize_filename(req.filename)
@@ -698,7 +741,9 @@ async def upload_chunk(
     if chunk_number < 1:
         raise HTTPException(status_code=400, detail="chunk_number must be >= 1")
     if chunk_number > MAX_CHUNKS:
-        raise HTTPException(status_code=400, detail=f"chunk_number exceeds maximum ({MAX_CHUNKS})")
+        raise HTTPException(
+            status_code=400, detail=f"chunk_number exceeds maximum ({MAX_CHUNKS})"
+        )
 
     # Find upload
     result = await db.execute(
@@ -715,7 +760,7 @@ async def upload_chunk(
     if chunk_number > upload.total_chunks:
         raise HTTPException(
             status_code=400,
-            detail=f"chunk_number exceeds total_chunks ({upload.total_chunks})"
+            detail=f"chunk_number exceeds total_chunks ({upload.total_chunks})",
         )
 
     if upload.status != UploadStatus.IN_PROGRESS:
@@ -796,7 +841,9 @@ async def upload_complete(
         game = game_result.scalar_one_or_none()
         if game:
             earnings_per_hour *= (
-                game.earnings_multiplier if game.earnings_multiplier is not None else 1.0
+                game.earnings_multiplier
+                if game.earnings_multiplier is not None
+                else 1.0
             )
 
     earnings = round(duration_hours * earnings_per_hour, 2)
@@ -819,6 +866,282 @@ async def upload_complete(
         "quality_score": 0.85,  # Placeholder
         "status": "completed",
         "hours_recorded": round(duration_hours, 2),
+    }
+
+
+# --- Shared S3 Helpers ---
+
+
+def _make_s3_client():
+    """Create S3 client with configured timeout and credentials."""
+    return boto3.client(
+        "s3",
+        region_name=S3_REGION,
+        aws_access_key_id=AWS_ACCESS_KEY,
+        aws_secret_access_key=AWS_SECRET_KEY,
+        config=S3_TIMEOUT_CONFIG,
+    )
+
+
+def _generate_single_presigned_url(
+    s3_key: str, s3_upload_id: str, chunk_number: int
+) -> str:
+    """Generate a presigned URL for a single chunk upload."""
+    s3 = _make_s3_client()
+    try:
+        return s3.generate_presigned_url(
+            "upload_part",
+            Params={
+                "Bucket": S3_BUCKET,
+                "Key": s3_key,
+                "UploadId": s3_upload_id,
+                "PartNumber": chunk_number,
+            },
+            ExpiresIn=86400,
+        )
+    finally:
+        s3.close()
+
+
+# --- Tracker Upload Endpoints ---
+# Contract: recorder calls these paths. Response fields match what
+# src/api/multipart_upload.rs deserialises (InitMultipartUploadResponse,
+# UploadMultipartChunkResponse, CompleteMultipartUploadResponse,
+# AbortMultipartUploadResponse).
+
+
+@app.post("/tracker/upload/game_control/multipart/init")
+async def tracker_upload_init(
+    req: TrackerInitRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Initialize multipart upload (recorder contract)."""
+    upload_id = str(uuid.uuid4())
+    game_control_id = str(uuid.uuid4())
+
+    if req.total_size_bytes > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Upload too large: {req.total_size_bytes} bytes (max {MAX_UPLOAD_BYTES})",
+        )
+
+    chunk_size = req.chunk_size_bytes or 33554432
+    total_chunks = min(max(1, math.ceil(req.total_size_bytes / chunk_size)), MAX_CHUNKS)
+    safe_filename = sanitize_filename(req.filename)
+
+    # Store recorder-specific fields in metadata JSONB
+    meta = {}
+    if req.additional_metadata:
+        meta["additional_metadata"] = req.additional_metadata
+    if req.tags:
+        meta["tags"] = req.tags
+    if req.video_filename:
+        meta["video_filename"] = req.video_filename
+    if req.control_filename:
+        meta["control_filename"] = req.control_filename
+    if req.content_type:
+        meta["content_type"] = req.content_type
+    if req.upload_timestamp:
+        meta["upload_timestamp"] = req.upload_timestamp
+
+    upload = Upload(
+        id=upload_id,
+        user_id=current_user.id,
+        game_control_id=game_control_id,
+        filename=safe_filename,
+        total_size_bytes=req.total_size_bytes,
+        chunk_size_bytes=chunk_size,
+        total_chunks=total_chunks,
+        video_duration_seconds=req.video_duration_seconds,
+        video_width=req.video_width,
+        video_height=req.video_height,
+        video_codec=req.video_codec,
+        video_fps=req.video_fps,
+        recorder_version=req.uploading_recorder_version,
+        hardware_id=req.uploader_hwid,
+        upload_metadata=meta if meta else None,
+        status=UploadStatus.IN_PROGRESS,
+    )
+
+    db.add(upload)
+    await db.commit()
+
+    # Init S3 multipart upload if credentials are configured
+    s3_key = None
+    s3_upload_id = None
+    if AWS_ACCESS_KEY and AWS_SECRET_KEY:
+        try:
+            s3_key = f"uploads/{current_user.id}/{upload_id}/{safe_filename}"
+            s3 = _make_s3_client()
+            try:
+                mpu = s3.create_multipart_upload(Bucket=S3_BUCKET, Key=s3_key)
+                s3_upload_id = mpu["UploadId"]
+
+                upload.s3_key = s3_key
+                upload.s3_upload_id = s3_upload_id
+                await db.commit()
+            finally:
+                s3.close()
+        except Exception as e:
+            logger.error(f"S3 error during tracker init: {e}")
+            upload.s3_key = None
+            upload.s3_upload_id = None
+            await db.commit()
+
+    logger.info(f"Tracker upload initialized: {upload_id} for user {current_user.id}")
+
+    return {
+        "upload_id": upload_id,
+        "game_control_id": game_control_id,
+        "total_chunks": total_chunks,
+        "chunk_size_bytes": chunk_size,
+        "expires_at": int(time.time()) + 86400,
+    }
+
+
+@app.post("/tracker/upload/game_control/multipart/chunk")
+async def tracker_upload_chunk(
+    req: TrackerChunkRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get presigned URL for a specific chunk (recorder contract)."""
+    if req.chunk_number > MAX_CHUNKS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"chunk_number exceeds maximum ({MAX_CHUNKS})",
+        )
+
+    result = await db.execute(
+        select(Upload).where(
+            and_(Upload.id == req.upload_id, Upload.user_id == current_user.id)
+        )
+    )
+    upload = result.scalar_one_or_none()
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    if req.chunk_number > upload.total_chunks:
+        raise HTTPException(
+            status_code=400,
+            detail=f"chunk_number exceeds total_chunks ({upload.total_chunks})",
+        )
+
+    if upload.status != UploadStatus.IN_PROGRESS:
+        raise HTTPException(
+            status_code=400, detail=f"Upload is already {upload.status.value}"
+        )
+
+    upload_url = None
+    if AWS_ACCESS_KEY and AWS_SECRET_KEY and upload.s3_upload_id:
+        try:
+            upload_url = _generate_single_presigned_url(
+                upload.s3_key, upload.s3_upload_id, req.chunk_number
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate tracker chunk URL: {e}")
+            raise HTTPException(status_code=500, detail="Failed to generate upload URL")
+
+    return {
+        "upload_url": upload_url,
+        "chunk_number": req.chunk_number,
+        "expires_at": int(time.time()) + 86400,
+    }
+
+
+@app.post("/tracker/upload/game_control/multipart/complete")
+async def tracker_upload_complete(
+    req: TrackerCompleteRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Complete upload and calculate earnings (recorder contract)."""
+    result = await db.execute(
+        select(Upload)
+        .where(and_(Upload.id == req.upload_id, Upload.user_id == current_user.id))
+        .with_for_update()
+    )
+    upload = result.scalar_one_or_none()
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    if upload.status != UploadStatus.IN_PROGRESS:
+        raise HTTPException(
+            status_code=400, detail=f"Upload is already {upload.status.value}"
+        )
+
+    upload.status = UploadStatus.COMPLETED
+    upload.completed_at = datetime.utcnow()
+
+    raw_duration = max(0, upload.video_duration_seconds or 0)
+    duration_hours = min(raw_duration / 3600, 8.0)
+
+    earnings_per_hour = 0.50
+    earnings = round(duration_hours * earnings_per_hour, 2)
+    upload.earnings_usd = earnings
+
+    current_user.balance_usd += earnings
+    current_user.total_earned_usd += earnings
+    current_user.total_hours_recorded += duration_hours
+
+    await db.commit()
+
+    object_key = (
+        upload.s3_key
+        or upload.local_path
+        or f"uploads/{current_user.id}/{upload.id}/{upload.filename}"
+    )
+
+    logger.info(f"Tracker upload completed: {req.upload_id}, earnings: ${earnings}")
+
+    return {
+        "success": True,
+        "game_control_id": upload.game_control_id,
+        "object_key": object_key,
+        "message": "Upload completed successfully",
+        "verified": None,
+    }
+
+
+@app.delete("/tracker/upload/game_control/multipart/abort/{upload_id}")
+async def tracker_upload_abort(
+    upload_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Abort multipart upload (recorder contract)."""
+    result = await db.execute(
+        select(Upload)
+        .where(and_(Upload.id == upload_id, Upload.user_id == current_user.id))
+        .with_for_update()
+    )
+    upload = result.scalar_one_or_none()
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    if upload.s3_upload_id and upload.s3_key and AWS_ACCESS_KEY and AWS_SECRET_KEY:
+        try:
+            s3 = _make_s3_client()
+            try:
+                s3.abort_multipart_upload(
+                    Bucket=S3_BUCKET,
+                    Key=upload.s3_key,
+                    UploadId=upload.s3_upload_id,
+                )
+            finally:
+                s3.close()
+        except Exception as e:
+            logger.warning(f"Failed to abort S3 multipart upload: {e}")
+
+    upload.status = UploadStatus.ABORTED
+    await db.commit()
+
+    logger.info(f"Upload aborted: {upload_id} by user {current_user.id}")
+
+    return {
+        "success": True,
+        "message": "Upload aborted successfully",
     }
 
 
@@ -880,7 +1203,9 @@ async def earnings_history(
     if page < 1:
         raise HTTPException(status_code=400, detail="page must be >= 1")
     if per_page < 1 or per_page > 100:
-        raise HTTPException(status_code=400, detail="per_page must be between 1 and 100")
+        raise HTTPException(
+            status_code=400, detail="per_page must be between 1 and 100"
+        )
     offset = (page - 1) * per_page
 
     result = await db.execute(
@@ -943,7 +1268,9 @@ async def list_uploads(
     if page < 1:
         raise HTTPException(status_code=400, detail="page must be >= 1")
     if per_page < 1 or per_page > 100:
-        raise HTTPException(status_code=400, detail="per_page must be between 1 and 100")
+        raise HTTPException(
+            status_code=400, detail="per_page must be between 1 and 100"
+        )
     query = select(Upload).where(Upload.user_id == current_user.id)
 
     if status:
@@ -1115,6 +1442,8 @@ if __name__ == "__main__":
     try:
         port = int(port_str)
     except ValueError:
-        logger.error(f"Invalid PORT environment variable: '{port_str}'. Using default 8080.")
+        logger.error(
+            f"Invalid PORT environment variable: '{port_str}'. Using default 8080."
+        )
         port = 8080
     uvicorn.run(app, host="0.0.0.0", port=port)

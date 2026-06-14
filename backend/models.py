@@ -296,9 +296,13 @@ class Game(Base):
     def validate(self):
         """Validate game data constraints."""
         if self.demand_level < 1 or self.demand_level > 5:
-            raise ValueError(f"demand_level must be between 1 and 5, got {self.demand_level}")
+            raise ValueError(
+                f"demand_level must be between 1 and 5, got {self.demand_level}"
+            )
         if self.earnings_multiplier < 0:
-            raise ValueError(f"earnings_multiplier cannot be negative, got {self.earnings_multiplier}")
+            raise ValueError(
+                f"earnings_multiplier cannot be negative, got {self.earnings_multiplier}"
+            )
 
     # Metadata
     game_metadata: Mapped[Optional[dict]] = mapped_column(

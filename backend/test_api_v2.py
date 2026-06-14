@@ -12,16 +12,18 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, create_engine
+from sqlalchemy.pool import NullPool
 
 from main import app, get_db, Base
 from models import User, Upload, Game, UserStatus, UploadStatus
 
 # Test database
 TEST_DATABASE_URL = "postgresql+asyncpg://gamedata:gamedata@localhost:5432/gamedata"
+SYNC_DATABASE_URL = TEST_DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
 
 # Create test engine
-test_engine = create_async_engine(TEST_DATABASE_URL)
+test_engine = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool)
 TestSessionLocal = async_sessionmaker(
     test_engine, class_=AsyncSession, expire_on_commit=False
 )
@@ -46,21 +48,21 @@ async def cleanup_test_engine():
 @pytest_asyncio.fixture(scope="function")
 async def client():
     """Create test client."""
-    # Create tables
-    async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Create tables (sync engine avoids asyncpg ENUM transaction issues in PG18)
+    sync_engine = create_engine(SYNC_DATABASE_URL, poolclass=NullPool)
+    Base.metadata.drop_all(sync_engine)
+    Base.metadata.create_all(sync_engine)
+    sync_engine.dispose()
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as ac:
         yield ac
 
-    # Cleanup: delete test data
-    async with TestSessionLocal() as session:
-        await session.execute(delete(Upload))
-        await session.execute(delete(User))
-        await session.execute(delete(Game))
-        await session.commit()
+    # Cleanup: drop all tables via sync engine
+    sync_engine = create_engine(SYNC_DATABASE_URL, poolclass=NullPool)
+    Base.metadata.drop_all(sync_engine)
+    sync_engine.dispose()
 
 
 @pytest_asyncio.fixture
