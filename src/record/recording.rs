@@ -88,6 +88,14 @@ pub(crate) struct Recording {
     hwnd: HWND,
 }
 
+/// Returns `true` when a recording is a blank capture: the OBS recorder
+/// failed to hook the game window AND zero frames were logged. Blank
+/// captures happen when OBS never hooked the game window (Minecraft under
+/// HAGS, anti-cheat, etc.) — the mp4 is empty or all-black.
+pub(crate) fn is_blank_capture(recorder_had_error: bool, frame_count: Option<u64>) -> bool {
+    recorder_had_error && frame_count.map(|fc| fc == 0).unwrap_or(true)
+}
+
 impl Recording {
     pub(crate) async fn start(
         video_recorder: &mut dyn VideoRecorder,
@@ -497,6 +505,7 @@ impl Recording {
     ) -> Result<()> {
         let window_name = self.get_window_name();
         let mut result = recorder.stop_recording().await;
+        let recorder_had_error = result.is_err();
 
         // Snapshot the dropped-event count BEFORE consuming the writer. The
         // writer's `stop()` takes `self` by value, so once it errors we can no
@@ -768,6 +777,20 @@ impl Recording {
         }
 
         if let Err(e) = result {
+            let is_blank = is_blank_capture(recorder_had_error, frame_count);
+
+            if is_blank {
+                let loc = self.recording_location.clone();
+                tokio::fs::remove_dir_all(&loc).await.ok();
+                tracing::warn!(
+                    game = ?self.game_exe,
+                    location = %loc.display(),
+                    "Blank capture (0 frames, recorder failed). \
+                     Deleted recording folder — no INVALID marker left behind."
+                );
+                return Ok(());
+            }
+
             tracing::error!("Error while stopping recording, invalidating recording: {e}");
             // Best-effort write — may fail on disk full, which is acceptable.
             // Use atomic write so a partial INVALID marker from a second-level
@@ -1035,5 +1058,40 @@ pub fn get_monitor_resolution_for_hwnd(hwnd: HWND) -> Result<(u32, u32)> {
         // Step 3: primary monitor, physical pixels (also via EnumDisplaySettingsW).
         hardware_specs::get_primary_monitor_resolution()
             .context("Failed to get primary monitor resolution")
+    }
+}
+
+#[cfg(test)]
+mod is_blank_capture_tests {
+    use super::is_blank_capture;
+
+    #[test]
+    fn blank_when_recorder_error_and_zero_frames() {
+        assert!(is_blank_capture(true, Some(0)));
+    }
+
+    #[test]
+    fn blank_when_recorder_error_and_no_frame_count() {
+        assert!(is_blank_capture(true, None));
+    }
+
+    #[test]
+    fn not_blank_when_recorder_ok_even_with_zero_frames() {
+        assert!(!is_blank_capture(false, Some(0)));
+    }
+
+    #[test]
+    fn not_blank_when_recorder_error_but_has_frames() {
+        assert!(!is_blank_capture(true, Some(42)));
+    }
+
+    #[test]
+    fn not_blank_when_recorder_ok_with_frames() {
+        assert!(!is_blank_capture(false, Some(42)));
+    }
+
+    #[test]
+    fn not_blank_when_recorder_ok_no_frame_count() {
+        assert!(!is_blank_capture(false, None));
     }
 }

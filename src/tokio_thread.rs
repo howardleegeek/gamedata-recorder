@@ -210,6 +210,8 @@ async fn main(
         actively_recording_window: None,
         last_auto_record_attempt: None,
         user_stopped_game_exe: None,
+        current_recording_game_exe: None,
+        blank_capture_suppressed_exes: HashMap::new(),
         #[cfg(windows)]
         stability_tracker: None,
     };
@@ -886,7 +888,10 @@ async fn main(
                     }
                 };
 
-                // Clear user_stopped_game_exe if foreground game changed
+                // Clear per-game suppression flags when the foreground game changes.
+                // This covers both user_stopped (manual stop) and blank-capture
+                // suppression, so switching from a suppressed game to a different
+                // one always allows the new game to be auto-recorded.
                 if let Some(ref fg) = foregrounded {
                     if let Some(ref exe_name) = fg.exe_name {
                         if state.user_stopped_game_exe.as_ref() != Some(exe_name) {
@@ -899,6 +904,19 @@ async fn main(
                                 );
                                 state.user_stopped_game_exe = None;
                             }
+                        }
+                        // Also clear blank-capture suppression for the new game
+                        // if it was previously suppressed — a game switch means
+                        // the user interacted, so stale suppression is lifted.
+                        if state
+                            .blank_capture_suppressed_exes
+                            .contains_key(exe_name)
+                        {
+                            tracing::debug!(
+                                game = ?exe_name,
+                                "Clearing blank-capture suppression: foreground game changed"
+                            );
+                            state.blank_capture_suppressed_exes.remove(exe_name);
                         }
                     }
                 }
@@ -1052,6 +1070,16 @@ struct State {
     /// Suppresses auto-record for this game after user manually stopped it.
     /// Cleared when the foreground game changes.
     user_stopped_game_exe: Option<String>,
+    /// Exe name of the currently-active recording (set when recording starts,
+    /// cleared when it stops). Used to correlate a blank-capture auto-delete
+    /// back to the game so its suppression map entry can be populated.
+    current_recording_game_exe: Option<String>,
+    /// Per-exe blank-capture suppression map. When a recording is auto-deleted
+    /// as a blank capture (0 frames, recorder never hooked), the game's exe
+    /// is inserted here with the timestamp of the failure. Auto-record skips
+    /// games in this map for `BLANK_CAPTURE_SUPPRESS_SECS` (180 s). Cleared
+    /// on successful non-blank recording, or when the foreground game changes.
+    blank_capture_suppressed_exes: HashMap<String, Instant>,
     /// Auto-record stability tracker: ensures the game window has settled at
     /// a sane resolution (>=1280x720) for a consecutive window of time before
     /// we pin OBS base/output resolution to it. Without this gate, games like
@@ -1122,6 +1150,13 @@ const AUTO_RECORD_PROCESS_ALIVE_SECS: u64 = 20;
 /// record to fire within seconds of launch.
 #[cfg(windows)]
 const AUTO_RECORD_TEST_GAME_STEM: &str = "test_game";
+
+/// How long to suppress auto-record for a game that produced a blank capture
+/// (0 frames, recorder never hooked the window). Prevents rapid start/stop
+/// churn that otherwise creates a flood of auto-deleted empty folders for
+/// games like Minecraft under HAGS where GameHook repeatedly times out.
+const BLANK_CAPTURE_SUPPRESS_SECS: u64 = 180;
+
 impl State {
     async fn on_input(&mut self, e: Event) {
         let (start_key, stop_key) = match self.app_state.config.read() {
@@ -1482,6 +1517,12 @@ impl State {
         // Cooldown: wait 30 seconds after a failed attempt to avoid rapid start/stop churn
         // (e.g., unhookable games would otherwise create invalid folders every second).
         if self.recording_state == RecordingState::Idle {
+            // Clean up expired blank-capture suppression entries so a game
+            // can be retried once the suppression window has elapsed.
+            let suppression_deadline = Duration::from_secs(BLANK_CAPTURE_SUPPRESS_SECS);
+            self.blank_capture_suppressed_exes
+                .retain(|_, suppressed_at| suppressed_at.elapsed() < suppression_deadline);
+
             let cooldown_elapsed = self
                 .last_auto_record_attempt
                 .map(|t| t.elapsed() > std::time::Duration::from_secs(30))
@@ -1495,16 +1536,24 @@ impl State {
                     .unwrap()
                     .clone();
 
+                // Resolve the current foreground game's exe name once, used by
+                // both the user-stopped and blank-capture suppression checks.
+                let fg_exe = fg
+                    .as_ref()
+                    .and_then(|g| g.exe_name.as_deref())
+                    .map(|s| s.to_string());
+
                 // Check if user manually stopped this game (suppress auto-record)
-                let user_stopped_this_game = if let Some(ref game) = fg {
-                    if let Some(ref exe_name) = game.exe_name {
-                        self.user_stopped_game_exe.as_ref() == Some(exe_name)
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
+                let user_stopped_this_game = fg_exe
+                    .as_deref()
+                    .is_some_and(|exe| self.user_stopped_game_exe.as_deref() == Some(exe));
+
+                // Check if this game was recently blank-captured (suppress auto-record)
+                let blank_suppressed_this_game = fg_exe.as_deref().is_some_and(|exe| {
+                    self.blank_capture_suppressed_exes
+                        .get(exe)
+                        .is_some_and(|t| t.elapsed() < suppression_deadline)
+                });
 
                 if user_stopped_this_game {
                     // User manually stopped this game, don't auto-record until they switch games
@@ -1518,6 +1567,11 @@ impl State {
                     {
                         self.stability_tracker = None;
                     }
+                } else if blank_suppressed_this_game {
+                    tracing::debug!(
+                        game = ?fg.as_ref().and_then(|g| g.exe_name.clone()),
+                        "Skipping auto-record: blank-capture suppression active for this game"
+                    );
                 } else if let Some(ref game) = fg
                     && game.is_recordable()
                     && game.exe_name.is_some()
@@ -1606,6 +1660,8 @@ impl State {
                 .await?;
                 self.actively_recording_window =
                     self.recorder.recording().as_ref().map(|r| r.hwnd());
+                self.current_recording_game_exe =
+                    self.recorder.recording().map(|r| r.game_exe().to_string());
                 tracing::info!(
                     "Recording started with HWND {:?}",
                     self.actively_recording_window
@@ -1632,6 +1688,26 @@ impl State {
                     &mut self.cue_cache,
                 )
                 .await?;
+                // Detect blank capture: Recording::stop auto-deletes the
+                // folder when the recorder failed and 0 frames were logged.
+                // Insert a per-exe suppression so auto-record doesn't retry.
+                if let Some(ref exe) = self.current_recording_game_exe {
+                    let is_blank = session_path.as_ref().map(|p| !p.exists()).unwrap_or(false);
+                    if is_blank {
+                        tracing::warn!(
+                            game = ?exe,
+                            "Blank capture auto-detected: suppressing auto-record \
+                             for {BLANK_CAPTURE_SUPPRESS_SECS}s"
+                        );
+                        self.blank_capture_suppressed_exes
+                            .insert(exe.clone(), Instant::now());
+                    } else {
+                        // Successful non-blank recording: clear any prior
+                        // suppression so the game can auto-record again.
+                        self.blank_capture_suppressed_exes.remove(exe);
+                    }
+                }
+                self.current_recording_game_exe = None;
                 // Notify play time tracker of recording stop
                 self.app_state
                     .play_time_state
@@ -1657,6 +1733,10 @@ impl State {
                     &mut self.cue_cache,
                 )
                 .await?;
+                // Clear recording-game tracking since the recording is now paused.
+                // Don't update suppression map — the stop may have outlived the
+                // concept of "this game" (paused recordings cross game switches).
+                self.current_recording_game_exe = None;
                 *self.app_state.state.write().unwrap() = RecordingStatus::Paused;
                 // Notify play time tracker of pause (with idle buffer cancellation if due to idle)
                 self.app_state
@@ -1769,6 +1849,8 @@ impl State {
                     return Err(e);
                 }
                 self.last_active = Instant::now();
+                self.current_recording_game_exe =
+                    self.recorder.recording().map(|r| r.game_exe().to_string());
                 RecordingState::Recording
             }
             (old_state, new_state) => {
@@ -2598,5 +2680,72 @@ mod session_dir_name_tests {
             parts[3].chars().all(|c| c.is_ascii_hexdigit()),
             "suffix must be hex"
         );
+    }
+}
+
+#[cfg(test)]
+mod blank_suppression_tests {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn fresh_blank_entry_is_suppressed() {
+        let mut map: HashMap<String, Instant> = HashMap::new();
+        let exe = "Minecraft.exe".to_string();
+        let deadline = Duration::from_secs(180);
+
+        assert!(map.get(&exe).is_none());
+
+        map.insert(exe.clone(), Instant::now());
+
+        assert!(map.get(&exe).is_some_and(|t| t.elapsed() < deadline));
+    }
+
+    #[test]
+    fn blank_suppression_cleared_on_remove() {
+        let mut map: HashMap<String, Instant> = HashMap::new();
+        let exe = "Minecraft.exe".to_string();
+
+        map.insert(exe.clone(), Instant::now());
+        assert_eq!(map.len(), 1);
+
+        map.remove(&exe);
+        assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn retain_keeps_recent_entries() {
+        let deadline = Duration::from_secs(180);
+
+        let mut map: HashMap<String, Instant> = HashMap::new();
+        map.insert("fresh.exe".to_string(), Instant::now());
+        map.retain(|_, t| t.elapsed() < deadline);
+        assert_eq!(map.len(), 1);
+
+        let mut map2: HashMap<String, Instant> = HashMap::new();
+        map2.insert("zero_deadline.exe".to_string(), Instant::now());
+        map2.retain(|_, t| t.elapsed() < Duration::ZERO);
+        assert_eq!(map2.len(), 0);
+    }
+
+    #[test]
+    fn different_exes_are_independent() {
+        let mut map: HashMap<String, Instant> = HashMap::new();
+        let deadline = Duration::from_secs(180);
+
+        map.insert("game_a.exe".to_string(), Instant::now());
+
+        assert!(
+            map.get("game_a.exe")
+                .is_some_and(|t| t.elapsed() < deadline)
+        );
+        assert!(map.get("game_b.exe").is_none());
+
+        map.insert("game_b.exe".to_string(), Instant::now());
+        assert_eq!(map.len(), 2);
+
+        map.remove("game_a.exe");
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("game_b.exe"));
     }
 }
