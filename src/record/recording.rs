@@ -84,6 +84,16 @@ pub(crate) struct Recording {
     average_fps: Option<f64>,
     fps_sample_count: u64,
 
+    /// Monotonic nanoseconds elapsed at first video frame (captured right after
+    /// `video_recorder.start_recording()` returns — no `await` between the two
+    /// clock reads). Paired with `sync_unix_epoch_ns` to form a cross-stream
+    /// time-anchor for aligning the video event stream with the monotonic
+    /// input-event timeline.
+    sync_monotonic_ns: u64,
+    /// Unix-epoch nanoseconds (wall clock) captured at the SAME code point as
+    /// `sync_monotonic_ns` — read back-to-back with no await between them.
+    sync_unix_epoch_ns: u64,
+
     pid: Pid,
     hwnd: HWND,
 }
@@ -195,6 +205,16 @@ impl Recording {
             )
             .await?;
 
+        // Sync anchor: both clocks read back-to-back at the first-video-frame
+        // boundary (no await between them). This establishes the relationship
+        // between the monotonic stream timer and UTC wall time that downstream
+        // AI-training pipelines need to align video frames with input events.
+        let sync_monotonic_ns = start_instant.elapsed().as_nanos() as u64;
+        let sync_unix_epoch_ns = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+
         Ok(Self {
             input_writer,
             input_stream,
@@ -206,6 +226,8 @@ impl Recording {
             start_instant,
             average_fps: None,
             fps_sample_count: 0,
+            sync_monotonic_ns,
+            sync_unix_epoch_ns,
 
             pid,
             hwnd,
@@ -862,6 +884,8 @@ impl Recording {
             result.as_ref().ok().cloned(),
             frame_count,
             dropped_input_events,
+            self.sync_monotonic_ns,
+            self.sync_unix_epoch_ns,
         )
         .await?;
 

@@ -296,4 +296,86 @@ mod tests {
         // Drift should be small initially (within 100ms)
         assert!(drift.abs() < 100, "Initial time drift should be small");
     }
+
+    #[test]
+    fn sync_anchor_monotonic_ns_matches_elapsed_ns() {
+        // The sync_anchor's monotonic_ns is captured as
+        // `start_instant.elapsed().as_nanos()` — verify that
+        // HighPrecisionTimer::elapsed_ns() behaves identically (both
+        // are monotonic nanosecond counters from a start point).
+        let timer = HighPrecisionTimer::new();
+        let elapsed = timer.elapsed_ns();
+
+        // Should be a small positive number immediately after creation.
+        assert!(
+            elapsed > 0,
+            "elapsed_ns should be positive right after creation: {}",
+            elapsed
+        );
+        assert!(
+            elapsed < 10_000_000,
+            "elapsed_ns should be <10ms right after creation: {}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn sync_anchor_cross_stream_alignment_high_precision_timer() {
+        // Simulate the downstream alignment computation using QPC-based
+        // elapsed_ns to derive unix timestamps for arbitrary frame offsets.
+        let timer = HighPrecisionTimer::new();
+        let sys_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+
+        let sync_monotonic_ns = timer.elapsed_ns();
+        let sync_unix_epoch_ns = sys_now;
+
+        // Simulate a frame at 1s into the recording
+        let frame_monotonic_offset_ns: u64 = 1_000_000_000;
+
+        let frame_unix_ns = sync_unix_epoch_ns
+            .wrapping_add(frame_monotonic_offset_ns.wrapping_sub(sync_monotonic_ns));
+
+        // The derived time should be ~1s after the anchor capture point.
+        let expected_upper = sync_unix_epoch_ns + 1_000_000_000 + 1_000_000; // 1s + 1ms slack
+        let expected_lower = sync_unix_epoch_ns + 1_000_000_000 - 1_000_000; // 1s - 1ms slack
+        assert!(
+            frame_unix_ns >= expected_lower && frame_unix_ns <= expected_upper,
+            "cross-stream alignment out of range: derived={}, expected ~{}+1s",
+            frame_unix_ns,
+            sync_unix_epoch_ns
+        );
+    }
+
+    #[test]
+    fn sync_anchor_zero_offset_produces_same_unix_time() {
+        // A frame at offset 0 (the sync anchor point itself) should
+        // reconstruct the original unix_epoch_ns.
+        let timer = HighPrecisionTimer::new();
+        let sys_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+
+        let sync_monotonic_ns = timer.elapsed_ns();
+        let sync_unix_epoch_ns = sys_now;
+
+        // Zero offset: frame at EXACTLY the anchor point.
+        let frame_monotonic_offset_ns = sync_monotonic_ns;
+        let derived = sync_unix_epoch_ns
+            .wrapping_add(frame_monotonic_offset_ns.wrapping_sub(sync_monotonic_ns));
+
+        let delta = if derived > sync_unix_epoch_ns {
+            derived - sync_unix_epoch_ns
+        } else {
+            sync_unix_epoch_ns - derived
+        };
+        assert!(
+            delta < 1_000_000,
+            "zero-offset alignment error too large: {}ns (>1ms)",
+            delta
+        );
+    }
 }

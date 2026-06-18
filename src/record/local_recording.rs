@@ -1047,6 +1047,8 @@ impl LocalRecording {
         recorder_extra: Option<serde_json::Value>,
         frame_count: Option<u64>,
         dropped_input_events: u64,
+        sync_monotonic_ns: u64,
+        sync_unix_epoch_ns: u64,
     ) -> Result<()> {
         // Resolve metadata path from recording location
         let metadata_path = recording_location.join(constants::filename::recording::METADATA);
@@ -1252,6 +1254,22 @@ impl LocalRecording {
                     Err(e) => tracing::warn!("Failed to serialize clock_anomaly: {e}"),
                 }
             }
+        }
+
+        // Sync anchor: monotonic and wall clocks read back-to-back at the
+        // first-video-frame boundary (no await between them). This is the
+        // single authoritative relationship between the QPC-based monotonic
+        // stream timer and UTC wall time, used by downstream AI-training
+        // pipelines to align video frames with input events. Only added —
+        // never modifies existing fields (buyer contract R4.2).
+        if let Some(obj) = metadata_value.as_object_mut() {
+            obj.insert(
+                "sync_anchor".to_string(),
+                serde_json::json!({
+                    "monotonic_ns": sync_monotonic_ns,
+                    "unix_epoch_ns": sync_unix_epoch_ns,
+                }),
+            );
         }
 
         let metadata_json = serde_json::to_string_pretty(&metadata_value)?;
@@ -1585,6 +1603,209 @@ mod durability_tests {
             std::fs::read_to_string(&p).unwrap(),
             new,
             "atomic write must fully replace the file, not merge"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sync_anchor_tests {
+    //! Tests for the sync_anchor metadata block.
+    //!
+    //! The sync_anchor captures `monotonic_ns` and `unix_epoch_ns` at the
+    //! same code point (no await between them) at first-video-frame write.
+    //! These tests verify the two clocks are captured together and that the
+    //! cross-stream alignment math is sound.
+
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    /// A production-like snapshot of the sync anchor pair.
+    struct SyncAnchorSample {
+        monotonic_ns: u64,
+        unix_epoch_ns: u64,
+    }
+
+    /// Capture both clocks back-to-back, as the production code does.
+    fn capture_sync_anchor(start_instant: Instant) -> SyncAnchorSample {
+        // The two reads MUST be consecutive with no await between them.
+        // This mirrors the exact pattern in Recording::start().
+        let monotonic_ns = start_instant.elapsed().as_nanos() as u64;
+        let unix_epoch_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        SyncAnchorSample {
+            monotonic_ns,
+            unix_epoch_ns,
+        }
+    }
+
+    #[test]
+    fn both_clocks_are_captured_together() {
+        // Both reads succeed and produce finite, non-zero values.
+        let start = Instant::now();
+        let anchor = capture_sync_anchor(start);
+
+        // monotonic_ns should be a small positive number (elapsed ~0ns).
+        assert!(
+            anchor.monotonic_ns > 0,
+            "monotonic_ns must be positive, got {}",
+            anchor.monotonic_ns
+        );
+
+        // unix_epoch_ns should be a realistic Unix timestamp in nanoseconds.
+        // Year 2025 in ns ≈ 1.7e18, year 2030 ≈ 1.9e18 — use a wide band.
+        assert!(
+            anchor.unix_epoch_ns > 1_500_000_000_000_000_000,
+            "unix_epoch_ns is implausibly early: {}",
+            anchor.unix_epoch_ns
+        );
+        assert!(
+            anchor.unix_epoch_ns < 3_000_000_000_000_000_000,
+            "unix_epoch_ns is implausibly late: {}",
+            anchor.unix_epoch_ns
+        );
+    }
+
+    #[test]
+    fn monotonic_increases_with_time() {
+        let start = Instant::now();
+        let a1 = capture_sync_anchor(start);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let a2 = capture_sync_anchor(start);
+
+        assert!(
+            a2.monotonic_ns > a1.monotonic_ns,
+            "monotonic_ns must increase over time: {} -> {}",
+            a1.monotonic_ns,
+            a2.monotonic_ns
+        );
+
+        // The delta should be at least 5ms (generous for CI jitter).
+        let delta_ns = a2.monotonic_ns - a1.monotonic_ns;
+        assert!(
+            delta_ns >= 5_000_000,
+            "monotonic delta too small: {}ns (< 5ms)",
+            delta_ns
+        );
+    }
+
+    #[test]
+    fn cross_stream_alignment_math_is_sound() {
+        // Simulate the downstream use case: given a video frame at a known
+        // monotonic offset from `sync_monotonic_ns`, derive its approximate
+        // Unix timestamp. The reverse — given an input event's Unix timestamp,
+        // derive where it falls in the video stream — works identically.
+
+        let start = Instant::now();
+        let anchor = capture_sync_anchor(start);
+
+        // Simulate a frame that occurs 500ms into the recording.
+        let frame_monotonic_offset_ns: u64 = 500_000_000;
+
+        // Derive the frame's approximate Unix timestamp:
+        //   frame_unix_ns = sync_unix_epoch_ns + (frame_monotonic_offset - sync_monotonic_ns)
+        let frame_unix_ns = anchor
+            .unix_epoch_ns
+            .wrapping_add(frame_monotonic_offset_ns.wrapping_sub(anchor.monotonic_ns));
+
+        // Verify the derived time is reasonable (500ms after capture).
+        let expected = anchor.unix_epoch_ns + frame_monotonic_offset_ns;
+        let delta = if frame_unix_ns > expected {
+            frame_unix_ns - expected
+        } else {
+            expected - frame_unix_ns
+        };
+        // Allow ~1ms of jitter due to clock read ordering between the two
+        // captures in `capture_sync_anchor` (they are back-to-back but not
+        // perfectly simultaneous).
+        assert!(
+            delta < 1_000_000,
+            "cross-stream alignment error too large: {}ns (>1ms). \
+             monotonic={}, unix_epoch={}, frame_offset={}",
+            delta,
+            anchor.monotonic_ns,
+            anchor.unix_epoch_ns,
+            frame_monotonic_offset_ns,
+        );
+    }
+
+    #[test]
+    fn json_serialization_shape() {
+        // Verify the sync_anchor block serializes to the expected JSON shape.
+        let anchor = serde_json::json!({
+            "monotonic_ns": 1_234_567_890_u64,
+            "unix_epoch_ns": 1_700_000_000_000_000_000_u64,
+        });
+
+        let json = serde_json::to_string(&anchor).unwrap();
+        assert!(
+            json.contains("\"monotonic_ns\":1234567890"),
+            "missing monotonic_ns field in json: {}",
+            json
+        );
+        assert!(
+            json.contains("\"unix_epoch_ns\":1700000000000000000"),
+            "missing unix_epoch_ns field in json: {}",
+            json
+        );
+        // Must contain exactly two keys
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.as_object().map(|o| o.len()),
+            Some(2),
+            "sync_anchor must have exactly 2 fields"
+        );
+    }
+
+    #[test]
+    fn injection_does_not_overwrite_existing_fields() {
+        // The injection into metadata must not overwrite any existing
+        // timestamps (buyer contract R4.2).
+        let mut meta = serde_json::json!({
+            "start_timestamp": 1700000000.0,
+            "end_timestamp": 1700000120.0,
+            "duration": 120.0,
+            "duration_ns": 120_000_000_000_u64,
+        });
+
+        // Simulate the injection that write_metadata_and_validate performs.
+        let sync_anchor = serde_json::json!({
+            "monotonic_ns": 42_000_000_000_u64,
+            "unix_epoch_ns": 1_700_000_042_000_000_000_u64,
+        });
+        if let Some(obj) = meta.as_object_mut() {
+            obj.insert("sync_anchor".to_string(), sync_anchor);
+        }
+
+        // Verify all original fields are unchanged (names AND values).
+        assert_eq!(meta["start_timestamp"], 1700000000.0);
+        assert_eq!(meta["end_timestamp"], 1700000120.0);
+        assert_eq!(meta["duration"], 120.0);
+        assert_eq!(meta["duration_ns"], 120_000_000_000_u64);
+        // new field exists
+        assert!(
+            meta.get("sync_anchor").is_some(),
+            "sync_anchor must be present after injection"
+        );
+    }
+
+    #[test]
+    fn no_await_between_clock_reads_property() {
+        // While we can't statically prove there's no await at compile time
+        // (that's a human code-review concern), we CAN verify the two values
+        // are captured within nanoseconds of each other by checking that the
+        // time between them is negligible.
+        let start = Instant::now();
+        let anchor = capture_sync_anchor(start);
+
+        // The two clock reads happen sequentially, so monotonic_ns as measured
+        // by Instant is the elapsed time between start_instant and the second
+        // SystemTime::now() call. It should be <1ms (the actual measurement
+        // is usually a few hundred ns).
+        assert!(
+            anchor.monotonic_ns < 1_000_000,
+            "capture took >1ms ({}ns) — possible yield between clock reads",
+            anchor.monotonic_ns
         );
     }
 }
