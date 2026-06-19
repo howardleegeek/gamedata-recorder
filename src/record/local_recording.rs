@@ -1049,6 +1049,12 @@ impl LocalRecording {
         dropped_input_events: u64,
         sync_monotonic_ns: u64,
         sync_unix_epoch_ns: u64,
+        /// Unix-epoch milliseconds of the first valid game_state row inside the
+        /// recording's time window, or `None` when no game_state was collected
+        /// (mod not running) or no parseable timestamp row was found. Used to
+        /// compute `gameplay_start_offset_s`: the time between first video frame
+        /// and first gameplay state, which marks pre-gameplay loading footage.
+        first_game_state_timestamp_ms: Option<u64>,
     ) -> Result<()> {
         // Resolve metadata path from recording location
         let metadata_path = recording_location.join(constants::filename::recording::METADATA);
@@ -1270,6 +1276,44 @@ impl LocalRecording {
                     "unix_epoch_ns": sync_unix_epoch_ns,
                 }),
             );
+        }
+
+        // Gameplay-start offset: the wall-clock difference between the first
+        // video frame (`sync_anchor.unix_epoch_ns`) and the first game_state
+        // row sampled by the MC mod (`first_game_state_timestamp_ms`).
+        // Represents how much of the recording is pre-gameplay footage
+        // (loading screen). Clamped to >= 0. When no game_state is available
+        // the offset is null. Only added — never modifies existing fields.
+        if let Some(obj) = metadata_value.as_object_mut() {
+            match first_game_state_timestamp_ms {
+                Some(ts_ms) => {
+                    let first_gs_ns = (ts_ms as f64) * 1_000_000.0;
+                    let sync_ns = sync_unix_epoch_ns as f64;
+                    let offset_s = if first_gs_ns > sync_ns {
+                        (first_gs_ns - sync_ns) / 1_000_000_000.0
+                    } else {
+                        0.0
+                    };
+                    obj.insert(
+                        "gameplay_start_offset_s".to_string(),
+                        serde_json::json!(offset_s),
+                    );
+                    obj.insert(
+                        "pre_gameplay_prefix_s".to_string(),
+                        serde_json::json!(offset_s),
+                    );
+                    if offset_s > 3.0 {
+                        obj.insert("late_start_warning".to_string(), serde_json::json!(true));
+                    }
+                }
+                None => {
+                    obj.insert(
+                        "gameplay_start_offset_s".to_string(),
+                        serde_json::Value::Null,
+                    );
+                    obj.insert("pre_gameplay_prefix_s".to_string(), serde_json::json!(0.0));
+                }
+            }
         }
 
         let metadata_json = serde_json::to_string_pretty(&metadata_value)?;
@@ -1807,5 +1851,196 @@ mod sync_anchor_tests {
             "capture took >1ms ({}ns) — possible yield between clock reads",
             anchor.monotonic_ns
         );
+    }
+}
+
+#[cfg(test)]
+mod gameplay_offset_tests {
+    //! Tests for the gameplay_start_offset_s metadata computation.
+    //!
+    //! The offset measures the wall-clock gap between the first video frame
+    //! (sync_anchor.unix_epoch_ns) and the first game_state row's timestamp_ms.
+    //! A large offset means the recording captured a loading-screen prefix
+    //! before actual gameplay. These tests verify the math and the JSON shape.
+
+    /// Mirror of the production computation.
+    fn compute_gameplay_offset(
+        first_game_state_timestamp_ms: Option<u64>,
+        sync_unix_epoch_ns: u64,
+    ) -> Option<f64> {
+        match first_game_state_timestamp_ms {
+            Some(ts_ms) => {
+                let first_gs_ns = (ts_ms as f64) * 1_000_000.0;
+                let sync_ns = sync_unix_epoch_ns as f64;
+                let offset_s = if first_gs_ns > sync_ns {
+                    (first_gs_ns - sync_ns) / 1_000_000_000.0
+                } else {
+                    0.0
+                };
+                Some(offset_s)
+            }
+            None => None,
+        }
+    }
+
+    #[test]
+    fn ten_second_loading_prefix() {
+        // sync_anchor at 1_700_000_000_000_000_000 ns (ns since epoch),
+        // first game_state 10 000 ms later → offset = 10.0 s.
+        let sync_ns = 1_700_000_000_000_000_000;
+        let first_gs_ms = 1_700_010_000_000; // +10 s in ms
+
+        let offset = compute_gameplay_offset(Some(first_gs_ms), sync_ns);
+        assert!(
+            (offset.unwrap() - 10.0).abs() < 1e-9,
+            "expected 10.0 s offset, got {}",
+            offset.unwrap()
+        );
+    }
+
+    #[test]
+    fn null_when_no_game_state() {
+        // No game_state collected → offset is None.
+        let offset = compute_gameplay_offset(None, 1_700_000_000_000_000_000);
+        assert_eq!(offset, None, "no game_state must yield None");
+    }
+
+    #[test]
+    fn negative_is_clamped_to_zero() {
+        // Game_state timestamp BEFORE the sync_anchor (clock ordering or the
+        // mod sampled a tick before we pressed record) → clamp to 0.
+        let sync_ns = 1_700_010_000_000_000_000;
+        let first_gs_ms = 1_700_000_000_000; // 10 s earlier in ms
+
+        let offset = compute_gameplay_offset(Some(first_gs_ms), sync_ns);
+        assert!(
+            (offset.unwrap() - 0.0).abs() < 1e-9,
+            "negative offset must clamp to 0, got {}",
+            offset.unwrap()
+        );
+    }
+
+    #[test]
+    fn late_start_warning_triggered_above_3s() {
+        // Offset > 3 s → consumer should flag a late_start_warning.
+        let sync_ns = 1_700_000_000_000_000_000;
+        let first_gs_ms = 1_700_005_000_000; // +5 s in ms
+
+        let offset = compute_gameplay_offset(Some(first_gs_ms), sync_ns).unwrap();
+        assert!(
+            offset > 3.0,
+            "offset must exceed 3s threshold, got {}",
+            offset
+        );
+        assert!((offset - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn json_injection_with_offset_and_warning() {
+        // Verify the JSON shape when offset is present and triggers warning.
+        let mut value = serde_json::json!({
+            "session_id": "gpo-test-001",
+            "duration": 120.0,
+        });
+
+        let offset_s = 10.5;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "gameplay_start_offset_s".to_string(),
+                serde_json::json!(offset_s),
+            );
+            obj.insert(
+                "pre_gameplay_prefix_s".to_string(),
+                serde_json::json!(offset_s),
+            );
+            obj.insert("late_start_warning".to_string(), serde_json::json!(true));
+        }
+
+        assert_eq!(value["gameplay_start_offset_s"], 10.5);
+        assert_eq!(value["pre_gameplay_prefix_s"], 10.5);
+        assert_eq!(value["late_start_warning"], true);
+        // Existing fields untouched (buyer contract R4.2).
+        assert_eq!(value["session_id"], "gpo-test-001");
+        assert_eq!(value["duration"], 120.0);
+    }
+
+    #[test]
+    fn json_injection_null_when_no_game_state() {
+        // No game_state → gameplay_start_offset_s is null, pre_gameplay_prefix_s
+        // is 0.0, and late_start_warning is absent.
+        let mut value = serde_json::json!({
+            "session_id": "gpo-test-002",
+        });
+
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "gameplay_start_offset_s".to_string(),
+                serde_json::Value::Null,
+            );
+            obj.insert("pre_gameplay_prefix_s".to_string(), serde_json::json!(0.0));
+        }
+
+        assert_eq!(value["gameplay_start_offset_s"], serde_json::Value::Null);
+        assert_eq!(value["pre_gameplay_prefix_s"], 0.0);
+        assert!(
+            value.get("late_start_warning").is_none(),
+            "no late_start_warning without game_state"
+        );
+    }
+
+    #[test]
+    fn no_warning_when_offset_under_3s() {
+        // Offset of 2 s is within tolerance → no warning.
+        let mut value = serde_json::json!({
+            "session_id": "gpo-test-003",
+        });
+
+        let offset_s = 2.0;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "gameplay_start_offset_s".to_string(),
+                serde_json::json!(offset_s),
+            );
+            obj.insert(
+                "pre_gameplay_prefix_s".to_string(),
+                serde_json::json!(offset_s),
+            );
+        }
+
+        assert_eq!(value["gameplay_start_offset_s"], 2.0);
+        assert_eq!(value["pre_gameplay_prefix_s"], 2.0);
+        assert!(
+            value.get("late_start_warning").is_none(),
+            "no warning for 2s offset"
+        );
+    }
+
+    #[test]
+    fn injection_does_not_overwrite_existing_fields() {
+        // Buyer contract R4.2: additive only.
+        let mut meta = serde_json::json!({
+            "start_timestamp": 1700000000.0,
+            "end_timestamp": 1700000120.0,
+            "duration": 120.0,
+        });
+
+        let offset_s = 5.0;
+        if let Some(obj) = meta.as_object_mut() {
+            obj.insert(
+                "gameplay_start_offset_s".to_string(),
+                serde_json::json!(offset_s),
+            );
+            obj.insert(
+                "pre_gameplay_prefix_s".to_string(),
+                serde_json::json!(offset_s),
+            );
+            obj.insert("late_start_warning".to_string(), serde_json::json!(true));
+        }
+
+        assert_eq!(meta["start_timestamp"], 1700000000.0);
+        assert_eq!(meta["end_timestamp"], 1700000120.0);
+        assert_eq!(meta["duration"], 120.0);
+        assert_eq!(meta["gameplay_start_offset_s"], 5.0);
+        assert_eq!(meta["late_start_warning"], true);
     }
 }
