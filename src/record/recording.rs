@@ -406,6 +406,33 @@ impl Recording {
         out
     }
 
+    /// Extract the first valid `timestamp_ms` from a windowed game_state JSONL
+    /// buffer. Returns `None` when there are no parseable timestamp rows (or
+    /// the buffer is empty / contains only unparseable lines), signaling that
+    /// no gameplay-start offset can be derived for this recording.
+    ///
+    /// PARSING: same cheap one-field deserialize as
+    /// [`window_game_state_by_timestamp`] — no full-document parse of the pose
+    /// payload, and no new dependency.
+    fn first_game_state_timestamp_ms(game_state: &[u8]) -> Option<u64> {
+        #[derive(serde::Deserialize)]
+        struct TsOnly {
+            timestamp_ms: Option<u64>,
+        }
+        for line in game_state.split(|&b| b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(TsOnly {
+                timestamp_ms: Some(ts),
+            }) = serde_json::from_slice::<TsOnly>(line)
+            {
+                return Some(ts);
+            }
+        }
+        None
+    }
+
     /// Bounded TAIL read of a too-large `game_state.jsonl`, returning only
     /// COMPLETE JSONL lines that fall within the last `MAX_GAME_STATE_BYTES`.
     ///
@@ -598,6 +625,7 @@ impl Recording {
         // (see window_game_state_by_timestamp) — the shipped game_state lines up
         // with the mp4 instead of deferring that trim to the server. Absence is
         // non-fatal (mod off / not installed).
+        let mut first_game_state_timestamp_ms: Option<u64> = None;
         if let Some(home) = dirs::home_dir() {
             let mod_game_state = home
                 .join("Documents")
@@ -726,6 +754,10 @@ impl Recording {
                             complete
                         }
                     };
+
+                    // Extract first game_state timestamp for gameplay_start_offset.
+                    // Runs BEFORE windowed is consumed by write_atomic_async below.
+                    first_game_state_timestamp_ms = Self::first_game_state_timestamp_ms(&windowed);
 
                     let n = windowed.len();
                     // Atomic write (write-tmp → fsync → rename), same crash-safe
@@ -886,6 +918,7 @@ impl Recording {
             dropped_input_events,
             self.sync_monotonic_ns,
             self.sync_unix_epoch_ns,
+            first_game_state_timestamp_ms,
         )
         .await?;
 
